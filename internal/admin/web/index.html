@@ -248,6 +248,8 @@
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState("");
 
+      const [copied, setCopied] = useState(false);
+
       const start = async () => {
         setBusy(true); setErr("");
         try {
@@ -256,10 +258,19 @@
             body: JSON.stringify({ proxy_url: proxy, label }),
           });
           setSess(d);
-          window.open(d.auth_url, "_blank", "noopener");
           setStep(2);
         } catch (x) { setErr(x.message); }
         finally { setBusy(false); }
+      };
+
+      const copyUrl = async () => {
+        try {
+          await navigator.clipboard.writeText(sess.auth_url);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          // fallback: select the input so user can copy manually
+        }
       };
 
       const finish = async () => {
@@ -311,9 +322,28 @@
 
             ${step === 2 && html`
               <div class="text-sm text-slate-600 space-y-2">
-                <p>1. Complete the login in the tab that just opened.</p>
-                <p>2. After you authorize, Claude will redirect to <code class="mono break-all">http://localhost:54545/callback?code=…&amp;state=…</code>. That page will probably fail to load (no server listening). <b>That's fine.</b></p>
-                <p>3. Copy the <b>full URL from the browser address bar</b> (or just the <code class="mono">code#state</code> value Claude shows) and paste it below.</p>
+                <p><b>Step 1.</b> Copy the login URL below and open it in a browser where you can sign in to Claude.</p>
+              </div>
+              <label class="block">
+                <span class="text-sm text-slate-600">Login URL</span>
+                <div class="mt-1 flex gap-2">
+                  <input
+                    readonly
+                    onClick=${(e) => e.target.select()}
+                    class="flex-1 border rounded-lg px-3 py-2 mono text-xs bg-slate-50"
+                    value=${sess.auth_url}
+                  />
+                  <button onClick=${copyUrl} class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-50 whitespace-nowrap">${copied ? "Copied ✓" : "Copy"}</button>
+                </div>
+              </label>
+
+              <div class="text-sm text-slate-600 space-y-2 pt-2">
+                <p><b>Step 2.</b> After you authorize, Claude redirects to
+                <code class="mono break-all">http://localhost:54545/callback?code=…&amp;state=…</code>.
+                That page normally fails to load — <b>that's fine</b>.</p>
+                <p><b>Step 3.</b> Copy the <b>full URL from the browser address bar</b>
+                (or the <code class="mono">code#state</code> value Claude shows on its
+                manual-copy page) and paste it below.</p>
               </div>
               <label class="block">
                 <span class="text-sm text-slate-600">Callback URL or code#state</span>
@@ -325,12 +355,9 @@
                 ></textarea>
               </label>
               ${err && html`<div class="text-sm text-red-600 whitespace-pre-wrap">${err}</div>`}
-              <div class="flex justify-between gap-2 pt-2">
-                <button onClick=${() => window.open(sess.auth_url, "_blank", "noopener")} class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-50">Reopen login tab</button>
-                <div class="flex gap-2">
-                  <button onClick=${() => setStep(1)} class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">Back</button>
-                  <button disabled=${busy || !callback.trim()} onClick=${finish} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">${busy ? "Exchanging..." : "Finish"}</button>
-                </div>
+              <div class="flex justify-end gap-2 pt-2">
+                <button onClick=${() => setStep(1)} class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">Back</button>
+                <button disabled=${busy || !callback.trim()} onClick=${finish} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">${busy ? "Exchanging..." : "Finish"}</button>
               </div>
             `}
           </div>
