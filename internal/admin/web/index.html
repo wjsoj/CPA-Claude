@@ -6,6 +6,10 @@
   <title>CPA-Claude Admin</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
+    /* Tailwind's CDN default darkMode is "media" — tracks the OS / browser
+       preference automatically; no JS toggle needed. color-scheme hints
+       native form controls to render dark too. */
+    html { color-scheme: light dark; }
     body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
     [hidden] { display: none !important; }
     .badge { display:inline-block; padding:2px 8px; border-radius:9999px; font-size:11px; font-weight:600; }
@@ -14,7 +18,7 @@
     details>summary::-webkit-details-marker { display:none; }
   </style>
 </head>
-<body class="bg-slate-50 text-slate-800">
+<body class="bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-100">
   <div id="app"></div>
 
   <script type="module">
@@ -83,18 +87,18 @@
       };
       return html`
         <div class="min-h-screen flex items-center justify-center p-6">
-          <form onSubmit=${submit} class="bg-white shadow-xl rounded-2xl p-8 w-full max-w-sm space-y-4 border border-slate-200">
+          <form onSubmit=${submit} class="bg-white dark:bg-slate-800 shadow-xl rounded-2xl p-8 w-full max-w-sm space-y-4 border border-slate-200 dark:border-slate-700">
             <h1 class="text-xl font-semibold">CPA-Claude Admin</h1>
-            <p class="text-sm text-slate-500">Enter admin token to continue.</p>
+            <p class="text-sm text-slate-500 dark:text-slate-400">Enter admin token to continue.</p>
             <input
               type="password" autofocus
-              class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
+              class="w-full border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
               placeholder="admin token"
               value=${val}
               onInput=${(e) => setVal(e.target.value)}
             />
-            ${err && html`<div class="text-sm text-red-600">${err}</div>`}
-            <button type="submit" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-medium py-2 rounded-lg">Sign in</button>
+            ${err && html`<div class="text-sm text-red-600 dark:text-red-400">${err}</div>`}
+            <button type="submit" class="w-full bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-200 dark:hover:bg-slate-300 dark:text-slate-900 font-medium py-2 rounded-lg">Sign in</button>
           </form>
         </div>
       `;
@@ -102,7 +106,7 @@
 
     function Badge({ color = "slate", children }) {
       const palette = {
-        slate: "bg-slate-100 text-slate-700",
+        slate: "bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200",
         green: "bg-emerald-100 text-emerald-700",
         red:   "bg-red-100 text-red-700",
         amber: "bg-amber-100 text-amber-800",
@@ -133,33 +137,33 @@
       };
       return html`
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick=${onClose}>
-          <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
+          <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
             <div class="flex items-center justify-between">
               <h2 class="text-lg font-semibold">Edit credential</h2>
-              <button onClick=${onClose} class="text-slate-400 hover:text-slate-700">✕</button>
+              <button onClick=${onClose} class="text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200">✕</button>
             </div>
-            <div class="text-xs mono text-slate-500">${auth.id}</div>
+            <div class="text-xs mono text-slate-500 dark:text-slate-400">${auth.id}</div>
             <label class="block">
-              <span class="text-sm text-slate-600">Label</span>
-              <input class="mt-1 w-full border rounded-lg px-3 py-2" value=${label} onInput=${(e)=>setLabel(e.target.value)} />
+              <span class="text-sm text-slate-600 dark:text-slate-300">Label</span>
+              <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${label} onInput=${(e)=>setLabel(e.target.value)} />
             </label>
             <label class="block">
-              <span class="text-sm text-slate-600">Max concurrent sessions</span>
-              <input type="number" min="0" class="mt-1 w-full border rounded-lg px-3 py-2" value=${maxC} onInput=${(e)=>setMaxC(e.target.value)} />
-              <span class="text-xs text-slate-400">0 = unlimited</span>
+              <span class="text-sm text-slate-600 dark:text-slate-300">Max concurrent sessions</span>
+              <input type="number" min="0" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${maxC} onInput=${(e)=>setMaxC(e.target.value)} />
+              <span class="text-xs text-slate-400 dark:text-slate-500">0 = unlimited</span>
             </label>
             <label class="block">
-              <span class="text-sm text-slate-600">Proxy URL</span>
-              <input class="mt-1 w-full border rounded-lg px-3 py-2 mono" placeholder="http://host:port or socks5://host:port" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
+              <span class="text-sm text-slate-600 dark:text-slate-300">Proxy URL</span>
+              <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="http://host:port or socks5://host:port" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
             </label>
             <label class="flex items-center gap-2">
               <input type="checkbox" checked=${disabled} onChange=${(e)=>setDisabled(e.target.checked)} />
               <span class="text-sm">Disabled</span>
             </label>
-            ${err && html`<div class="text-sm text-red-600">${err}</div>`}
+            ${err && html`<div class="text-sm text-red-600 dark:text-red-400">${err}</div>`}
             <div class="flex justify-end gap-2 pt-2">
-              <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">Cancel</button>
-              <button disabled=${busy} onClick=${save} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">${busy ? "Saving..." : "Save"}</button>
+              <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700">Cancel</button>
+              <button disabled=${busy} onClick=${save} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-200 dark:hover:bg-slate-300 dark:text-slate-900 disabled:opacity-50">${busy ? "Saving..." : "Save"}</button>
             </div>
           </div>
         </div>
@@ -200,38 +204,38 @@
       };
       return html`
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick=${onClose}>
-          <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
+          <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-lg p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
             <div class="flex items-center justify-between">
               <h2 class="text-lg font-semibold">Add OAuth credential</h2>
-              <button onClick=${onClose} class="text-slate-400 hover:text-slate-700">✕</button>
+              <button onClick=${onClose} class="text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200">✕</button>
             </div>
             <input type="file" accept=".json,application/json" ref=${fileInputRef} onChange=${onFile} class="hidden" />
             <div class="flex gap-2">
-              <button onClick=${onPick} class="px-3 py-1.5 rounded-lg border border-slate-300 text-sm hover:bg-slate-50">Choose JSON file…</button>
-              <input class="flex-1 border rounded-lg px-3 py-2 mono text-sm" placeholder="filename (optional)" value=${filename} onInput=${(e)=>setFilename(e.target.value)} />
+              <button onClick=${onPick} class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm hover:bg-slate-50 dark:hover:bg-slate-700">Choose JSON file…</button>
+              <input class="flex-1 border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900 text-sm" placeholder="filename (optional)" value=${filename} onInput=${(e)=>setFilename(e.target.value)} />
             </div>
             <label class="block">
-              <span class="text-sm text-slate-600">or paste JSON</span>
-              <textarea class="mt-1 w-full border rounded-lg px-3 py-2 mono h-40" value=${content} onInput=${(e)=>setContent(e.target.value)} placeholder='{"type":"claude","access_token":"...","refresh_token":"...","email":"..."}'></textarea>
+              <span class="text-sm text-slate-600 dark:text-slate-300">or paste JSON</span>
+              <textarea class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono h-40 bg-white dark:bg-slate-900" value=${content} onInput=${(e)=>setContent(e.target.value)} placeholder='{"type":"claude","access_token":"...","refresh_token":"...","email":"..."}'></textarea>
             </label>
             <div class="grid grid-cols-2 gap-3">
               <label class="block">
-                <span class="text-sm text-slate-600">Label</span>
-                <input class="mt-1 w-full border rounded-lg px-3 py-2" value=${label} onInput=${(e)=>setLabel(e.target.value)} />
+                <span class="text-sm text-slate-600 dark:text-slate-300">Label</span>
+                <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${label} onInput=${(e)=>setLabel(e.target.value)} />
               </label>
               <label class="block">
-                <span class="text-sm text-slate-600">Max concurrent</span>
-                <input type="number" min="0" class="mt-1 w-full border rounded-lg px-3 py-2" value=${maxC} onInput=${(e)=>setMaxC(e.target.value)} />
+                <span class="text-sm text-slate-600 dark:text-slate-300">Max concurrent</span>
+                <input type="number" min="0" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${maxC} onInput=${(e)=>setMaxC(e.target.value)} />
               </label>
             </div>
             <label class="block">
-              <span class="text-sm text-slate-600">Proxy URL (optional)</span>
-              <input class="mt-1 w-full border rounded-lg px-3 py-2 mono" placeholder="http:// or socks5://" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
+              <span class="text-sm text-slate-600 dark:text-slate-300">Proxy URL (optional)</span>
+              <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="http:// or socks5://" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
             </label>
-            ${err && html`<div class="text-sm text-red-600 whitespace-pre-wrap">${err}</div>`}
+            ${err && html`<div class="text-sm text-red-600 dark:text-red-400 whitespace-pre-wrap">${err}</div>`}
             <div class="flex justify-end gap-2 pt-2">
-              <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">Cancel</button>
-              <button disabled=${busy || !content} onClick=${save} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">${busy ? "Uploading..." : "Add"}</button>
+              <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700">Cancel</button>
+              <button disabled=${busy || !content} onClick=${save} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-200 dark:hover:bg-slate-300 dark:text-slate-900 disabled:opacity-50">${busy ? "Uploading..." : "Add"}</button>
             </div>
           </div>
         </div>
@@ -279,8 +283,8 @@
       const cost = (v) => "$" + (v || 0).toFixed(4);
       const renderAgg = (a) => html`
         <span class="mono">${fmtInt(a.count)}</span> req · <span class="mono">${cost(a.cost_usd)}</span>
-        <span class="text-slate-500"> (in ${fmtInt(a.input_tokens)}/out ${fmtInt(a.output_tokens)})</span>
-        ${a.errors > 0 && html`<span class="text-red-600"> · ${fmtInt(a.errors)} err</span>`}
+        <span class="text-slate-500 dark:text-slate-400"> (in ${fmtInt(a.input_tokens)}/out ${fmtInt(a.output_tokens)})</span>
+        ${a.errors > 0 && html`<span class="text-red-600 dark:text-red-400"> · ${fmtInt(a.errors)} err</span>`}
       `;
 
       const sortedByClient = data ? Object.entries(data.by_client).sort(([,a],[,b]) => b.cost_usd - a.cost_usd) : [];
@@ -293,45 +297,45 @@
       const maxDayCost = Math.max(1e-9, ...sortedByDay.map(([, a]) => a.cost_usd));
 
       return html`
-        <section class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <div class="px-4 py-2 border-b border-slate-200 flex items-center justify-between">
+        <section class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 dark:border-slate-700 overflow-hidden">
+          <div class="px-4 py-2 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
             <h2 class="font-semibold">Requests</h2>
-            <span class="text-xs text-slate-400">${data ? `${fmtInt(data.scanned)} lines scanned · ${fmtInt(data.summary.count)} match` : ""}</span>
+            <span class="text-xs text-slate-400 dark:text-slate-500">${data ? `${fmtInt(data.scanned)} lines scanned · ${fmtInt(data.summary.count)} match` : ""}</span>
           </div>
-          <div class="p-4 grid grid-cols-1 md:grid-cols-6 gap-3 items-end border-b border-slate-100">
+          <div class="p-4 grid grid-cols-1 md:grid-cols-6 gap-3 items-end border-b border-slate-100 dark:border-slate-700/60">
             <label class="block">
-              <span class="text-xs text-slate-500">From</span>
-              <input type="date" class="mt-1 w-full border rounded-lg px-2 py-1.5" value=${from} onInput=${(e) => setFrom(e.target.value)} />
+              <span class="text-xs text-slate-500 dark:text-slate-400">From</span>
+              <input type="date" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-900" value=${from} onInput=${(e) => setFrom(e.target.value)} />
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">To</span>
-              <input type="date" class="mt-1 w-full border rounded-lg px-2 py-1.5" value=${to} onInput=${(e) => setTo(e.target.value)} />
+              <span class="text-xs text-slate-500 dark:text-slate-400">To</span>
+              <input type="date" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-900" value=${to} onInput=${(e) => setTo(e.target.value)} />
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">Client</span>
-              <select class="mt-1 w-full border rounded-lg px-2 py-1.5" value=${client} onChange=${(e) => setClient(e.target.value)}>
+              <span class="text-xs text-slate-500 dark:text-slate-400">Client</span>
+              <select class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-900" value=${client} onChange=${(e) => setClient(e.target.value)}>
                 <option value="">(any)</option>
                 ${clientsList.map((c) => html`<option value=${c}>${c}</option>`)}
               </select>
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">Model</span>
-              <select class="mt-1 w-full border rounded-lg px-2 py-1.5" value=${model} onChange=${(e) => setModel(e.target.value)}>
+              <span class="text-xs text-slate-500 dark:text-slate-400">Model</span>
+              <select class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-900" value=${model} onChange=${(e) => setModel(e.target.value)}>
                 <option value="">(any)</option>
                 ${modelsList.map((m) => html`<option value=${m}>${m}</option>`)}
               </select>
             </label>
             <label class="block">
-              <span class="text-xs text-slate-500">Entry limit</span>
-              <input type="number" min="1" max="5000" class="mt-1 w-full border rounded-lg px-2 py-1.5 mono text-xs" value=${limit} onInput=${(e) => setLimit(e.target.value)} />
+              <span class="text-xs text-slate-500 dark:text-slate-400">Entry limit</span>
+              <input type="number" min="1" max="5000" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 mono text-xs bg-white dark:bg-slate-900" value=${limit} onInput=${(e) => setLimit(e.target.value)} />
             </label>
-            <button disabled=${busy} onClick=${run} class="px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50">${busy ? "…" : "Query"}</button>
+            <button disabled=${busy} onClick=${run} class="px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-200 dark:text-slate-900 dark:hover:bg-slate-300 disabled:opacity-50">${busy ? "…" : "Query"}</button>
           </div>
 
-          ${err && html`<div class="p-3 bg-red-50 text-red-700 text-sm">${err}</div>`}
+          ${err && html`<div class="p-3 bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 text-sm">${err}</div>`}
 
           ${data && html`
-            <div class="p-4 grid grid-cols-2 md:grid-cols-5 gap-3 bg-slate-50 border-b border-slate-100">
+            <div class="p-4 grid grid-cols-2 md:grid-cols-5 gap-3 bg-slate-50 dark:bg-slate-900/40 border-b border-slate-100 dark:border-slate-700/60">
               ${[
                 ["Requests", fmtInt(data.summary.count)],
                 ["Total $", cost(data.summary.cost_usd)],
@@ -339,8 +343,8 @@
                 ["Output", fmtInt(data.summary.output_tokens)],
                 ["Errors", fmtInt(data.summary.errors)],
               ].map(([k, v]) => html`
-                <div class="bg-white rounded-lg border border-slate-200 px-3 py-2">
-                  <div class="text-[11px] text-slate-500">${k}</div>
+                <div class="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 dark:border-slate-700 px-3 py-2">
+                  <div class="text-[11px] text-slate-500 dark:text-slate-400">${k}</div>
                   <div class="text-lg font-semibold">${v}</div>
                 </div>
               `)}
@@ -348,8 +352,8 @@
           `}
 
           ${data && sortedByDay.length > 0 && html`
-            <div class="p-4 border-b border-slate-100">
-              <div class="text-sm font-medium text-slate-700 mb-2">Daily cost</div>
+            <div class="p-4 border-b border-slate-100 dark:border-slate-700/60">
+              <div class="text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">Daily cost</div>
               <div class="flex items-end gap-[3px] h-16">
                 ${sortedByDay.map(([day, a]) => {
                   const pct = Math.round((a.cost_usd / maxDayCost) * 100);
@@ -359,7 +363,7 @@
                   </div>`;
                 })}
               </div>
-              <div class="flex justify-between mt-1 text-[10px] text-slate-400 mono">
+              <div class="flex justify-between mt-1 text-[10px] text-slate-400 dark:text-slate-500 mono">
                 <span>${sortedByDay[0][0]}</span>
                 <span>${sortedByDay[sortedByDay.length - 1][0]}</span>
               </div>
@@ -367,29 +371,29 @@
           `}
 
           ${data && html`
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 border-b border-slate-100">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 border-b border-slate-100 dark:border-slate-700/60">
               <div>
-                <div class="text-sm font-medium text-slate-700 mb-2">By client</div>
-                ${sortedByClient.length === 0 ? html`<div class="text-xs text-slate-400">—</div>` :
+                <div class="text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">By client</div>
+                ${sortedByClient.length === 0 ? html`<div class="text-xs text-slate-400 dark:text-slate-500">—</div>` :
                   html`<table class="w-full text-xs">
                     ${sortedByClient.map(([k, a]) => html`
-                      <tr class="border-b border-slate-100">
-                        <td class="py-1.5 pr-3 font-medium">${k || html`<span class="text-slate-400">(unnamed)</span>`}</td>
+                      <tr class="border-b border-slate-100 dark:border-slate-700/60">
+                        <td class="py-1.5 pr-3 font-medium">${k || html`<span class="text-slate-400 dark:text-slate-500">(unnamed)</span>`}</td>
                         <td class="py-1.5 mono text-right">${cost(a.cost_usd)}</td>
-                        <td class="py-1.5 mono text-right text-slate-500 w-20">${fmtInt(a.count)} req</td>
+                        <td class="py-1.5 mono text-right text-slate-500 dark:text-slate-400 w-20">${fmtInt(a.count)} req</td>
                       </tr>
                     `)}
                   </table>`}
               </div>
               <div>
-                <div class="text-sm font-medium text-slate-700 mb-2">By model</div>
-                ${sortedByModel.length === 0 ? html`<div class="text-xs text-slate-400">—</div>` :
+                <div class="text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">By model</div>
+                ${sortedByModel.length === 0 ? html`<div class="text-xs text-slate-400 dark:text-slate-500">—</div>` :
                   html`<table class="w-full text-xs">
                     ${sortedByModel.map(([k, a]) => html`
-                      <tr class="border-b border-slate-100">
+                      <tr class="border-b border-slate-100 dark:border-slate-700/60">
                         <td class="py-1.5 pr-3 mono">${k}</td>
                         <td class="py-1.5 mono text-right">${cost(a.cost_usd)}</td>
-                        <td class="py-1.5 mono text-right text-slate-500 w-20">${fmtInt(a.count)} req</td>
+                        <td class="py-1.5 mono text-right text-slate-500 dark:text-slate-400 w-20">${fmtInt(a.count)} req</td>
                       </tr>
                     `)}
                   </table>`}
@@ -399,10 +403,10 @@
 
           ${data && data.entries && data.entries.length > 0 && html`
             <div class="p-4">
-              <div class="text-sm font-medium text-slate-700 mb-2">Recent matching entries</div>
+              <div class="text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">Recent matching entries</div>
               <div class="overflow-x-auto">
                 <table class="w-full text-xs">
-                  <thead class="text-left text-[10px] uppercase text-slate-500 border-b border-slate-200">
+                  <thead class="text-left text-[10px] uppercase text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
                     <tr>
                       <th class="py-2 pr-2">Time (UTC)</th>
                       <th class="py-2 pr-2">Client</th>
@@ -417,16 +421,16 @@
                   </thead>
                   <tbody>
                     ${data.entries.slice(0, limit).map((r, i) => html`
-                      <tr class=${"border-b border-slate-50 " + (r.status >= 400 ? "bg-red-50/40" : "")} key=${i}>
-                        <td class="py-1 pr-2 mono text-slate-500">${r.ts.replace("T"," ").slice(0,19)}</td>
-                        <td class="py-1 pr-2">${r.client || html`<span class="text-slate-400">(—)</span>`}</td>
+                      <tr class=${"border-b border-slate-50 dark:border-slate-700/40 " + (r.status >= 400 ? "bg-red-50/40 dark:bg-red-900/20" : "")} key=${i}>
+                        <td class="py-1 pr-2 mono text-slate-500 dark:text-slate-400">${r.ts.replace("T"," ").slice(0,19)}</td>
+                        <td class="py-1 pr-2">${r.client || html`<span class="text-slate-400 dark:text-slate-500">(—)</span>`}</td>
                         <td class="py-1 pr-2 mono">${r.model}</td>
-                        <td class="py-1 pr-2 mono text-[10px] text-slate-500">${r.auth_label || r.auth_id}</td>
+                        <td class="py-1 pr-2 mono text-[10px] text-slate-500 dark:text-slate-400">${r.auth_label || r.auth_id}</td>
                         <td class="py-1 pr-2 mono text-right">${fmtInt(r.input_tokens)}</td>
                         <td class="py-1 pr-2 mono text-right">${fmtInt(r.output_tokens)}</td>
                         <td class="py-1 pr-2 mono text-right">${cost(r.cost_usd)}</td>
-                        <td class=${"py-1 pr-2 mono text-right " + (r.status >= 400 ? "text-red-600" : "")}>${r.status}</td>
-                        <td class="py-1 pr-2 mono text-right text-slate-500">${r.duration_ms}ms</td>
+                        <td class=${"py-1 pr-2 mono text-right " + (r.status >= 400 ? "text-red-600 dark:text-red-400" : "")}>${r.status}</td>
+                        <td class="py-1 pr-2 mono text-right text-slate-500 dark:text-slate-400">${r.duration_ms}ms</td>
                       </tr>
                     `)}
                   </tbody>
@@ -523,53 +527,53 @@
 
       return html`
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick=${onClose}>
-          <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
+          <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-lg p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
             <div class="flex items-center justify-between">
               <h2 class="text-lg font-semibold">Sign in with Claude</h2>
-              <button onClick=${onClose} class="text-slate-400 hover:text-slate-700">✕</button>
+              <button onClick=${onClose} class="text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200">✕</button>
             </div>
 
             ${step === 1 && html`
-              <p class="text-sm text-slate-500">We'll open Claude's OAuth page in a new tab. If this server is behind a firewall to <code class="mono">claude.ai / api.anthropic.com</code>, set a proxy URL below — it will be used both for the token exchange and for all subsequent requests made with this credential.</p>
+              <p class="text-sm text-slate-500 dark:text-slate-400">We'll open Claude's OAuth page in a new tab. If this server is behind a firewall to <code class="mono">claude.ai / api.anthropic.com</code>, set a proxy URL below — it will be used both for the token exchange and for all subsequent requests made with this credential.</p>
               <label class="block">
-                <span class="text-sm text-slate-600">Proxy URL (optional)</span>
-                <input class="mt-1 w-full border rounded-lg px-3 py-2 mono" placeholder="http:// or socks5://" value=${proxy} onInput=${(e) => setProxy(e.target.value)} />
+                <span class="text-sm text-slate-600 dark:text-slate-300">Proxy URL (optional)</span>
+                <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="http:// or socks5://" value=${proxy} onInput=${(e) => setProxy(e.target.value)} />
               </label>
               <div class="grid grid-cols-2 gap-3">
                 <label class="block">
-                  <span class="text-sm text-slate-600">Label</span>
-                  <input class="mt-1 w-full border rounded-lg px-3 py-2" placeholder="team-a / alice / …" value=${label} onInput=${(e) => setLabel(e.target.value)} />
+                  <span class="text-sm text-slate-600 dark:text-slate-300">Label</span>
+                  <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" placeholder="team-a / alice / …" value=${label} onInput=${(e) => setLabel(e.target.value)} />
                 </label>
                 <label class="block">
-                  <span class="text-sm text-slate-600">Max concurrent</span>
-                  <input type="number" min="0" class="mt-1 w-full border rounded-lg px-3 py-2" value=${maxC} onInput=${(e) => setMaxC(e.target.value)} />
+                  <span class="text-sm text-slate-600 dark:text-slate-300">Max concurrent</span>
+                  <input type="number" min="0" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${maxC} onInput=${(e) => setMaxC(e.target.value)} />
                 </label>
               </div>
-              ${err && html`<div class="text-sm text-red-600">${err}</div>`}
+              ${err && html`<div class="text-sm text-red-600 dark:text-red-400">${err}</div>`}
               <div class="flex justify-end gap-2 pt-2">
-                <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">Cancel</button>
-                <button disabled=${busy} onClick=${start} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">${busy ? "Starting..." : "Open Claude login"}</button>
+                <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700">Cancel</button>
+                <button disabled=${busy} onClick=${start} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-200 dark:hover:bg-slate-300 dark:text-slate-900 disabled:opacity-50">${busy ? "Starting..." : "Open Claude login"}</button>
               </div>
             `}
 
             ${step === 2 && html`
-              <div class="text-sm text-slate-600 space-y-2">
+              <div class="text-sm text-slate-600 dark:text-slate-300 space-y-2">
                 <p><b>Step 1.</b> Copy the login URL below and open it in a browser where you can sign in to Claude.</p>
               </div>
               <label class="block">
-                <span class="text-sm text-slate-600">Login URL</span>
+                <span class="text-sm text-slate-600 dark:text-slate-300">Login URL</span>
                 <div class="mt-1 flex gap-2">
                   <input
                     readonly
                     onClick=${(e) => e.target.select()}
-                    class="flex-1 border rounded-lg px-3 py-2 mono text-xs bg-slate-50"
+                    class="flex-1 border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900 text-xs bg-slate-50"
                     value=${sess.auth_url}
                   />
-                  <button onClick=${copyUrl} class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-50 whitespace-nowrap">${copied ? "Copied ✓" : "Copy"}</button>
+                  <button onClick=${copyUrl} class="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap">${copied ? "Copied ✓" : "Copy"}</button>
                 </div>
               </label>
 
-              <div class="text-sm text-slate-600 space-y-2 pt-2">
+              <div class="text-sm text-slate-600 dark:text-slate-300 space-y-2 pt-2">
                 <p><b>Step 2.</b> After you authorize, Claude redirects to
                 <code class="mono break-all">http://localhost:54545/callback?code=…&amp;state=…</code>.
                 That page normally fails to load — <b>that's fine</b>.</p>
@@ -578,18 +582,18 @@
                 manual-copy page) and paste it below.</p>
               </div>
               <label class="block">
-                <span class="text-sm text-slate-600">Callback URL or code#state</span>
+                <span class="text-sm text-slate-600 dark:text-slate-300">Callback URL or code#state</span>
                 <textarea
-                  class="mt-1 w-full border rounded-lg px-3 py-2 mono text-xs h-28"
+                  class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono text-xs h-28 bg-white dark:bg-slate-900"
                   placeholder="http://localhost:54545/callback?code=xxxxx&state=yyyyy"
                   value=${callback}
                   onInput=${(e) => setCallback(e.target.value)}
                 ></textarea>
               </label>
-              ${err && html`<div class="text-sm text-red-600 whitespace-pre-wrap">${err}</div>`}
+              ${err && html`<div class="text-sm text-red-600 dark:text-red-400 whitespace-pre-wrap">${err}</div>`}
               <div class="flex justify-end gap-2 pt-2">
-                <button onClick=${() => setStep(1)} class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">Back</button>
-                <button disabled=${busy || !callback.trim()} onClick=${finish} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">${busy ? "Exchanging..." : "Finish"}</button>
+                <button onClick=${() => setStep(1)} class="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700">Back</button>
+                <button disabled=${busy || !callback.trim()} onClick=${finish} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-200 dark:hover:bg-slate-300 dark:text-slate-900 disabled:opacity-50">${busy ? "Exchanging..." : "Finish"}</button>
               </div>
             `}
           </div>
@@ -605,44 +609,44 @@
       else status = html`<${Badge} color="green">active<//>`;
       const u = a.usage && a.usage.total;
       return html`
-        <tr class="border-b border-slate-100 hover:bg-slate-50/60">
+        <tr class="border-b border-slate-100 dark:border-slate-700/60 hover:bg-slate-50/60 dark:hover:bg-slate-700/40">
           <td class="py-3 px-3">
             <div class="font-medium">${a.label || a.id}</div>
-            <div class="mono text-slate-400 text-[11px]">${a.id}</div>
-            ${a.email && html`<div class="text-xs text-slate-500">${a.email}</div>`}
+            <div class="mono text-slate-400 dark:text-slate-500 text-[11px]">${a.id}</div>
+            ${a.email && html`<div class="text-xs text-slate-500 dark:text-slate-400">${a.email}</div>`}
           </td>
           <td class="py-3 px-3">
             <${Badge} color=${a.kind === "apikey" ? "blue" : "slate"}>${a.kind}<//>
             <div class="mt-1">${status}</div>
           </td>
           <td class="py-3 px-3 mono">${slot}</td>
-          <td class="py-3 px-3 mono text-xs">${a.proxy_url || html`<span class="text-slate-400">—</span>`}</td>
-          <td class="py-3 px-3 text-xs">${a.expires_at ? fmtDate(a.expires_at) : html`<span class="text-slate-400">—</span>`}</td>
+          <td class="py-3 px-3 mono text-xs">${a.proxy_url || html`<span class="text-slate-400 dark:text-slate-500">—</span>`}</td>
+          <td class="py-3 px-3 text-xs">${a.expires_at ? fmtDate(a.expires_at) : html`<span class="text-slate-400 dark:text-slate-500">—</span>`}</td>
           <td class="py-3 px-3 mono text-xs">
             ${u ? html`
               <div>in: ${fmtInt(u.total.input_tokens)}</div>
               <div>out: ${fmtInt(u.total.output_tokens)}</div>
-              <div class="text-slate-500">req: ${fmtInt(u.total.requests)} / err: ${fmtInt(u.total.errors)}</div>
-            ` : html`<span class="text-slate-400">—</span>`}
+              <div class="text-slate-500 dark:text-slate-400">req: ${fmtInt(u.total.requests)} / err: ${fmtInt(u.total.errors)}</div>
+            ` : html`<span class="text-slate-400 dark:text-slate-500">—</span>`}
           </td>
           <td class="py-3 px-3 mono text-xs">
             ${u ? html`
               <div>in: ${fmtInt(u.sum_24h.input_tokens)}</div>
               <div>out: ${fmtInt(u.sum_24h.output_tokens)}</div>
-              <div class="text-slate-500">req: ${fmtInt(u.sum_24h.requests)}</div>
-            ` : html`<span class="text-slate-400">—</span>`}
+              <div class="text-slate-500 dark:text-slate-400">req: ${fmtInt(u.sum_24h.requests)}</div>
+            ` : html`<span class="text-slate-400 dark:text-slate-500">—</span>`}
           </td>
           <td class="py-3 px-3">
-            ${u && u.daily && u.daily.length ? html`<${Sparkline} daily=${u.daily} />` : html`<span class="text-slate-400 text-xs">—</span>`}
+            ${u && u.daily && u.daily.length ? html`<${Sparkline} daily=${u.daily} />` : html`<span class="text-slate-400 dark:text-slate-500 text-xs">—</span>`}
           </td>
           <td class="py-3 px-3">
             <div class="flex gap-1 flex-wrap justify-end">
               ${a.kind === "oauth" && html`
-                <button onClick=${() => onEdit(a)} class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Edit</button>
-                <button onClick=${() => onAction(a, "toggle")} class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">${a.disabled ? "Enable" : "Disable"}</button>
-                <button onClick=${() => onAction(a, "refresh")} class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Refresh</button>
+                <button onClick=${() => onEdit(a)} class="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-100 dark:bg-slate-700 dark:hover:bg-slate-700">Edit</button>
+                <button onClick=${() => onAction(a, "toggle")} class="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-100 dark:bg-slate-700 dark:hover:bg-slate-700">${a.disabled ? "Enable" : "Disable"}</button>
+                <button onClick=${() => onAction(a, "refresh")} class="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-100 dark:bg-slate-700 dark:hover:bg-slate-700">Refresh</button>
                 ${a.quota_exceeded && html`<button onClick=${() => onAction(a, "clear-quota")} class="text-xs px-2 py-1 rounded border border-amber-400 text-amber-700 hover:bg-amber-50">Clear quota</button>`}
-                <button onClick=${() => onAction(a, "delete")} class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50">Delete</button>
+                <button onClick=${() => onAction(a, "delete")} class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 dark:text-red-400 hover:bg-red-50">Delete</button>
               `}
               ${a.kind === "apikey" && html`
                 ${a.quota_exceeded && html`<button onClick=${() => onAction(a, "clear-quota")} class="text-xs px-2 py-1 rounded border border-amber-400 text-amber-700 hover:bg-amber-50">Clear quota</button>`}
@@ -715,18 +719,18 @@
           <header class="flex items-center justify-between">
             <div>
               <h1 class="text-2xl font-semibold">CPA-Claude</h1>
-              <p class="text-sm text-slate-500">Active window: ${data ? data.active_window_minutes : "…"} min
+              <p class="text-sm text-slate-500 dark:text-slate-400">Active window: ${data ? data.active_window_minutes : "…"} min
               ${data && data.default_proxy_url ? html` · default proxy ${data.default_proxy_url}` : ""}</p>
             </div>
             <div class="flex gap-2">
-              <button onClick=${() => setOauthing(true)} class="px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 text-sm">Sign in with Claude</button>
-              <button onClick=${() => setUploading(true)} class="px-3 py-1.5 rounded-lg border border-slate-300 text-sm hover:bg-slate-50">Upload JSON</button>
-              <button onClick=${refresh} class="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-sm">Refresh</button>
-              <button onClick=${() => { setToken(""); onLogout(); }} class="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-sm">Logout</button>
+              <button onClick=${() => setOauthing(true)} class="px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-200 dark:text-slate-900 dark:hover:bg-slate-300 text-sm">Sign in with Claude</button>
+              <button onClick=${() => setUploading(true)} class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm hover:bg-slate-50 dark:hover:bg-slate-700">Upload JSON</button>
+              <button onClick=${refresh} class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm">Refresh</button>
+              <button onClick=${() => { setToken(""); onLogout(); }} class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm">Logout</button>
             </div>
           </header>
 
-          ${err && html`<div class="rounded-lg bg-red-50 text-red-700 px-4 py-2 text-sm">${err}</div>`}
+          ${err && html`<div class="rounded-lg bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 px-4 py-2 text-sm">${err}</div>`}
 
           <section class="grid grid-cols-2 md:grid-cols-6 gap-3">
             ${[
@@ -737,22 +741,22 @@
               ["Σ in", fmtInt(totals.in)],
               ["Σ out", fmtInt(totals.out)],
             ].map(([k, v]) => html`
-              <div class="bg-white rounded-xl border border-slate-200 p-4">
-                <div class="text-xs text-slate-500">${k}</div>
+              <div class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 dark:border-slate-700 p-4">
+                <div class="text-xs text-slate-500 dark:text-slate-400">${k}</div>
                 <div class="mt-1 text-xl font-semibold">${v}</div>
               </div>
             `)}
           </section>
 
-          <section class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-            <div class="px-4 py-2 border-b border-slate-200 flex items-center justify-between">
+          <section class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 dark:border-slate-700 overflow-hidden">
+            <div class="px-4 py-2 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <h2 class="font-semibold">Credentials</h2>
-              <span class="text-xs text-slate-400">updated ${fmtDate(new Date(lastTick).toISOString())}</span>
+              <span class="text-xs text-slate-400 dark:text-slate-500">updated ${fmtDate(new Date(lastTick).toISOString())}</span>
             </div>
-            ${!data ? html`<div class="p-6 text-center text-slate-400">loading…</div>` :
+            ${!data ? html`<div class="p-6 text-center text-slate-400 dark:text-slate-500">loading…</div>` :
               html`
               <table class="w-full text-sm">
-                <thead class="text-left text-xs uppercase text-slate-500 border-b border-slate-200">
+                <thead class="text-left text-xs uppercase text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
                   <tr>
                     <th class="py-2 px-3">Identity</th>
                     <th class="py-2 px-3">Kind</th>
@@ -772,16 +776,16 @@
             `}
           </section>
 
-          <section class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-            <div class="px-4 py-2 border-b border-slate-200 flex items-center justify-between">
+          <section class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 dark:border-slate-700 overflow-hidden">
+            <div class="px-4 py-2 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <h2 class="font-semibold">Clients — week ${data && data.current_week ? data.current_week : "…"}</h2>
-              <span class="text-xs text-slate-400">edit client_budgets in config.yaml</span>
+              <span class="text-xs text-slate-400 dark:text-slate-500">edit client_budgets in config.yaml</span>
             </div>
-            ${!data ? html`<div class="p-6 text-center text-slate-400">loading…</div>` :
-              !data.clients.length ? html`<div class="p-6 text-center text-slate-400 text-sm">No client usage recorded yet.</div>` :
+            ${!data ? html`<div class="p-6 text-center text-slate-400 dark:text-slate-500">loading…</div>` :
+              !data.clients.length ? html`<div class="p-6 text-center text-slate-400 dark:text-slate-500 text-sm">No client usage recorded yet.</div>` :
               html`
               <table class="w-full text-sm">
-                <thead class="text-left text-xs uppercase text-slate-500 border-b border-slate-200">
+                <thead class="text-left text-xs uppercase text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
                   <tr>
                     <th class="py-2 px-3">Token</th>
                     <th class="py-2 px-3">Label</th>
@@ -793,23 +797,23 @@
                 </thead>
                 <tbody>
                   ${data.clients.map((cl) => html`
-                    <tr class="border-b border-slate-100 hover:bg-slate-50/60">
+                    <tr class="border-b border-slate-100 dark:border-slate-700/60 hover:bg-slate-50/60 dark:hover:bg-slate-700/40">
                       <td class="py-3 px-3 mono text-xs">${cl.token}</td>
-                      <td class="py-3 px-3">${cl.label || html`<span class="text-slate-400">—</span>`}</td>
+                      <td class="py-3 px-3">${cl.label || html`<span class="text-slate-400 dark:text-slate-500">—</span>`}</td>
                       <td class="py-3 px-3 mono text-xs">
-                        <div class="font-semibold ${cl.blocked ? "text-red-600" : cl.weekly_limit && cl.weekly_usd / cl.weekly_limit > 0.8 ? "text-amber-700" : ""}">$${cl.weekly_usd.toFixed(4)}</div>
+                        <div class="font-semibold ${cl.blocked ? "text-red-600 dark:text-red-400" : cl.weekly_limit && cl.weekly_usd / cl.weekly_limit > 0.8 ? "text-amber-700" : ""}">$${cl.weekly_usd.toFixed(4)}</div>
                         ${cl.weekly_limit > 0 && html`
-                          <div class="mt-1 h-1.5 w-28 bg-slate-100 rounded overflow-hidden">
+                          <div class="mt-1 h-1.5 w-28 bg-slate-100 dark:bg-slate-700 rounded overflow-hidden">
                             <div class=${"h-full " + (cl.blocked ? "bg-red-500" : cl.weekly_usd / cl.weekly_limit > 0.8 ? "bg-amber-500" : "bg-emerald-500")} style=${`width:${Math.min(100, Math.round(cl.weekly_usd / cl.weekly_limit * 100))}%`}></div>
                           </div>
                         `}
                       </td>
-                      <td class="py-3 px-3 mono text-xs">${cl.weekly_limit > 0 ? "$" + cl.weekly_limit.toFixed(2) : html`<span class="text-slate-400">none</span>`}</td>
+                      <td class="py-3 px-3 mono text-xs">${cl.weekly_limit > 0 ? "$" + cl.weekly_limit.toFixed(2) : html`<span class="text-slate-400 dark:text-slate-500">none</span>`}</td>
                       <td class="py-3 px-3 mono text-xs">
                         <div>$${cl.total.cost_usd.toFixed(4)}</div>
-                        <div class="text-slate-500">${fmtInt(cl.total.requests)} req</div>
+                        <div class="text-slate-500 dark:text-slate-400">${fmtInt(cl.total.requests)} req</div>
                       </td>
-                      <td class="py-3 px-3 text-xs">${cl.last_used ? fmtDate(cl.last_used) : html`<span class="text-slate-400">—</span>`}</td>
+                      <td class="py-3 px-3 text-xs">${cl.last_used ? fmtDate(cl.last_used) : html`<span class="text-slate-400 dark:text-slate-500">—</span>`}</td>
                     </tr>
                   `)}
                 </tbody>
@@ -819,14 +823,14 @@
 
           <${RequestsExplorer} />
 
-          <details class="bg-white rounded-xl border border-slate-200">
-            <summary class="px-4 py-2 border-b border-slate-200 font-semibold cursor-pointer">
+          <details class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 dark:border-slate-700">
+            <summary class="px-4 py-2 border-b border-slate-200 dark:border-slate-700 font-semibold cursor-pointer">
               Pricing table
-              <span class="text-xs font-normal text-slate-400 ml-2">${data && data.pricing ? Object.keys(data.pricing.models).length : "…"} models · edit in config.yaml pricing.models</span>
+              <span class="text-xs font-normal text-slate-400 dark:text-slate-500 ml-2">${data && data.pricing ? Object.keys(data.pricing.models).length : "…"} models · edit in config.yaml pricing.models</span>
             </summary>
             ${data && data.pricing && html`
               <table class="w-full text-sm">
-                <thead class="text-left text-xs uppercase text-slate-500 border-b border-slate-200">
+                <thead class="text-left text-xs uppercase text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
                   <tr>
                     <th class="py-2 px-3">Model</th>
                     <th class="py-2 px-3">Input / 1M</th>
@@ -837,7 +841,7 @@
                 </thead>
                 <tbody>
                   ${Object.entries(data.pricing.models).sort(([a],[b]) => a.localeCompare(b)).map(([name, p]) => html`
-                    <tr class="border-b border-slate-100">
+                    <tr class="border-b border-slate-100 dark:border-slate-700/60">
                       <td class="py-2 px-3 mono text-xs">${name}</td>
                       <td class="py-2 px-3 mono text-xs">$${p.input_per_1m.toFixed(2)}</td>
                       <td class="py-2 px-3 mono text-xs">$${p.output_per_1m.toFixed(2)}</td>
@@ -846,7 +850,7 @@
                     </tr>
                   `)}
                   <tr class="bg-slate-50">
-                    <td class="py-2 px-3 mono text-xs text-slate-500">(default / fallback)</td>
+                    <td class="py-2 px-3 mono text-xs text-slate-500 dark:text-slate-400">(default / fallback)</td>
                     <td class="py-2 px-3 mono text-xs">$${data.pricing.default.input_per_1m.toFixed(2)}</td>
                     <td class="py-2 px-3 mono text-xs">$${data.pricing.default.output_per_1m.toFixed(2)}</td>
                     <td class="py-2 px-3 mono text-xs">$${data.pricing.default.cache_read_per_1m.toFixed(2)}</td>
@@ -857,7 +861,7 @@
             `}
           </details>
 
-          <footer class="text-xs text-slate-400 text-center py-4">
+          <footer class="text-xs text-slate-400 dark:text-slate-500 text-center py-4">
             v1 · OAuth credentials are mutable · API keys / access tokens / budgets are edited in config.yaml (restart required)
           </footer>
 
