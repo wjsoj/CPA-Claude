@@ -22,6 +22,7 @@ import (
 
 	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/config"
+	"github.com/wjsoj/CPA-Claude/internal/pricing"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 )
 
@@ -29,13 +30,15 @@ import (
 var webFS embed.FS
 
 type Handler struct {
-	cfg   *config.Config
-	pool  *auth.Pool
-	usage *usage.Store
+	cfg     *config.Config
+	pool    *auth.Pool
+	usage   *usage.Store
+	pricing *pricing.Catalog
+	budgets map[string]config.ClientBudget
 }
 
-func New(cfg *config.Config, pool *auth.Pool, store *usage.Store) *Handler {
-	return &Handler{cfg: cfg, pool: pool, usage: store}
+func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.Catalog, budgets map[string]config.ClientBudget) *Handler {
+	return &Handler{cfg: cfg, pool: pool, usage: store, pricing: cat, budgets: budgets}
 }
 
 // Register attaches the admin SPA and API routes.
@@ -214,12 +217,86 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			Usage:         u,
 		})
 	}
+	// Clients (per-access-token spending).
+	clientSnap := h.usage.SnapshotClients()
+	currentWeek := h.usage.CurrentWeekKey()
+	clientRows := make([]clientRow, 0)
+	seen := make(map[string]bool)
+	addRow := func(token, label string, weeklyLimit float64) {
+		seen[token] = true
+		pc, hasData := clientSnap[token]
+		weekly := 0.0
+		var weeks []usage.WeekEntry
+		var total usage.ClientCost
+		var last *time.Time
+		if hasData {
+			weeks = pc.WeeklyOrdered(8)
+			if w, ok := pc.Weekly[currentWeek]; ok {
+				weekly = w.CostUSD
+			}
+			total = pc.Total
+			if !pc.LastUsed.IsZero() {
+				lu := pc.LastUsed
+				last = &lu
+			}
+		}
+		clientRows = append(clientRows, clientRow{
+			Token:       maskToken(token),
+			Label:       label,
+			WeeklyUSD:   weekly,
+			WeeklyLimit: weeklyLimit,
+			Blocked:     weeklyLimit > 0 && weekly >= weeklyLimit,
+			Total:       total,
+			Weekly:      weeks,
+			LastUsed:    last,
+		})
+	}
+	// Rows for every explicitly-budgeted token.
+	for _, b := range h.cfg.ClientBudgets {
+		addRow(b.Token, b.Label, b.WeeklyUSD)
+	}
+	// Rows for every client we've actually seen that isn't already listed.
+	for tok, pc := range clientSnap {
+		if !seen[tok] {
+			addRow(tok, pc.Label, 0)
+		}
+	}
+
+	// Pricing view (editable in config.yaml, read-only here).
+	priceView := make(map[string]pricing.ModelPrice)
+	for k, v := range h.pricing.Models() {
+		priceView[k] = v
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"active_window_minutes": h.cfg.ActiveWindowMinutes,
 		"auth_dir":              h.cfg.AuthDir,
 		"default_proxy_url":     h.cfg.DefaultProxyURL,
 		"auths":                 rows,
+		"clients":               clientRows,
+		"current_week":          currentWeek,
+		"pricing": gin.H{
+			"default": h.pricing.Default(),
+			"models":  priceView,
+		},
 	})
+}
+
+type clientRow struct {
+	Token       string            `json:"token"`
+	Label       string            `json:"label,omitempty"`
+	WeeklyUSD   float64           `json:"weekly_usd"`
+	WeeklyLimit float64           `json:"weekly_limit"`
+	Blocked     bool              `json:"blocked"`
+	Total       usage.ClientCost  `json:"total"`
+	Weekly      []usage.WeekEntry `json:"weekly,omitempty"`
+	LastUsed    *time.Time        `json:"last_used,omitempty"`
+}
+
+func maskToken(t string) string {
+	if len(t) <= 10 {
+		return "***"
+	}
+	return t[:6] + "…" + t[len(t)-4:]
 }
 
 type patchAuthBody struct {

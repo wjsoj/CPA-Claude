@@ -572,8 +572,91 @@
             `}
           </section>
 
+          <section class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div class="px-4 py-2 border-b border-slate-200 flex items-center justify-between">
+              <h2 class="font-semibold">Clients — week ${data && data.current_week ? data.current_week : "…"}</h2>
+              <span class="text-xs text-slate-400">edit client_budgets in config.yaml</span>
+            </div>
+            ${!data ? html`<div class="p-6 text-center text-slate-400">loading…</div>` :
+              !data.clients.length ? html`<div class="p-6 text-center text-slate-400 text-sm">No client usage recorded yet.</div>` :
+              html`
+              <table class="w-full text-sm">
+                <thead class="text-left text-xs uppercase text-slate-500 border-b border-slate-200">
+                  <tr>
+                    <th class="py-2 px-3">Token</th>
+                    <th class="py-2 px-3">Label</th>
+                    <th class="py-2 px-3">Weekly spend</th>
+                    <th class="py-2 px-3">Limit</th>
+                    <th class="py-2 px-3">Total (all time)</th>
+                    <th class="py-2 px-3">Last used</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${data.clients.map((cl) => html`
+                    <tr class="border-b border-slate-100 hover:bg-slate-50/60">
+                      <td class="py-3 px-3 mono text-xs">${cl.token}</td>
+                      <td class="py-3 px-3">${cl.label || html`<span class="text-slate-400">—</span>`}</td>
+                      <td class="py-3 px-3 mono text-xs">
+                        <div class="font-semibold ${cl.blocked ? "text-red-600" : cl.weekly_limit && cl.weekly_usd / cl.weekly_limit > 0.8 ? "text-amber-700" : ""}">$${cl.weekly_usd.toFixed(4)}</div>
+                        ${cl.weekly_limit > 0 && html`
+                          <div class="mt-1 h-1.5 w-28 bg-slate-100 rounded overflow-hidden">
+                            <div class=${"h-full " + (cl.blocked ? "bg-red-500" : cl.weekly_usd / cl.weekly_limit > 0.8 ? "bg-amber-500" : "bg-emerald-500")} style=${`width:${Math.min(100, Math.round(cl.weekly_usd / cl.weekly_limit * 100))}%`}></div>
+                          </div>
+                        `}
+                      </td>
+                      <td class="py-3 px-3 mono text-xs">${cl.weekly_limit > 0 ? "$" + cl.weekly_limit.toFixed(2) : html`<span class="text-slate-400">none</span>`}</td>
+                      <td class="py-3 px-3 mono text-xs">
+                        <div>$${cl.total.cost_usd.toFixed(4)}</div>
+                        <div class="text-slate-500">${fmtInt(cl.total.requests)} req</div>
+                      </td>
+                      <td class="py-3 px-3 text-xs">${cl.last_used ? fmtDate(cl.last_used) : html`<span class="text-slate-400">—</span>`}</td>
+                    </tr>
+                  `)}
+                </tbody>
+              </table>
+            `}
+          </section>
+
+          <details class="bg-white rounded-xl border border-slate-200">
+            <summary class="px-4 py-2 border-b border-slate-200 font-semibold cursor-pointer">
+              Pricing table
+              <span class="text-xs font-normal text-slate-400 ml-2">${data && data.pricing ? Object.keys(data.pricing.models).length : "…"} models · edit in config.yaml pricing.models</span>
+            </summary>
+            ${data && data.pricing && html`
+              <table class="w-full text-sm">
+                <thead class="text-left text-xs uppercase text-slate-500 border-b border-slate-200">
+                  <tr>
+                    <th class="py-2 px-3">Model</th>
+                    <th class="py-2 px-3">Input / 1M</th>
+                    <th class="py-2 px-3">Output / 1M</th>
+                    <th class="py-2 px-3">Cache-read / 1M</th>
+                    <th class="py-2 px-3">Cache-create / 1M</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${Object.entries(data.pricing.models).sort(([a],[b]) => a.localeCompare(b)).map(([name, p]) => html`
+                    <tr class="border-b border-slate-100">
+                      <td class="py-2 px-3 mono text-xs">${name}</td>
+                      <td class="py-2 px-3 mono text-xs">$${p.input_per_1m.toFixed(2)}</td>
+                      <td class="py-2 px-3 mono text-xs">$${p.output_per_1m.toFixed(2)}</td>
+                      <td class="py-2 px-3 mono text-xs">$${p.cache_read_per_1m.toFixed(2)}</td>
+                      <td class="py-2 px-3 mono text-xs">$${p.cache_create_per_1m.toFixed(2)}</td>
+                    </tr>
+                  `)}
+                  <tr class="bg-slate-50">
+                    <td class="py-2 px-3 mono text-xs text-slate-500">(default / fallback)</td>
+                    <td class="py-2 px-3 mono text-xs">$${data.pricing.default.input_per_1m.toFixed(2)}</td>
+                    <td class="py-2 px-3 mono text-xs">$${data.pricing.default.output_per_1m.toFixed(2)}</td>
+                    <td class="py-2 px-3 mono text-xs">$${data.pricing.default.cache_read_per_1m.toFixed(2)}</td>
+                    <td class="py-2 px-3 mono text-xs">$${data.pricing.default.cache_create_per_1m.toFixed(2)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            `}
+          </details>
+
           <footer class="text-xs text-slate-400 text-center py-4">
-            v1 · OAuth credentials are mutable · API keys are read-only (edit config.yaml and restart)
+            v1 · OAuth credentials are mutable · API keys / access tokens / budgets are edited in config.yaml (restart required)
           </footer>
 
           ${editing && html`<${EditModal} auth=${editing} onClose=${() => setEditing(null)} onSaved=${() => { setEditing(null); refresh(); }} />`}

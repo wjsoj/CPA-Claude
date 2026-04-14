@@ -35,6 +35,32 @@ admin_token: "change-me-long-random-string"
 access_tokens:
   - "sk-client-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
+# Per-access-token weekly USD budget. Week boundary is ISO week (Mon 00:00
+# UTC). Tokens not listed here are tracked but not enforced.
+client_budgets:
+  - token: "sk-client-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    label: "alice"
+    weekly_usd: 10.0
+
+# Pricing table. Built-in defaults already cover:
+#   claude-haiku-4-5-20251001, claude-haiku-4-5
+#   claude-opus-4-6
+#   claude-sonnet-4-6
+# You only need this block to override or add new models. Unlisted models
+# fall back to `default` (currently Sonnet pricing).
+# pricing:
+#   default:
+#     input_per_1m: 3.00
+#     output_per_1m: 15.00
+#     cache_read_per_1m: 0.30
+#     cache_create_per_1m: 3.75
+#   models:
+#     claude-custom:
+#       input_per_1m: 2.0
+#       output_per_1m: 10.0
+#       cache_read_per_1m: 0.2
+#       cache_create_per_1m: 2.5
+
 # API-key fallback pool. Used when every OAuth file is saturated or
 # unavailable. API keys have no concurrency limit.
 api_keys:

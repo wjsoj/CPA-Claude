@@ -29,6 +29,10 @@ automatic API-key fallback.
   counts per credential survive restarts in `state.json`.
 - **API-key fallback** — when every OAuth credential is saturated, quota-
   exceeded, or dead, requests fall through to the unlimited API-key pool.
+- **Per-client weekly budgets** — each access token can have a `weekly_usd`
+  cap. Spend is tracked by ISO week and costed with a built-in pricing
+  table covering Haiku 4.5, Opus 4.6 and Sonnet 4.6 (cache-read and
+  cache-create priced separately). Exceeded → 429 until the next Monday.
 - **uTLS (Chrome)** — bypasses Anthropic's TLS fingerprinting.
 - **Proxy schemes** — `http://`, `https://`, `socks5://`, `socks5h://` all
   supported, both with and without uTLS.

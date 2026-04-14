@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/wjsoj/CPA-Claude/internal/pricing"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,6 +48,20 @@ type Config struct {
 
 	// If true, OAuth/API-key refresh+request uses utls Chrome fingerprint.
 	UseUTLS bool `yaml:"use_utls"`
+
+	// Pricing overrides (optional). Built-in defaults cover claude-haiku-4-5,
+	// claude-opus-4-6, and claude-sonnet-4-6.
+	Pricing pricing.Config `yaml:"pricing"`
+
+	// Per-access-token weekly USD budgets. Week boundary is ISO week (Mon
+	// 00:00 UTC). Tokens not listed here are not enforced.
+	ClientBudgets []ClientBudget `yaml:"client_budgets"`
+}
+
+type ClientBudget struct {
+	Token     string  `yaml:"token"`
+	Label     string  `yaml:"label,omitempty"`
+	WeeklyUSD float64 `yaml:"weekly_usd"`
 }
 
 func Load(path string) (*Config, error) {

@@ -67,6 +67,24 @@ func (s *Server) forward(c *gin.Context, path string) {
 		model = "unknown"
 	}
 
+	// Weekly-budget pre-check. If this client has a configured budget and
+	// their current-week spend already met or exceeded it, reject with 429.
+	// A request in flight may slightly overshoot (by one request's cost);
+	// that's the acceptable trade-off for not knowing output tokens upfront.
+	if budget, ok := s.budgets[clientToken]; ok {
+		spent := s.usage.WeeklyCostUSD(clientToken)
+		if spent >= budget.WeeklyUSD {
+			c.Header("Retry-After", "604800")
+			c.AbortWithStatusJSON(429, gin.H{
+				"error":       "weekly budget exceeded",
+				"spent_usd":   spent,
+				"limit_usd":   budget.WeeklyUSD,
+				"week":        s.usage.CurrentWeekKey(),
+			})
+			return
+		}
+	}
+
 	// Try upstream with retries across auths. On saturation / quota / auth
 	// errors, we pick a different auth and retry (bounded).
 	const maxAttempts = 4
@@ -85,7 +103,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 		}
 		tried[a.ID] = true
 
-		retry, done := s.doForward(c, a, path, body, peek.Stream, model)
+		retry, done := s.doForward(c, a, path, body, peek.Stream, model, clientToken)
 		if done {
 			s.pool.Release(clientToken)
 			return
@@ -104,7 +122,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 //	retry=true  → caller should try another credential
 //	done=true   → response was delivered successfully (status < 400 or
 //	              non-retryable error already written to client)
-func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model string) (retry bool, done bool) {
+func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken string) (retry bool, done bool) {
 	baseURL := s.cfg.AnthropicBaseURL
 	url := baseURL + path + "?beta=true"
 
@@ -157,6 +175,15 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	}
 	_ = resp.Body.Close()
 	s.usage.Record(a.ID, a.Label, counts)
+	// Charge the client for the tokens they actually consumed.
+	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
+		cost := s.pricing.Cost(model, counts)
+		label := ""
+		if b, ok := s.budgets[clientToken]; ok {
+			label = b.Label
+		}
+		s.usage.RecordClient(clientToken, label, counts, cost)
+	}
 	return false, true
 }
 

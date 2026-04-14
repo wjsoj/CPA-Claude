@@ -18,6 +18,9 @@ import (
 // each Record() so state.json stays bounded.
 const dailyRetentionDays = 90
 
+// How many ISO weeks of per-client history to keep.
+const weeklyRetentionWeeks = 26
+
 type Counts struct {
 	InputTokens       int64 `json:"input_tokens"`
 	OutputTokens      int64 `json:"output_tokens"`
@@ -70,8 +73,56 @@ func (p *PerAuth) DailyOrdered(maxDays int) []DayEntry {
 	return out
 }
 
+// PerClient is per-access-token usage: tokens + USD per ISO week, plus
+// lifetime total. Key in State.Clients is the access token string itself.
+type PerClient struct {
+	Token    string                `json:"token"`
+	Label    string                `json:"label,omitempty"`
+	Total    ClientCost            `json:"total"`
+	Weekly   map[string]ClientCost `json:"weekly,omitempty"` // key = "2026-W15"
+	LastUsed time.Time             `json:"last_used,omitempty"`
+}
+
+type ClientCost struct {
+	Tokens   Counts  `json:"tokens"`
+	CostUSD  float64 `json:"cost_usd"`
+	Requests int64   `json:"requests"`
+}
+
+func (c *ClientCost) Add(o ClientCost) {
+	c.Tokens.Add(o.Tokens)
+	c.CostUSD += o.CostUSD
+	c.Requests += o.Requests
+}
+
+// WeekEntry pairs ISO-week key with its cost for JSON rendering.
+type WeekEntry struct {
+	Week string     `json:"week"`
+	Cost ClientCost `json:"cost"`
+}
+
+func (p *PerClient) WeeklyOrdered(maxWeeks int) []WeekEntry {
+	if len(p.Weekly) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(p.Weekly))
+	for k := range p.Weekly {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if maxWeeks > 0 && len(keys) > maxWeeks {
+		keys = keys[len(keys)-maxWeeks:]
+	}
+	out := make([]WeekEntry, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, WeekEntry{Week: k, Cost: p.Weekly[k]})
+	}
+	return out
+}
+
 type State struct {
-	Auths map[string]*PerAuth `json:"auths"`
+	Auths   map[string]*PerAuth   `json:"auths"`
+	Clients map[string]*PerClient `json:"clients,omitempty"`
 }
 
 type Store struct {
@@ -103,9 +154,17 @@ func Open(path string) (*Store, error) {
 		var st State
 		if err := json.Unmarshal(data, &st); err != nil {
 			log.Warnf("usage: parse %s: %v (starting empty)", path, err)
-		} else if st.Auths != nil {
+		} else {
+			if st.Auths == nil {
+				st.Auths = make(map[string]*PerAuth)
+			}
+			if st.Clients == nil {
+				st.Clients = make(map[string]*PerClient)
+			}
 			s.state = &st
 		}
+	} else {
+		s.state.Clients = make(map[string]*PerClient)
 	}
 	go s.loop()
 	return s, nil
@@ -243,6 +302,132 @@ func (s *Store) Snapshot() map[string]PerAuth {
 		out[k] = cp
 	}
 	return out
+}
+
+// isoWeekKey returns "YYYY-Www" (ISO 8601) for the given time in UTC.
+func isoWeekKey(t time.Time) string {
+	y, w := t.UTC().ISOWeek()
+	if w < 10 {
+		return fmtWeek(y, w)
+	}
+	return fmtWeek(y, w)
+}
+
+func fmtWeek(y, w int) string {
+	// sprintf-free tiny formatter to avoid a dependency just for this.
+	ws := "0" + itoa(w)
+	ws = ws[len(ws)-2:]
+	return itoa(y) + "-W" + ws
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// RecordClient accumulates a client access token's usage + USD for the
+// current ISO week. Call after a successful upstream response.
+func (s *Store) RecordClient(token, label string, counts Counts, costUSD float64) {
+	if token == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Clients == nil {
+		s.state.Clients = make(map[string]*PerClient)
+	}
+	p, ok := s.state.Clients[token]
+	if !ok {
+		p = &PerClient{Token: token, Label: label, Weekly: make(map[string]ClientCost)}
+		s.state.Clients[token] = p
+	}
+	if p.Weekly == nil {
+		p.Weekly = make(map[string]ClientCost)
+	}
+	if label != "" {
+		p.Label = label
+	}
+	now := s.now()
+	add := ClientCost{Tokens: counts, CostUSD: costUSD, Requests: 1}
+	p.Total.Add(add)
+	p.LastUsed = now
+	key := isoWeekKey(now)
+	cur := p.Weekly[key]
+	cur.Add(add)
+	p.Weekly[key] = cur
+	s.trimWeeklyLocked(p)
+	s.dirty = true
+}
+
+func (s *Store) trimWeeklyLocked(p *PerClient) {
+	if len(p.Weekly) <= weeklyRetentionWeeks {
+		return
+	}
+	keys := make([]string, 0, len(p.Weekly))
+	for k := range p.Weekly {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys[:len(keys)-weeklyRetentionWeeks] {
+		delete(p.Weekly, k)
+	}
+}
+
+// WeeklyCostUSD returns the current ISO-week USD spend for a client token.
+// Zero if unknown.
+func (s *Store) WeeklyCostUSD(token string) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Clients == nil {
+		return 0
+	}
+	p, ok := s.state.Clients[token]
+	if !ok {
+		return 0
+	}
+	key := isoWeekKey(s.now())
+	return p.Weekly[key].CostUSD
+}
+
+// SnapshotClients returns a deep copy of the clients map for JSON rendering.
+func (s *Store) SnapshotClients() map[string]PerClient {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]PerClient, len(s.state.Clients))
+	for k, v := range s.state.Clients {
+		cp := *v
+		if v.Weekly != nil {
+			cp.Weekly = make(map[string]ClientCost, len(v.Weekly))
+			for wk, wv := range v.Weekly {
+				cp.Weekly[wk] = wv
+			}
+		}
+		out[k] = cp
+	}
+	return out
+}
+
+// CurrentWeekKey exposes the ISO-week key for "now" (for callers that want
+// to label UI cards).
+func (s *Store) CurrentWeekKey() string {
+	return isoWeekKey(s.now())
 }
 
 // Sum24h returns the total counts over the last 24 hours (UTC), using the

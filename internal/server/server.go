@@ -13,19 +13,30 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/admin"
 	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/config"
+	"github.com/wjsoj/CPA-Claude/internal/pricing"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 )
 
 type Server struct {
-	cfg   *config.Config
-	pool  *auth.Pool
-	usage *usage.Store
-	http  *http.Server
+	cfg      *config.Config
+	pool     *auth.Pool
+	usage    *usage.Store
+	pricing  *pricing.Catalog
+	budgets  map[string]config.ClientBudget // client-token → budget
+	http     *http.Server
 }
 
 func New(cfg *config.Config, pool *auth.Pool, store *usage.Store) *Server {
 	gin.SetMode(gin.ReleaseMode)
-	s := &Server{cfg: cfg, pool: pool, usage: store}
+	cat := pricing.NewCatalog(cfg.Pricing)
+	budgets := make(map[string]config.ClientBudget, len(cfg.ClientBudgets))
+	for _, b := range cfg.ClientBudgets {
+		t := strings.TrimSpace(b.Token)
+		if t != "" && b.WeeklyUSD > 0 {
+			budgets[t] = b
+		}
+	}
+	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, budgets: budgets}
 
 	engine := gin.New()
 	engine.Use(gin.Recovery(), loggingMiddleware(), corsMiddleware())
@@ -43,7 +54,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store) *Server {
 	engine.GET("/status", s.clientAuth(), s.handleStatus)
 
 	// Admin SPA + API.
-	admin.New(cfg, pool, store).Register(engine)
+	admin.New(cfg, pool, store, cat, budgets).Register(engine)
 
 	s.http = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
