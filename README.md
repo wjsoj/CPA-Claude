@@ -33,6 +33,9 @@ automatic API-key fallback.
   cap. Spend is tracked by ISO week and costed with a built-in pricing
   table covering Haiku 4.5, Opus 4.6 and Sonnet 4.6 (cache-read and
   cache-create priced separately). Exceeded → 429 until the next Monday.
+- **Per-request JSONL log** — one line per terminal request (who, which
+  credential, model, tokens, cost, status, duration). Daily-rotated file,
+  default 30-day retention.
 - **uTLS (Chrome)** — bypasses Anthropic's TLS fingerprinting.
 - **Proxy schemes** — `http://`, `https://`, `socks5://`, `socks5h://` all
   supported, both with and without uTLS.
@@ -121,6 +124,31 @@ lets you:
 
 API keys are read-only in v1 — edit `config.yaml` and restart to change
 them.
+
+## Request log format
+
+Each line in `logs/requests-YYYY-MM-DD.jsonl`:
+
+```json
+{"ts":"2026-04-14T10:23:45.123Z","client":"alice-laptop",
+ "client_token":"sk-cli…yyyy","auth_id":"alice.json","auth_label":"alice",
+ "auth_kind":"oauth","model":"claude-sonnet-4-6",
+ "input_tokens":1234,"output_tokens":567,
+ "cache_read_tokens":100,"cache_create_tokens":50,
+ "cost_usd":0.01155,"status":200,"duration_ms":1842,
+ "stream":true,"path":"/v1/messages","attempts":1}
+```
+
+- `client` is the `name` from `access_tokens` (or the budget `label` as
+  fallback), empty if neither set.
+- `client_token` is masked (first 6 + last 4 chars).
+- `attempts` > 1 when an initial credential was quota-flagged and the
+  request fell through to another one.
+- One line per terminal outcome (success or final 4xx/5xx). Intermediate
+  retries are not logged as separate entries.
+
+Parse with e.g. `jq -c 'select(.client=="alice-laptop" and .model!="unknown")
+  | [.ts,.model,.cost_usd] | @tsv' logs/requests-*.jsonl`.
 
 ## Compatibility with upstream CLIProxyAPI
 

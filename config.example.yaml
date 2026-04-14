@@ -11,6 +11,12 @@ auth_dir: ./auths
 # Persistent usage statistics. Survives restarts.
 state_file: ./state.json
 
+# Per-request JSONL log (one line per terminal request). Writes to
+# log_dir/requests-YYYY-MM-DD.jsonl, rotated daily, retained 30 days by
+# default. Omit log_dir to disable.
+log_dir: ./logs
+log_retention_days: 30
+
 # Minutes of inactivity after which a client session releases its OAuth slot.
 active_window_minutes: 10
 
@@ -32,8 +38,13 @@ admin_token: "change-me-long-random-string"
 # Tokens that clients must present in Authorization: Bearer. Empty = open.
 # Each unique token counts as one "client session" and occupies one OAuth
 # slot while active.
+#
+# Each entry can be either a bare string or a mapping with `name` for
+# reporting (shows up in request logs and the admin panel).
 access_tokens:
-  - "sk-client-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  - token: "sk-client-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    name:  "alice-laptop"
+  - "sk-client-yyyyyyyyyyyyyyyyyyyyyyyyyyyy"    # bare form also works
 
 # Per-access-token weekly USD budget. Week boundary is ISO week (Mon 00:00
 # UTC). Tokens not listed here are tracked but not enforced.

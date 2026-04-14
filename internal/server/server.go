@@ -14,19 +14,22 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/pricing"
+	"github.com/wjsoj/CPA-Claude/internal/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 )
 
 type Server struct {
-	cfg      *config.Config
-	pool     *auth.Pool
-	usage    *usage.Store
-	pricing  *pricing.Catalog
-	budgets  map[string]config.ClientBudget // client-token → budget
-	http     *http.Server
+	cfg         *config.Config
+	pool        *auth.Pool
+	usage       *usage.Store
+	pricing     *pricing.Catalog
+	budgets     map[string]config.ClientBudget // client-token → budget
+	clientNames map[string]string              // client-token → human name
+	reqLog      *requestlog.Writer
+	http        *http.Server
 }
 
-func New(cfg *config.Config, pool *auth.Pool, store *usage.Store) *Server {
+func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *requestlog.Writer) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	cat := pricing.NewCatalog(cfg.Pricing)
 	budgets := make(map[string]config.ClientBudget, len(cfg.ClientBudgets))
@@ -36,7 +39,25 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store) *Server {
 			budgets[t] = b
 		}
 	}
-	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, budgets: budgets}
+	// Build token → name map. Prefer explicit AccessToken.Name; fall back to
+	// the matching ClientBudget.Label so a single source of truth is enough
+	// for simple setups.
+	names := make(map[string]string, len(cfg.AccessTokens))
+	for _, at := range cfg.AccessTokens {
+		t := strings.TrimSpace(at.Token)
+		if t == "" {
+			continue
+		}
+		if n := strings.TrimSpace(at.Name); n != "" {
+			names[t] = n
+		}
+	}
+	for tok, b := range budgets {
+		if _, has := names[tok]; !has && b.Label != "" {
+			names[tok] = b.Label
+		}
+	}
+	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, budgets: budgets, clientNames: names, reqLog: reqLog}
 
 	engine := gin.New()
 	engine.Use(gin.Recovery(), loggingMiddleware(), corsMiddleware())
@@ -95,10 +116,12 @@ func corsMiddleware() gin.HandlerFunc {
 
 // clientAuth matches the incoming Authorization: Bearer or x-api-key against
 // config.AccessTokens. If no tokens are configured the proxy is open.
+// The matched token's human name (if configured) is stored in the gin
+// context under "client_name".
 func (s *Server) clientAuth() gin.HandlerFunc {
 	allowed := make(map[string]struct{}, len(s.cfg.AccessTokens))
-	for _, t := range s.cfg.AccessTokens {
-		t = strings.TrimSpace(t)
+	for _, at := range s.cfg.AccessTokens {
+		t := strings.TrimSpace(at.Token)
 		if t != "" {
 			allowed[t] = struct{}{}
 		}
@@ -107,12 +130,11 @@ func (s *Server) clientAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tok := extractClientToken(c.Request)
 		if open {
-			// Even with open mode, we need a stable identity per client for
-			// slot accounting. Fall back to the remote IP.
 			if tok == "" {
 				tok = c.ClientIP()
 			}
 			c.Set("client_token", tok)
+			c.Set("client_name", s.clientNames[tok])
 			c.Next()
 			return
 		}
@@ -125,6 +147,7 @@ func (s *Server) clientAuth() gin.HandlerFunc {
 			return
 		}
 		c.Set("client_token", tok)
+		c.Set("client_name", s.clientNames[tok])
 		c.Next()
 	}
 }

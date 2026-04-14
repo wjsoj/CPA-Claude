@@ -31,7 +31,14 @@ type Config struct {
 
 	// Client-facing access tokens. Requests must present one in Authorization: Bearer.
 	// Empty list disables client auth (open proxy).
-	AccessTokens []string `yaml:"access_tokens"`
+	//
+	// YAML accepts either form:
+	//   access_tokens: ["sk-xxx", "sk-yyy"]
+	//   access_tokens:
+	//     - token: "sk-xxx"
+	//       name: "alice"
+	//     - "sk-yyy"
+	AccessTokens []AccessToken `yaml:"access_tokens"`
 
 	// Token required to access the /admin/* management panel and APIs.
 	// Empty = panel disabled. Send as X-Admin-Token header (or Authorization: Bearer).
@@ -49,6 +56,13 @@ type Config struct {
 	// If true, OAuth/API-key refresh+request uses utls Chrome fingerprint.
 	UseUTLS bool `yaml:"use_utls"`
 
+	// Directory for per-request JSONL logs (one file per day:
+	// requests-YYYY-MM-DD.jsonl). Empty = disabled.
+	LogDir string `yaml:"log_dir,omitempty"`
+
+	// Days to retain rotated request logs. 0 = disable GC (keep forever).
+	LogRetentionDays int `yaml:"log_retention_days,omitempty"`
+
 	// Pricing overrides (optional). Built-in defaults cover claude-haiku-4-5,
 	// claude-opus-4-6, and claude-sonnet-4-6.
 	Pricing pricing.Config `yaml:"pricing"`
@@ -56,6 +70,31 @@ type Config struct {
 	// Per-access-token weekly USD budgets. Week boundary is ISO week (Mon
 	// 00:00 UTC). Tokens not listed here are not enforced.
 	ClientBudgets []ClientBudget `yaml:"client_budgets"`
+}
+
+// AccessToken is one entry in the access_tokens list. YAML can write it as
+// either a bare string (only the token) or a mapping with token/name.
+type AccessToken struct {
+	Token string `yaml:"token"`
+	Name  string `yaml:"name,omitempty"`
+}
+
+// UnmarshalYAML accepts scalar (string) or map form for backward compat.
+func (a *AccessToken) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		a.Token = node.Value
+		return nil
+	}
+	var shape struct {
+		Token string `yaml:"token"`
+		Name  string `yaml:"name"`
+	}
+	if err := node.Decode(&shape); err != nil {
+		return err
+	}
+	a.Token = shape.Token
+	a.Name = shape.Name
+	return nil
 }
 
 type ClientBudget struct {
@@ -103,5 +142,11 @@ func applyDefaults(c *Config, path string) {
 		c.StateFile = filepath.Join(dir, "state.json")
 	} else if !filepath.IsAbs(c.StateFile) {
 		c.StateFile = filepath.Join(dir, c.StateFile)
+	}
+	if c.LogDir != "" && !filepath.IsAbs(c.LogDir) {
+		c.LogDir = filepath.Join(dir, c.LogDir)
+	}
+	if c.LogRetentionDays == 0 {
+		c.LogRetentionDays = 30
 	}
 }

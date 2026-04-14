@@ -15,6 +15,7 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/logging"
+	"github.com/wjsoj/CPA-Claude/internal/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/server"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 )
@@ -84,11 +85,22 @@ func main() {
 		log.Fatalf("open state file: %v", err)
 	}
 
+	var reqLog *requestlog.Writer
+	if cfg.LogDir != "" {
+		reqLog, err = requestlog.Open(cfg.LogDir, cfg.LogRetentionDays)
+		if err != nil {
+			log.Fatalf("open request log: %v", err)
+		}
+		log.Infof("request log: writing to %s (retain %d days)", cfg.LogDir, cfg.LogRetentionDays)
+	} else {
+		log.Info("request log: disabled (set log_dir in config to enable)")
+	}
+
 	pool := auth.NewPool(oauths, apikeys,
 		time.Duration(cfg.ActiveWindowMinutes)*time.Minute,
 		cfg.UseUTLS, cfg.DefaultProxyURL)
 
-	s := server.New(cfg, pool, store)
+	s := server.New(cfg, pool, store, reqLog)
 
 	// Graceful shutdown. We block main on the done channel so store.Close()
 	// is guaranteed to finish (final usage flush + fsync) before we exit.
@@ -103,6 +115,9 @@ func main() {
 		defer cancel()
 		_ = s.Shutdown(ctx)
 		store.Close()
+		if reqLog != nil {
+			reqLog.Close()
+		}
 	}()
 
 	if err := s.Start(); err != nil {

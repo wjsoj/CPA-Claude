@@ -16,6 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/CPA-Claude/internal/auth"
+	"github.com/wjsoj/CPA-Claude/internal/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 )
 
@@ -49,6 +50,9 @@ func (s *Server) forward(c *gin.Context, path string) {
 	if clientToken == "" {
 		clientToken = c.ClientIP()
 	}
+	clientNameV, _ := c.Get("client_name")
+	clientName, _ := clientNameV.(string)
+	start := time.Now()
 
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -76,10 +80,20 @@ func (s *Server) forward(c *gin.Context, path string) {
 		if spent >= budget.WeeklyUSD {
 			c.Header("Retry-After", "604800")
 			c.AbortWithStatusJSON(429, gin.H{
-				"error":       "weekly budget exceeded",
-				"spent_usd":   spent,
-				"limit_usd":   budget.WeeklyUSD,
-				"week":        s.usage.CurrentWeekKey(),
+				"error":     "weekly budget exceeded",
+				"spent_usd": spent,
+				"limit_usd": budget.WeeklyUSD,
+				"week":      s.usage.CurrentWeekKey(),
+			})
+			s.emitLog(requestlog.Record{
+				Client:      clientName,
+				ClientToken: maskClientToken(clientToken),
+				Model:       model,
+				Stream:      peek.Stream,
+				Path:        path,
+				Status:      429,
+				DurationMs:  time.Since(start).Milliseconds(),
+				Error:       "weekly budget exceeded",
 			})
 			return
 		}
@@ -89,21 +103,31 @@ func (s *Server) forward(c *gin.Context, path string) {
 	// errors, we pick a different auth and retry (bounded).
 	const maxAttempts = 4
 	tried := make(map[string]bool)
+	attempts := 0
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		a := s.pool.Acquire(c.Request.Context(), clientToken)
 		if a == nil {
 			c.AbortWithStatusJSON(503, gin.H{"error": "no upstream credentials available"})
+			s.emitLog(requestlog.Record{
+				Client: clientName, ClientToken: maskClientToken(clientToken), Model: model,
+				Stream: peek.Stream, Path: path, Status: 503, Attempts: attempts,
+				DurationMs: time.Since(start).Milliseconds(), Error: "no upstream credentials available",
+			})
 			return
 		}
 		if tried[a.ID] {
-			// pool returned the same auth we already tried; no useful
-			// alternative exists, give up.
 			c.AbortWithStatusJSON(503, gin.H{"error": "all upstream credentials exhausted"})
+			s.emitLog(requestlog.Record{
+				Client: clientName, ClientToken: maskClientToken(clientToken), Model: model,
+				Stream: peek.Stream, Path: path, Status: 503, Attempts: attempts,
+				DurationMs: time.Since(start).Milliseconds(), Error: "all upstream credentials exhausted",
+			})
 			return
 		}
 		tried[a.ID] = true
+		attempts++
 
-		retry, done := s.doForward(c, a, path, body, peek.Stream, model, clientToken)
+		retry, done := s.doForward(c, a, path, body, peek.Stream, model, clientToken, clientName, start, attempts)
 		if done {
 			s.pool.Release(clientToken)
 			return
@@ -115,6 +139,25 @@ func (s *Server) forward(c *gin.Context, path string) {
 		log.Warnf("proxy: retrying with a different credential (last auth=%s)", a.ID)
 	}
 	c.AbortWithStatusJSON(503, gin.H{"error": "upstream retries exhausted"})
+	s.emitLog(requestlog.Record{
+		Client: clientName, ClientToken: maskClientToken(clientToken), Model: model,
+		Stream: peek.Stream, Path: path, Status: 503, Attempts: attempts,
+		DurationMs: time.Since(start).Milliseconds(), Error: "upstream retries exhausted",
+	})
+}
+
+func (s *Server) emitLog(r requestlog.Record) {
+	if s.reqLog == nil {
+		return
+	}
+	s.reqLog.Log(r)
+}
+
+func maskClientToken(t string) string {
+	if len(t) <= 10 {
+		return "***"
+	}
+	return t[:6] + "…" + t[len(t)-4:]
 }
 
 // doForward sends the request with one credential. Returns (retry, done):
@@ -122,7 +165,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 //	retry=true  → caller should try another credential
 //	done=true   → response was delivered successfully (status < 400 or
 //	              non-retryable error already written to client)
-func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken string) (retry bool, done bool) {
+func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry bool, done bool) {
 	baseURL := s.cfg.AnthropicBaseURL
 	url := baseURL + path + "?beta=true"
 
@@ -176,14 +219,39 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	_ = resp.Body.Close()
 	s.usage.Record(a.ID, a.Label, counts)
 	// Charge the client for the tokens they actually consumed.
+	var costUSD float64
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
-		cost := s.pricing.Cost(model, counts)
-		label := ""
-		if b, ok := s.budgets[clientToken]; ok {
-			label = b.Label
+		costUSD = s.pricing.Cost(model, counts)
+		label := clientName
+		if label == "" {
+			if b, ok := s.budgets[clientToken]; ok {
+				label = b.Label
+			}
 		}
-		s.usage.RecordClient(clientToken, label, counts, cost)
+		s.usage.RecordClient(clientToken, label, counts, costUSD)
 	}
+	authKind := "oauth"
+	if a.Kind == auth.KindAPIKey {
+		authKind = "apikey"
+	}
+	s.emitLog(requestlog.Record{
+		Client:      clientName,
+		ClientToken: maskClientToken(clientToken),
+		AuthID:      a.ID,
+		AuthLabel:   a.Label,
+		AuthKind:    authKind,
+		Model:       model,
+		Input:       counts.InputTokens,
+		Output:      counts.OutputTokens,
+		CacheRead:   counts.CacheReadTokens,
+		CacheCreate: counts.CacheCreateTokens,
+		CostUSD:     costUSD,
+		Status:      resp.StatusCode,
+		DurationMs:  time.Since(start).Milliseconds(),
+		Stream:      stream,
+		Path:        path,
+		Attempts:    attempts,
+	})
 	return false, true
 }
 
