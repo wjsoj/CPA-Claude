@@ -13,6 +13,7 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/proxy"
 )
 
 // transportPool caches http.RoundTripper per proxy URL so distinct OAuth files
@@ -54,12 +55,61 @@ func newStdTransport(proxyURL string) http.RoundTripper {
 		TLSHandshakeTimeout:   30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
-	if proxyURL != "" {
-		if u, err := url.Parse(proxyURL); err == nil {
-			tr.Proxy = http.ProxyURL(u)
+	if proxyURL == "" {
+		return tr
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return tr
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "socks5" || scheme == "socks5h" {
+		// http.Transport.Proxy does not support SOCKS; use DialContext instead.
+		if dc := socks5DialContext(u); dc != nil {
+			tr.DialContext = dc
 		}
+	} else {
+		tr.Proxy = http.ProxyURL(u)
 	}
 	return tr
+}
+
+// socks5DialContext returns a DialContext func that routes TCP dials through
+// the given SOCKS5 proxy. Returns nil if the dialer can't be built.
+func socks5DialContext(u *url.URL) func(context.Context, string, string) (net.Conn, error) {
+	var auth *proxy.Auth
+	if u.User != nil {
+		pwd, _ := u.User.Password()
+		auth = &proxy.Auth{User: u.User.Username(), Password: pwd}
+	}
+	d, err := proxy.SOCKS5("tcp", u.Host, auth, &net.Dialer{Timeout: 30 * time.Second})
+	if err != nil {
+		return nil
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// proxy.SOCKS5 does not honor ctx natively; wrap with a goroutine so
+		// ctx cancellation at least interrupts the wait.
+		type result struct {
+			c   net.Conn
+			err error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			c, err := d.Dial(network, addr)
+			ch <- result{c, err}
+		}()
+		select {
+		case r := <-ch:
+			return r.c, r.err
+		case <-ctx.Done():
+			go func() {
+				if r := <-ch; r.c != nil {
+					_ = r.c.Close()
+				}
+			}()
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // utlsTransport implements http.RoundTripper using uTLS Chrome fingerprint.
@@ -189,7 +239,11 @@ func dialViaProxy(ctx context.Context, proxyURL, targetAddr string) (net.Conn, e
 		}
 		return conn, nil
 	case "socks5", "socks5h":
-		return nil, fmt.Errorf("socks5 not supported yet (use http/https proxy)")
+		dc := socks5DialContext(u)
+		if dc == nil {
+			return nil, fmt.Errorf("failed to build socks5 dialer for %s", proxyURL)
+		}
+		return dc(ctx, "tcp", targetAddr)
 	default:
 		return nil, fmt.Errorf("unknown proxy scheme: %s", u.Scheme)
 	}

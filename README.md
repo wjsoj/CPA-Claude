@@ -20,6 +20,8 @@ automatic API-key fallback.
 - **API-key fallback** — when every OAuth credential is saturated, quota-
   exceeded, or dead, requests fall through to the unlimited API-key pool.
 - **uTLS (Chrome)** — bypasses Anthropic's TLS fingerprinting.
+- **Proxy schemes** — `http://`, `https://`, `socks5://`, `socks5h://` all
+  supported, both with and without uTLS.
 
 ## Quick start
 
