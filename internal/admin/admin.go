@@ -78,6 +78,8 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.DELETE("/auths/:id", h.handleDeleteAuth)
 		api.POST("/auths/:id/refresh", h.handleRefresh)
 		api.POST("/auths/:id/clear-quota", h.handleClearQuota)
+		api.POST("/oauth/start", h.handleOAuthStart)
+		api.POST("/oauth/finish", h.handleOAuthFinish)
 	}
 }
 
@@ -368,6 +370,68 @@ func (h *Handler) handleUpload(c *gin.Context) {
 	}
 	h.pool.AddOAuth(a)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID})
+}
+
+type oauthStartBody struct {
+	ProxyURL string `json:"proxy_url"`
+	Label    string `json:"label"`
+}
+
+func (h *Handler) handleOAuthStart(c *gin.Context) {
+	var body oauthStartBody
+	_ = c.ShouldBindJSON(&body)
+	sess, authURL, err := auth.StartLogin(body.ProxyURL, body.Label)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"session_id":   sess.ID,
+		"auth_url":     authURL,
+		"redirect_uri": "http://localhost:54545/callback",
+	})
+}
+
+type oauthFinishBody struct {
+	SessionID     string `json:"session_id"`
+	Callback      string `json:"callback"` // full URL, or "code#state", or raw code
+	Code          string `json:"code"`
+	State         string `json:"state"`
+	MaxConcurrent int    `json:"max_concurrent"`
+}
+
+func (h *Handler) handleOAuthFinish(c *gin.Context) {
+	var body oauthFinishBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(body.SessionID) == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing session_id"})
+		return
+	}
+	code := strings.TrimSpace(body.Code)
+	state := strings.TrimSpace(body.State)
+	if code == "" && strings.TrimSpace(body.Callback) != "" {
+		parsedCode, parsedState, err := auth.ParseCallback(body.Callback)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		code = parsedCode
+		if state == "" {
+			state = parsedState
+		}
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	a, err := auth.FinishLogin(ctx, body.SessionID, code, state, h.cfg.AuthDir, body.MaxConcurrent, h.cfg.UseUTLS)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	h.pool.AddOAuth(a)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID, "email": a.Email})
 }
 
 func sanitizeFilename(s string) string {

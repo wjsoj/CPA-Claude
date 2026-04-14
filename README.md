@@ -110,9 +110,24 @@ lets you:
 - toggle disabled, edit `max_concurrent` and `proxy_url`, rename labels;
 - force-refresh an OAuth token, clear a quota-exceeded flag;
 - upload a new OAuth JSON file or delete one.
+- **Sign in with Claude** — initiates the Anthropic OAuth flow (PKCE) in
+  a new tab, lets you paste the callback URL back, exchanges the code
+  for tokens, and saves a new credential file. Optional proxy for the
+  token exchange.
 
 API keys are read-only in v1 — edit `config.yaml` and restart to change
 them.
+
+## Compatibility with upstream CLIProxyAPI
+
+OAuth JSON files produced by the original
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — both the
+manual `claude setup-token` output and files created by its own login
+flow — drop into `auth_dir` unchanged. Extra keys (`id_token`,
+`last_refresh`, etc.) are preserved on save. The only caveat: files
+imported from upstream have no `max_concurrent`, so they load as
+unlimited (`∞`). Set a cap in the admin panel if you want slot-based
+routing to take effect.
 
 Clients authenticate with `Authorization: Bearer <token>` matching one of the
 `access_tokens` in `config.yaml`. Each distinct token is one "client session"
