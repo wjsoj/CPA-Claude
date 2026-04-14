@@ -91,7 +91,9 @@ func pkceChallenge(verifier string) string {
 // at FinishLogin; it does not affect the user's browser navigation to
 // claude.ai.
 func StartLogin(proxyURL, label string) (*LoginSession, string, error) {
-	verifier, err := randomURLSafe(48)
+	// 96 bytes → 128-char base64url verifier. Matches upstream CLIProxyAPI
+	// and Anthropic's official Claude Code CLI.
+	verifier, err := randomURLSafe(96)
 	if err != nil {
 		return nil, "", err
 	}
