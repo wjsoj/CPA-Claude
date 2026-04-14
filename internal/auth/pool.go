@@ -287,6 +287,26 @@ func (p *Pool) AddOAuth(a *Auth) {
 	p.oauths = append(p.oauths, a)
 }
 
+// AddAPIKey registers an API-key credential into the live pool. Replaces
+// any existing entry with the same ID.
+func (p *Pool) AddAPIKey(a *Auth) {
+	if a == nil || a.Kind != KindAPIKey {
+		return
+	}
+	if a.ProxyURL == "" && p.defaultProxy != "" {
+		a.ProxyURL = p.defaultProxy
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, existing := range p.apikeys {
+		if existing.ID == a.ID {
+			p.apikeys[i] = a
+			return
+		}
+	}
+	p.apikeys = append(p.apikeys, a)
+}
+
 // RemoveOAuth detaches an OAuth credential from the pool and drops any
 // sticky sessions assigned to it. Returns the removed auth or nil.
 func (p *Pool) RemoveOAuth(id string) *Auth {
@@ -304,6 +324,25 @@ func (p *Pool) RemoveOAuth(id string) *Auth {
 		}
 	}
 	return nil
+}
+
+// RemoveAuth detaches any credential (OAuth or API-key) by ID.
+func (p *Pool) RemoveAuth(id string) *Auth {
+	p.mu.Lock()
+	for i, a := range p.apikeys {
+		if a.ID == id {
+			p.apikeys = append(p.apikeys[:i], p.apikeys[i+1:]...)
+			for k, s := range p.sessions {
+				if s.authID == id {
+					delete(p.sessions, k)
+				}
+			}
+			p.mu.Unlock()
+			return a
+		}
+	}
+	p.mu.Unlock()
+	return p.RemoveOAuth(id)
 }
 
 // ReportUpstreamError inspects an upstream HTTP error status and marks the

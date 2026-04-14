@@ -32,6 +32,7 @@ type Auth struct {
 
 	// Routing
 	ProxyURL      string // per-credential upstream proxy (empty = direct/use default)
+	BaseURL       string // per-credential upstream base URL override (API-key only; empty = config.AnthropicBaseURL)
 	MaxConcurrent int    // OAuth: max client sessions; 0 = unlimited. APIKey: ignored.
 
 	// Source file for OAuth (empty for APIKey)
@@ -49,16 +50,18 @@ func (a *Auth) Snapshot() AuthInfo {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return AuthInfo{
-		ID:            a.ID,
-		Kind:          a.Kind,
-		Label:         a.Label,
-		Email:         a.Email,
-		ExpiresAt:     a.ExpiresAt,
-		ProxyURL:      a.ProxyURL,
-		MaxConcurrent: a.MaxConcurrent,
-		Disabled:      a.Disabled,
+		ID:              a.ID,
+		Kind:            a.Kind,
+		Label:           a.Label,
+		Email:           a.Email,
+		ExpiresAt:       a.ExpiresAt,
+		ProxyURL:        a.ProxyURL,
+		MaxConcurrent:   a.MaxConcurrent,
+		Disabled:        a.Disabled,
 		QuotaExceededAt: a.QuotaExceededAt,
-		QuotaResetAt: a.QuotaResetAt,
+		QuotaResetAt:    a.QuotaResetAt,
+		FilePath:        a.FilePath,
+		BaseURL:         a.BaseURL,
 	}
 }
 
@@ -73,6 +76,8 @@ type AuthInfo struct {
 	Disabled        bool
 	QuotaExceededAt time.Time
 	QuotaResetAt    time.Time
+	FilePath        string
+	BaseURL         string
 }
 
 // IsQuotaExceeded reports true if Anthropic has signalled this auth is out of
@@ -140,5 +145,13 @@ func (a *Auth) SetMaxConcurrent(n int) {
 func (a *Auth) SetProxyURL(u string) {
 	a.mu.Lock()
 	a.ProxyURL = u
+	a.mu.Unlock()
+}
+
+// SetBaseURL updates the per-credential upstream base URL (API-key only).
+// Empty string reverts to the server-wide default.
+func (a *Auth) SetBaseURL(u string) {
+	a.mu.Lock()
+	a.BaseURL = u
 	a.mu.Unlock()
 }

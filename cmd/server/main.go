@@ -43,17 +43,21 @@ func main() {
 	}
 	logging.Setup(cfg.LogLevel)
 
-	log.Infof("loading OAuth credentials from %s", cfg.AuthDir)
-	oauths, err := auth.LoadOAuthDir(cfg.AuthDir)
+	log.Infof("loading credentials from %s", cfg.AuthDir)
+	oauths, apikeysFromDir, err := auth.LoadAuthDir(cfg.AuthDir)
 	if err != nil {
-		log.Fatalf("load oauth dir: %v", err)
+		log.Fatalf("load auth dir: %v", err)
 	}
 	log.Infof("loaded %d OAuth credential(s)", len(oauths))
 	for _, a := range oauths {
 		log.Infof("  - %s (label=%s proxy=%q max_concurrent=%d)", a.ID, a.Label, a.ProxyURL, a.MaxConcurrent)
 	}
+	log.Infof("loaded %d API-key credential(s) from auth_dir", len(apikeysFromDir))
+	for _, a := range apikeysFromDir {
+		log.Infof("  - %s (label=%s proxy=%q)", a.ID, a.Label, a.ProxyURL)
+	}
 
-	var apikeys []*auth.Auth
+	apikeys := apikeysFromDir
 	for i, k := range cfg.APIKeys {
 		if strings.TrimSpace(k.Key) == "" {
 			continue

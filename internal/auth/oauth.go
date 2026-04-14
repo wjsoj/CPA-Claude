@@ -43,8 +43,14 @@ func parseFile(path string, data []byte) (*Auth, error) {
 		return nil, err
 	}
 	t, _ := raw["type"].(string)
-	if strings.ToLower(strings.TrimSpace(t)) != "claude" {
-		return nil, fmt.Errorf("unsupported type %q (expected claude)", t)
+	kindStr := strings.ToLower(strings.TrimSpace(t))
+	switch kindStr {
+	case "claude":
+		// OAuth credential (fall through to existing parse path).
+	case "apikey", "api_key", "anthropic_api_key":
+		return parseAPIKeyFile(path, raw)
+	default:
+		return nil, fmt.Errorf("unsupported type %q (expected claude or apikey)", t)
 	}
 	access, _ := raw["access_token"].(string)
 	refresh, _ := raw["refresh_token"].(string)
@@ -94,34 +100,77 @@ func parseFile(path string, data []byte) (*Auth, error) {
 	return a, nil
 }
 
-// LoadOAuthDir reads every *.json under dir and returns valid Claude auths.
-func LoadOAuthDir(dir string) ([]*Auth, error) {
+func parseAPIKeyFile(path string, raw map[string]any) (*Auth, error) {
+	apiKey, _ := raw["api_key"].(string)
+	if apiKey == "" {
+		// Tolerate "key" / "access_token" spellings.
+		if s, ok := raw["key"].(string); ok {
+			apiKey = s
+		} else if s, ok := raw["access_token"].(string); ok {
+			apiKey = s
+		}
+	}
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, fmt.Errorf("missing api_key")
+	}
+	label, _ := raw["label"].(string)
+	if label == "" {
+		label = filepath.Base(path)
+	}
+	disabled, _ := raw["disabled"].(bool)
+	proxyURL, _ := raw["proxy_url"].(string)
+	baseURL, _ := raw["base_url"].(string)
+	return &Auth{
+		ID:          filepath.Base(path),
+		Kind:        KindAPIKey,
+		Label:       label,
+		AccessToken: apiKey,
+		ProxyURL:    proxyURL,
+		BaseURL:     baseURL,
+		FilePath:    path,
+		Disabled:    disabled,
+	}, nil
+}
+
+// LoadAuthDir reads every *.json under dir and splits the parsed auths into
+// OAuth and API-key slices. Deprecated alias LoadOAuthDir is preserved for
+// callers that only expect OAuth.
+func LoadAuthDir(dir string) (oauths, apikeys []*Auth, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
-	var out []*Auth
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
 			continue
 		}
 		full := filepath.Join(dir, e.Name())
-		data, err := os.ReadFile(full)
-		if err != nil {
-			log.Warnf("auth: read %s: %v", full, err)
+		data, errRead := os.ReadFile(full)
+		if errRead != nil {
+			log.Warnf("auth: read %s: %v", full, errRead)
 			continue
 		}
-		a, err := parseFile(full, data)
-		if err != nil {
-			log.Warnf("auth: parse %s: %v", full, err)
+		a, errParse := parseFile(full, data)
+		if errParse != nil {
+			log.Warnf("auth: parse %s: %v", full, errParse)
 			continue
 		}
-		out = append(out, a)
+		if a.Kind == KindAPIKey {
+			apikeys = append(apikeys, a)
+		} else {
+			oauths = append(oauths, a)
+		}
 	}
-	return out, nil
+	return oauths, apikeys, nil
+}
+
+// LoadOAuthDir retained for backward compatibility. Returns only OAuth auths.
+func LoadOAuthDir(dir string) ([]*Auth, error) {
+	oauths, _, err := LoadAuthDir(dir)
+	return oauths, err
 }
 
 var saveMu sync.Mutex
@@ -142,15 +191,32 @@ func saveAuth(a *Auth) error {
 	if raw == nil {
 		raw = make(map[string]any)
 	}
-	raw["type"] = "claude"
 	a.mu.RLock()
-	raw["access_token"] = a.AccessToken
-	raw["refresh_token"] = a.RefreshToken
-	if !a.ExpiresAt.IsZero() {
-		raw["expired"] = a.ExpiresAt.UTC().Format(time.RFC3339)
+	if a.Kind == KindAPIKey {
+		raw["type"] = "apikey"
+		raw["api_key"] = a.AccessToken
+		if a.BaseURL != "" {
+			raw["base_url"] = a.BaseURL
+		} else {
+			delete(raw, "base_url")
+		}
+		// Clear OAuth-only keys if the file was converted.
+		delete(raw, "refresh_token")
+		delete(raw, "access_token")
+		delete(raw, "expired")
+		delete(raw, "id_token")
+		delete(raw, "last_refresh")
+		delete(raw, "max_concurrent")
+	} else {
+		raw["type"] = "claude"
+		raw["access_token"] = a.AccessToken
+		raw["refresh_token"] = a.RefreshToken
+		if !a.ExpiresAt.IsZero() {
+			raw["expired"] = a.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		raw["max_concurrent"] = a.MaxConcurrent
 	}
 	raw["disabled"] = a.Disabled
-	raw["max_concurrent"] = a.MaxConcurrent
 	if a.ProxyURL != "" {
 		raw["proxy_url"] = a.ProxyURL
 	} else {

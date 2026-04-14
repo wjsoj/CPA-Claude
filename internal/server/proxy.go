@@ -167,6 +167,11 @@ func maskClientToken(t string) string {
 //	              non-retryable error already written to client)
 func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry bool, done bool) {
 	baseURL := s.cfg.AnthropicBaseURL
+	// Per-credential base URL override (used for relay/midstream vendors on
+	// API-key credentials).
+	if ab := strings.TrimRight(a.Snapshot().BaseURL, "/"); ab != "" {
+		baseURL = ab
+	}
 	url := baseURL + path + "?beta=true"
 
 	ctx := c.Request.Context()

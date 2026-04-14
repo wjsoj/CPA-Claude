@@ -119,17 +119,20 @@
       const [disabled, setDisabled] = useState(auth.disabled);
       const [maxC, setMaxC] = useState(auth.max_concurrent || 0);
       const [proxy, setProxy] = useState(auth.proxy_url || "");
+      const [baseURL, setBaseURL] = useState(auth.base_url || "");
       const [label, setLabel] = useState(auth.label || "");
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState("");
+      const isApiKey = auth.kind === "apikey";
       const save = async () => {
         setBusy(true); setErr("");
         try {
+          const body = { disabled, proxy_url: proxy, label };
+          if (!isApiKey) body.max_concurrent = Number(maxC);
+          if (isApiKey) body.base_url = baseURL;
           await api(`/admin/api/auths/${encodeURIComponent(auth.id)}`, {
             method: "PATCH",
-            body: JSON.stringify({
-              disabled, max_concurrent: Number(maxC), proxy_url: proxy, label,
-            }),
+            body: JSON.stringify(body),
           });
           onSaved();
         } catch (x) { setErr(x.message); }
@@ -147,11 +150,20 @@
               <span class="text-sm text-slate-600 dark:text-slate-300">Label</span>
               <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${label} onInput=${(e)=>setLabel(e.target.value)} />
             </label>
-            <label class="block">
-              <span class="text-sm text-slate-600 dark:text-slate-300">Max concurrent sessions</span>
-              <input type="number" min="0" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${maxC} onInput=${(e)=>setMaxC(e.target.value)} />
-              <span class="text-xs text-slate-400 dark:text-slate-500">0 = unlimited</span>
-            </label>
+            ${!isApiKey && html`
+              <label class="block">
+                <span class="text-sm text-slate-600 dark:text-slate-300">Max concurrent sessions</span>
+                <input type="number" min="0" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${maxC} onInput=${(e)=>setMaxC(e.target.value)} />
+                <span class="text-xs text-slate-400 dark:text-slate-500">0 = unlimited</span>
+              </label>
+            `}
+            ${isApiKey && html`
+              <label class="block">
+                <span class="text-sm text-slate-600 dark:text-slate-300">Base URL</span>
+                <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="https://api.your-relay-vendor.com (default: api.anthropic.com)" value=${baseURL} onInput=${(e)=>setBaseURL(e.target.value)} />
+                <span class="text-xs text-slate-400 dark:text-slate-500">Per-key upstream override; leave blank for Anthropic.</span>
+              </label>
+            `}
             <label class="block">
               <span class="text-sm text-slate-600 dark:text-slate-300">Proxy URL</span>
               <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="http://host:port or socks5://host:port" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
@@ -238,6 +250,149 @@
               <button disabled=${busy || !content} onClick=${save} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-200 dark:hover:bg-slate-300 dark:text-slate-900 disabled:opacity-50">${busy ? "Uploading..." : "Add"}</button>
             </div>
           </div>
+        </div>
+      `;
+    }
+
+    function APIKeyModal({ onClose, onSaved }) {
+      const [apiKey, setAPIKey] = useState("");
+      const [label, setLabel] = useState("");
+      const [proxy, setProxy] = useState("");
+      const [baseURL, setBaseURL] = useState("");
+      const [err, setErr] = useState("");
+      const [busy, setBusy] = useState(false);
+      const save = async () => {
+        setBusy(true); setErr("");
+        try {
+          await api("/admin/api/apikeys", {
+            method: "POST",
+            body: JSON.stringify({ api_key: apiKey.trim(), label: label.trim(), proxy_url: proxy.trim(), base_url: baseURL.trim() }),
+          });
+          onSaved();
+        } catch (x) { setErr(x.message); }
+        finally { setBusy(false); }
+      };
+      return html`
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick=${onClose}>
+          <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
+            <div class="flex items-center justify-between">
+              <h2 class="text-lg font-semibold">Add API key</h2>
+              <button onClick=${onClose} class="text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200">✕</button>
+            </div>
+            <p class="text-sm text-slate-500 dark:text-slate-400">Anthropic <span class="mono">sk-ant-api…</span> key. Stored as a JSON file in <span class="mono">auth_dir</span>, mutable from the panel. No per-key concurrency limit — used as the fallback when every OAuth is saturated or over quota.</p>
+            <label class="block">
+              <span class="text-sm text-slate-600 dark:text-slate-300">API key</span>
+              <input type="password" autofocus class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="sk-ant-api03-..." value=${apiKey} onInput=${(e)=>setAPIKey(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="text-sm text-slate-600 dark:text-slate-300">Label</span>
+              <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" placeholder="primary" value=${label} onInput=${(e)=>setLabel(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="text-sm text-slate-600 dark:text-slate-300">Base URL (optional, for relay vendors)</span>
+              <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="https://api.your-relay-vendor.com (default: api.anthropic.com)" value=${baseURL} onInput=${(e)=>setBaseURL(e.target.value)} />
+              <span class="text-xs text-slate-400 dark:text-slate-500">Requests with this key go to <span class="mono">{base_url}/v1/messages</span>. Leave empty to hit Anthropic directly.</span>
+            </label>
+            <label class="block">
+              <span class="text-sm text-slate-600 dark:text-slate-300">Proxy URL (optional)</span>
+              <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="http:// or socks5://" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
+            </label>
+            ${err && html`<div class="text-sm text-red-600 dark:text-red-400">${err}</div>`}
+            <div class="flex justify-end gap-2 pt-2">
+              <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700">Cancel</button>
+              <button disabled=${busy || !apiKey.trim()} onClick=${save} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-200 dark:hover:bg-slate-300 dark:text-slate-900 disabled:opacity-50">${busy ? "Saving..." : "Add"}</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function UpstreamQuota({ auths }) {
+      // Per-auth UI state: { [id]: { loading, error, data, ts } }
+      const [state, setState] = useState({});
+      const run = async (id) => {
+        setState((s) => ({ ...s, [id]: { ...s[id], loading: true, error: "" } }));
+        try {
+          const d = await api(`/admin/api/auths/${encodeURIComponent(id)}/anthropic-usage`, { method: "POST" });
+          setState((s) => ({ ...s, [id]: { loading: false, data: d, ts: Date.now() } }));
+        } catch (x) {
+          setState((s) => ({ ...s, [id]: { loading: false, error: x.message } }));
+        }
+      };
+      const oauths = auths.filter((a) => a.kind === "oauth");
+      if (oauths.length === 0) {
+        return html`<div class="p-6 text-sm text-slate-400 dark:text-slate-500">No OAuth credentials to query.</div>`;
+      }
+      const renderWindows = (usage) => {
+        if (!usage || !usage.body) return null;
+        const windows = Array.isArray(usage.body.five_hour)
+          ? null
+          : usage.body; // the upstream response structure has named fields
+        // Known keys surfaced for display (see reference project).
+        const keys = [
+          ["five_hour", "5-hour"],
+          ["seven_day", "7-day"],
+          ["seven_day_oauth_apps", "7-day (OAuth apps)"],
+          ["seven_day_opus", "7-day Opus"],
+          ["seven_day_sonnet", "7-day Sonnet"],
+          ["seven_day_cowork", "7-day Cowork"],
+        ];
+        const rows = keys
+          .map(([k, label]) => [label, usage.body[k]])
+          .filter(([, v]) => v && (v.utilization != null || v.reset_at != null || v.utilization_percent != null));
+        if (!rows.length) {
+          return html`<pre class="mono text-[11px] text-slate-500 dark:text-slate-400 whitespace-pre-wrap">${JSON.stringify(usage.body, null, 2)}</pre>`;
+        }
+        return html`
+          <table class="w-full text-xs">
+            ${rows.map(([label, w]) => {
+              const pctRaw = w.utilization != null ? w.utilization : w.utilization_percent;
+              const pct = typeof pctRaw === "number" ? Math.round(pctRaw <= 1 ? pctRaw * 100 : pctRaw) : null;
+              const color = pct == null ? "bg-slate-400" : pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+              return html`<tr class="border-b border-slate-100 dark:border-slate-700/60">
+                <td class="py-1.5 pr-3">${label}</td>
+                <td class="py-1.5 mono text-right">${pct != null ? pct + "%" : "—"}</td>
+                <td class="py-1.5 pl-2 w-40">
+                  ${pct != null && html`<div class="h-1.5 bg-slate-100 dark:bg-slate-700 rounded overflow-hidden"><div class=${"h-full " + color} style=${`width:${Math.min(100, pct)}%`}></div></div>`}
+                </td>
+                <td class="py-1.5 pl-3 mono text-right text-slate-500 dark:text-slate-400">${w.reset_at ? new Date(w.reset_at).toISOString().replace("T"," ").slice(0,16) + " UTC" : ""}</td>
+              </tr>`;
+            })}
+          </table>
+        `;
+      };
+      const renderProfile = (profile) => {
+        if (!profile || !profile.body) return null;
+        const p = profile.body;
+        const plan = p.organization && p.organization.billing_plan ? p.organization.billing_plan : (p.plan || p.subscription || "unknown");
+        const email = (p.account && p.account.email_address) || p.email_address || "";
+        return html`<div class="text-xs text-slate-500 dark:text-slate-400">plan: <span class="text-slate-800 dark:text-slate-200 font-semibold">${plan}</span>${email && html` · ${email}`}</div>`;
+      };
+      return html`
+        <div class="divide-y divide-slate-100 dark:divide-slate-700/60">
+          ${oauths.map((a) => {
+            const st = state[a.id] || {};
+            const usage = st.data && st.data.usage;
+            const profile = st.data && st.data.profile;
+            return html`
+              <div class="p-4 space-y-2">
+                <div class="flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <div class="font-medium">${a.label || a.id}</div>
+                    <div class="mono text-[11px] text-slate-400 dark:text-slate-500">${a.id}${a.proxy_url && ` · via ${a.proxy_url}`}</div>
+                  </div>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    ${st.ts && html`<span class="text-[11px] text-slate-400 dark:text-slate-500">fetched ${fmtDate(new Date(st.ts).toISOString())}</span>`}
+                    <button disabled=${st.loading} onClick=${() => run(a.id)} class="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600 text-xs hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50">${st.loading ? "Fetching…" : st.ts ? "Refetch" : "Check upstream"}</button>
+                  </div>
+                </div>
+                ${st.error && html`<div class="text-xs text-red-600 dark:text-red-400 mono whitespace-pre-wrap">${st.error}</div>`}
+                ${usage && usage.error && html`<div class="text-xs text-red-600 dark:text-red-400 mono">usage http ${usage.status}: ${usage.error}</div>`}
+                ${renderProfile(profile)}
+                ${renderWindows(usage)}
+              </div>
+            `;
+          })}
         </div>
       `;
     }
@@ -649,6 +804,11 @@
                 <button onClick=${() => onAction(a, "delete")} class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 dark:text-red-400 hover:bg-red-50">Delete</button>
               `}
               ${a.kind === "apikey" && html`
+                ${a.file_backed && html`
+                  <button onClick=${() => onEdit(a)} class="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700">Edit</button>
+                  <button onClick=${() => onAction(a, "toggle")} class="text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700">${a.disabled ? "Enable" : "Disable"}</button>
+                  <button onClick=${() => onAction(a, "delete")} class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">Delete</button>
+                `}
                 ${a.quota_exceeded && html`<button onClick=${() => onAction(a, "clear-quota")} class="text-xs px-2 py-1 rounded border border-amber-400 text-amber-700 hover:bg-amber-50">Clear quota</button>`}
               `}
             </div>
@@ -663,6 +823,7 @@
       const [editing, setEditing] = useState(null);
       const [uploading, setUploading] = useState(false);
       const [oauthing, setOauthing] = useState(false);
+      const [apikeying, setAPIKeying] = useState(false);
       const [lastTick, setLastTick] = useState(Date.now());
 
       const refresh = useCallback(async () => {
@@ -724,6 +885,7 @@
             </div>
             <div class="flex gap-2">
               <button onClick=${() => setOauthing(true)} class="px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-200 dark:text-slate-900 dark:hover:bg-slate-300 text-sm">Sign in with Claude</button>
+              <button onClick=${() => setAPIKeying(true)} class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm hover:bg-slate-50 dark:hover:bg-slate-700">Add API key</button>
               <button onClick=${() => setUploading(true)} class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 text-sm hover:bg-slate-50 dark:hover:bg-slate-700">Upload JSON</button>
               <button onClick=${refresh} class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm">Refresh</button>
               <button onClick=${() => { setToken(""); onLogout(); }} class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm">Logout</button>
@@ -821,6 +983,14 @@
             `}
           </section>
 
+          <section class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+            <div class="px-4 py-2 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+              <h2 class="font-semibold">Upstream quota</h2>
+              <span class="text-xs text-slate-400 dark:text-slate-500">manual · each query goes through that credential's proxy</span>
+            </div>
+            ${!data ? html`<div class="p-6 text-center text-slate-400 dark:text-slate-500">loading…</div>` : html`<${UpstreamQuota} auths=${data.auths} />`}
+          </section>
+
           <${RequestsExplorer} />
 
           <details class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 dark:border-slate-700">
@@ -862,12 +1032,13 @@
           </details>
 
           <footer class="text-xs text-slate-400 dark:text-slate-500 text-center py-4">
-            v1 · OAuth credentials are mutable · API keys / access tokens / budgets are edited in config.yaml (restart required)
+            v1 · OAuth and file-backed API keys are mutable · access tokens and client budgets live in config.yaml (restart required)
           </footer>
 
           ${editing && html`<${EditModal} auth=${editing} onClose=${() => setEditing(null)} onSaved=${() => { setEditing(null); refresh(); }} />`}
           ${uploading && html`<${UploadModal} onClose=${() => setUploading(false)} onSaved=${() => { setUploading(false); refresh(); }} />`}
           ${oauthing && html`<${OAuthModal} onClose=${() => setOauthing(false)} onSaved=${() => { setOauthing(false); refresh(); }} />`}
+          ${apikeying && html`<${APIKeyModal} onClose=${() => setAPIKeying(false)} onSaved=${() => { setAPIKeying(false); refresh(); }} />`}
         </div>
       `;
     }

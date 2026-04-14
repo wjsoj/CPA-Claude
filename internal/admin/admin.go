@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	// used in Anthropic usage proxy below
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -72,6 +73,8 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/auths/:id/clear-quota", h.handleClearQuota)
 		api.POST("/oauth/start", h.handleOAuthStart)
 		api.POST("/oauth/finish", h.handleOAuthFinish)
+		api.POST("/apikeys", h.handleCreateAPIKey)
+		api.POST("/auths/:id/anthropic-usage", h.handleAnthropicUsage)
 		api.GET("/requests", h.handleRequestsQuery)
 		api.GET("/requests/clients", h.handleRequestsClients)
 	}
@@ -154,20 +157,22 @@ func (h *Handler) adminAuth() gin.HandlerFunc {
 // ---- responses ----
 
 type authRow struct {
-	ID            string           `json:"id"`
-	Kind          string           `json:"kind"`
-	Label         string           `json:"label"`
-	Email         string           `json:"email,omitempty"`
-	ProxyURL      string           `json:"proxy_url"`
-	MaxConcurrent int              `json:"max_concurrent"`
-	ActiveClients int              `json:"active_clients"`
-	ClientTokens  []string         `json:"client_tokens"`
-	Disabled      bool             `json:"disabled"`
-	QuotaExceeded bool             `json:"quota_exceeded"`
-	QuotaResetAt  *time.Time       `json:"quota_reset_at,omitempty"`
-	ExpiresAt     *time.Time       `json:"expires_at,omitempty"`
-	LastFailure   string           `json:"last_failure,omitempty"`
-	Usage         *usageSummary    `json:"usage,omitempty"`
+	ID            string        `json:"id"`
+	Kind          string        `json:"kind"`
+	Label         string        `json:"label"`
+	Email         string        `json:"email,omitempty"`
+	ProxyURL      string        `json:"proxy_url"`
+	BaseURL       string        `json:"base_url,omitempty"`
+	MaxConcurrent int           `json:"max_concurrent"`
+	ActiveClients int           `json:"active_clients"`
+	ClientTokens  []string      `json:"client_tokens"`
+	Disabled      bool          `json:"disabled"`
+	QuotaExceeded bool          `json:"quota_exceeded"`
+	QuotaResetAt  *time.Time    `json:"quota_reset_at,omitempty"`
+	ExpiresAt     *time.Time    `json:"expires_at,omitempty"`
+	LastFailure   string        `json:"last_failure,omitempty"`
+	FileBacked    bool          `json:"file_backed"`
+	Usage         *usageSummary `json:"usage,omitempty"`
 }
 
 type usageSummary struct {
@@ -215,6 +220,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			Label:         st.Auth.Label,
 			Email:         st.Auth.Email,
 			ProxyURL:      st.Auth.ProxyURL,
+			BaseURL:       st.Auth.BaseURL,
 			MaxConcurrent: st.Auth.MaxConcurrent,
 			ActiveClients: st.ActiveClients,
 			ClientTokens:  st.ClientTokens,
@@ -222,6 +228,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			QuotaExceeded: !st.Auth.QuotaExceededAt.IsZero(),
 			QuotaResetAt:  quotaReset,
 			ExpiresAt:     expAt,
+			FileBacked:    strings.TrimSpace(st.Auth.FilePath) != "",
 			Usage:         u,
 		})
 	}
@@ -311,6 +318,7 @@ type patchAuthBody struct {
 	Disabled      *bool   `json:"disabled"`
 	MaxConcurrent *int    `json:"max_concurrent"`
 	ProxyURL      *string `json:"proxy_url"`
+	BaseURL       *string `json:"base_url"`
 	Label         *string `json:"label"`
 }
 
@@ -321,8 +329,10 @@ func (h *Handler) handlePatchAuth(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "auth not found"})
 		return
 	}
-	if a.Kind == auth.KindAPIKey {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "API keys are read-only in v1; edit config.yaml and restart"})
+	// API keys declared in config.yaml have no backing file — they can't be
+	// edited at runtime. File-backed keys (in auth_dir) are mutable like OAuth.
+	if a.Kind == auth.KindAPIKey && a.FilePath == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "config.yaml-defined API keys are read-only; edit the YAML and restart, or add the key via the panel instead"})
 		return
 	}
 	var body patchAuthBody
@@ -339,6 +349,9 @@ func (h *Handler) handlePatchAuth(c *gin.Context) {
 	if body.ProxyURL != nil {
 		a.SetProxyURL(strings.TrimSpace(*body.ProxyURL))
 	}
+	if body.BaseURL != nil {
+		a.SetBaseURL(strings.TrimRight(strings.TrimSpace(*body.BaseURL), "/"))
+	}
 	if body.Label != nil {
 		label := strings.TrimSpace(*body.Label)
 		if label != "" {
@@ -354,7 +367,7 @@ func (h *Handler) handlePatchAuth(c *gin.Context) {
 
 func (h *Handler) handleDeleteAuth(c *gin.Context) {
 	id := c.Param("id")
-	a := h.pool.RemoveOAuth(id)
+	a := h.pool.RemoveAuth(id)
 	if a == nil {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "auth not found"})
 		return
@@ -533,6 +546,139 @@ func (h *Handler) handleOAuthFinish(c *gin.Context) {
 	}
 	h.pool.AddOAuth(a)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID, "email": a.Email})
+}
+
+// ---- API key CRUD ----
+
+type createAPIKeyBody struct {
+	APIKey   string `json:"api_key"`
+	Label    string `json:"label"`
+	ProxyURL string `json:"proxy_url"`
+	BaseURL  string `json:"base_url"`
+	Filename string `json:"filename"`
+}
+
+func (h *Handler) handleCreateAPIKey(c *gin.Context) {
+	var body createAPIKeyBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	key := strings.TrimSpace(body.APIKey)
+	if key == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing api_key"})
+		return
+	}
+	label := strings.TrimSpace(body.Label)
+	name := sanitizeFilename(body.Filename)
+	if name == "" {
+		if label != "" {
+			name = sanitizeFilename("apikey-"+label) + ".json"
+		} else {
+			name = fmt.Sprintf("apikey-%d.json", time.Now().Unix())
+		}
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		name += ".json"
+	}
+	if err := os.MkdirAll(h.cfg.AuthDir, 0700); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	full := filepath.Join(h.cfg.AuthDir, name)
+	raw := map[string]any{
+		"type":    "apikey",
+		"api_key": key,
+	}
+	if label != "" {
+		raw["label"] = label
+	}
+	if strings.TrimSpace(body.ProxyURL) != "" {
+		raw["proxy_url"] = strings.TrimSpace(body.ProxyURL)
+	}
+	if strings.TrimSpace(body.BaseURL) != "" {
+		raw["base_url"] = strings.TrimRight(strings.TrimSpace(body.BaseURL), "/")
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	a, err := auth.ParseFile(full, data)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := os.WriteFile(full, data, 0600); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	h.pool.AddAPIKey(a)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID})
+}
+
+// ---- Anthropic upstream usage proxy ----
+
+func (h *Handler) handleAnthropicUsage(c *gin.Context) {
+	id := c.Param("id")
+	a := h.pool.FindByID(id)
+	if a == nil || a.Kind != auth.KindOAuth {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "oauth credential not found"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	// Ensure the access token is fresh before hitting the upstream endpoints.
+	if err := a.EnsureFresh(ctx, 5*time.Minute, h.pool.UseUTLS()); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "token refresh: " + err.Error()})
+		return
+	}
+	token, _ := a.Credentials()
+	client := auth.ClientFor(a.Snapshot().ProxyURL, h.pool.UseUTLS())
+
+	fetch := func(url string) (int, map[string]any, string) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return 0, nil, err.Error()
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
+		req.Header.Set("Accept-Encoding", "identity")
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, nil, err.Error()
+		}
+		defer resp.Body.Close()
+		buf, _ := io.ReadAll(resp.Body)
+		var obj map[string]any
+		_ = json.Unmarshal(buf, &obj)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			msg := strings.TrimSpace(string(buf))
+			if len(msg) > 300 {
+				msg = msg[:300] + "...(truncated)"
+			}
+			return resp.StatusCode, obj, msg
+		}
+		return resp.StatusCode, obj, ""
+	}
+
+	usageStatus, usageBody, usageErr := fetch("https://api.anthropic.com/api/oauth/usage")
+	profileStatus, profileBody, profileErr := fetch("https://api.anthropic.com/api/oauth/profile")
+
+	c.JSON(http.StatusOK, gin.H{
+		"usage": gin.H{
+			"status": usageStatus,
+			"body":   usageBody,
+			"error":  usageErr,
+		},
+		"profile": gin.H{
+			"status": profileStatus,
+			"body":   profileBody,
+			"error":  profileErr,
+		},
+	})
 }
 
 // ---- request log query ----
