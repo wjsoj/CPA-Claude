@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -306,18 +307,46 @@ func (p *Pool) RemoveOAuth(id string) *Auth {
 }
 
 // ReportUpstreamError inspects an upstream HTTP error status and marks the
-// auth as quota-exceeded (so subsequent requests fall through) if appropriate.
+// credential as temporarily unavailable (so Acquire picks a different auth
+// on the next attempt). Every retryable status results in a cooldown; the
+// cooldown length is tuned to the specific failure mode:
+//
+//	429  → Retry-After (if given) or 1h
+//	403  → Retry-After (if given) or 30m  (could be quota or auth-forbidden)
+//	401  → 15m                             (token revoked/invalid; admin may
+//	                                        need to re-login, but don't hard-
+//	                                        disable on a single transient hit)
+//	529  → 30s                             (Anthropic overloaded)
+//	5xx  → MarkFailure only (no cooldown; transient)
+//
+// The admin panel's "Clear quota" button lets you drop the flag early.
 func (p *Pool) ReportUpstreamError(a *Auth, status int, resetAt time.Time) {
 	if a == nil {
 		return
 	}
-	if status == 429 || (status == 403 && resetAt.IsZero()) {
-		if resetAt.IsZero() {
-			resetAt = time.Now().Add(time.Hour)
+	now := time.Now()
+	setCooldown := func(d time.Duration) {
+		until := resetAt
+		if until.IsZero() {
+			until = now.Add(d)
 		}
-		a.MarkQuotaExceeded(resetAt)
-		log.Warnf("auth: %s flagged quota-exceeded until %s (status %d)", a.ID, resetAt.Format(time.RFC3339), status)
-	} else if status >= 500 {
-		a.MarkFailure("upstream 5xx")
+		a.MarkQuotaExceeded(until)
+		log.Warnf("auth: %s flagged unavailable until %s (status %d)", a.ID, until.Format(time.RFC3339), status)
+	}
+	switch {
+	case status == 429:
+		setCooldown(time.Hour)
+	case status == 403:
+		setCooldown(30 * time.Minute)
+	case status == 401:
+		// Don't honor Retry-After for auth failures — it's typically a rate
+		// limit hint unrelated to the bad credential.
+		resetAt = time.Time{}
+		setCooldown(15 * time.Minute)
+	case status == 529:
+		resetAt = time.Time{}
+		setCooldown(30 * time.Second)
+	case status >= 500:
+		a.MarkFailure(fmt.Sprintf("upstream %d", status))
 	}
 }
