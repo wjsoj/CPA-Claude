@@ -143,20 +143,27 @@ func (h *Handler) adminAuth() gin.HandlerFunc {
 // ---- responses ----
 
 type authRow struct {
-	ID              string          `json:"id"`
-	Kind            string          `json:"kind"`
-	Label           string          `json:"label"`
-	Email           string          `json:"email,omitempty"`
-	ProxyURL        string          `json:"proxy_url"`
-	MaxConcurrent   int             `json:"max_concurrent"`
-	ActiveClients   int             `json:"active_clients"`
-	ClientTokens    []string        `json:"client_tokens"`
-	Disabled        bool            `json:"disabled"`
-	QuotaExceeded   bool            `json:"quota_exceeded"`
-	QuotaResetAt    *time.Time      `json:"quota_reset_at,omitempty"`
-	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
-	LastFailure     string          `json:"last_failure,omitempty"`
-	Usage           *usage.PerAuth  `json:"usage,omitempty"`
+	ID            string           `json:"id"`
+	Kind          string           `json:"kind"`
+	Label         string           `json:"label"`
+	Email         string           `json:"email,omitempty"`
+	ProxyURL      string           `json:"proxy_url"`
+	MaxConcurrent int              `json:"max_concurrent"`
+	ActiveClients int              `json:"active_clients"`
+	ClientTokens  []string         `json:"client_tokens"`
+	Disabled      bool             `json:"disabled"`
+	QuotaExceeded bool             `json:"quota_exceeded"`
+	QuotaResetAt  *time.Time       `json:"quota_reset_at,omitempty"`
+	ExpiresAt     *time.Time       `json:"expires_at,omitempty"`
+	LastFailure   string           `json:"last_failure,omitempty"`
+	Usage         *usageSummary    `json:"usage,omitempty"`
+}
+
+type usageSummary struct {
+	Total    usage.Counts    `json:"total"`
+	Sum24h   usage.Counts    `json:"sum_24h"`
+	LastUsed *time.Time      `json:"last_used,omitempty"`
+	Daily    []usage.DayEntry `json:"daily"` // last 14 days, oldest first
 }
 
 func (h *Handler) handleSummary(c *gin.Context) {
@@ -177,10 +184,19 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			t := st.Auth.ExpiresAt
 			expAt = &t
 		}
-		var u *usage.PerAuth
+		var u *usageSummary
 		if v, ok := usageMap[st.Auth.ID]; ok {
-			vv := v
-			u = &vv
+			var lastPtr *time.Time
+			if !v.LastUsed.IsZero() {
+				lu := v.LastUsed
+				lastPtr = &lu
+			}
+			u = &usageSummary{
+				Total:    v.Total,
+				Sum24h:   h.usage.Sum24h(st.Auth.ID),
+				LastUsed: lastPtr,
+				Daily:    v.DailyOrdered(14),
+			}
 		}
 		rows = append(rows, authRow{
 			ID:            st.Auth.ID,

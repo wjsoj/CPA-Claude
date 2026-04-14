@@ -238,6 +238,38 @@
       `;
     }
 
+    function Sparkline({ daily }) {
+      // Fill missing days with zero so the sparkline width reflects real
+      // elapsed time, not just days with activity.
+      const map = Object.fromEntries(daily.map((d) => [d.date, d.counts]));
+      const end = daily[daily.length - 1].date;
+      const days = 14;
+      const out = [];
+      const endD = new Date(end + "T00:00:00Z");
+      for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(endD);
+        d.setUTCDate(endD.getUTCDate() - i);
+        const key = d.toISOString().slice(0, 10);
+        const c = map[key] || { input_tokens: 0, output_tokens: 0 };
+        out.push({ date: key, val: (c.input_tokens || 0) + (c.output_tokens || 0) });
+      }
+      const max = Math.max(1, ...out.map((o) => o.val));
+      return html`
+        <div class="flex items-end gap-[2px] h-10 w-[88px]">
+          ${out.map((o) => {
+            const pct = Math.round((o.val / max) * 100);
+            const hStyle = `height:${Math.max(pct, o.val > 0 ? 6 : 2)}%`;
+            const title = `${o.date}: ${o.val.toLocaleString()} tokens`;
+            return html`<div
+              title=${title}
+              class=${"w-[4px] rounded-sm " + (o.val > 0 ? "bg-slate-700" : "bg-slate-200")}
+              style=${hStyle}
+            ></div>`;
+          })}
+        </div>
+      `;
+    }
+
     function OAuthModal({ onClose, onSaved }) {
       const [step, setStep] = useState(1); // 1 = form, 2 = waiting-for-callback
       const [proxy, setProxy] = useState("");
@@ -388,10 +420,20 @@
           <td class="py-3 px-3 text-xs">${a.expires_at ? fmtDate(a.expires_at) : html`<span class="text-slate-400">—</span>`}</td>
           <td class="py-3 px-3 mono text-xs">
             ${u ? html`
-              <div>in: ${fmtInt(u.input_tokens)}</div>
-              <div>out: ${fmtInt(u.output_tokens)}</div>
-              <div class="text-slate-500">req: ${fmtInt(u.requests)} / err: ${fmtInt(u.errors)}</div>
+              <div>in: ${fmtInt(u.total.input_tokens)}</div>
+              <div>out: ${fmtInt(u.total.output_tokens)}</div>
+              <div class="text-slate-500">req: ${fmtInt(u.total.requests)} / err: ${fmtInt(u.total.errors)}</div>
             ` : html`<span class="text-slate-400">—</span>`}
+          </td>
+          <td class="py-3 px-3 mono text-xs">
+            ${u ? html`
+              <div>in: ${fmtInt(u.sum_24h.input_tokens)}</div>
+              <div>out: ${fmtInt(u.sum_24h.output_tokens)}</div>
+              <div class="text-slate-500">req: ${fmtInt(u.sum_24h.requests)}</div>
+            ` : html`<span class="text-slate-400">—</span>`}
+          </td>
+          <td class="py-3 px-3">
+            ${u && u.daily && u.daily.length ? html`<${Sparkline} daily=${u.daily} />` : html`<span class="text-slate-400 text-xs">—</span>`}
           </td>
           <td class="py-3 px-3">
             <div class="flex gap-1 flex-wrap justify-end">
@@ -452,14 +494,20 @@
 
       const oauths = data ? data.auths.filter((a) => a.kind === "oauth") : [];
       const apikeys = data ? data.auths.filter((a) => a.kind === "apikey") : [];
-      const totals = { in: 0, out: 0, req: 0, err: 0 };
+      const totals = { in: 0, out: 0, req: 0, err: 0, in24: 0, out24: 0 };
       if (data) for (const a of data.auths) {
         const t = a.usage && a.usage.total;
-        if (!t) continue;
-        totals.in += t.input_tokens || 0;
-        totals.out += t.output_tokens || 0;
-        totals.req += t.requests || 0;
-        totals.err += t.errors || 0;
+        if (t) {
+          totals.in += t.input_tokens || 0;
+          totals.out += t.output_tokens || 0;
+          totals.req += t.requests || 0;
+          totals.err += t.errors || 0;
+        }
+        const h24 = a.usage && a.usage.sum_24h;
+        if (h24) {
+          totals.in24 += h24.input_tokens || 0;
+          totals.out24 += h24.output_tokens || 0;
+        }
       }
 
       return html`
@@ -480,12 +528,14 @@
 
           ${err && html`<div class="rounded-lg bg-red-50 text-red-700 px-4 py-2 text-sm">${err}</div>`}
 
-          <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <section class="grid grid-cols-2 md:grid-cols-6 gap-3">
             ${[
-              ["OAuth credentials", oauths.length],
+              ["OAuth", oauths.length],
               ["API keys", apikeys.length],
-              ["Σ input tokens", fmtInt(totals.in)],
-              ["Σ output tokens", fmtInt(totals.out)],
+              ["24h in", fmtInt(totals.in24)],
+              ["24h out", fmtInt(totals.out24)],
+              ["Σ in", fmtInt(totals.in)],
+              ["Σ out", fmtInt(totals.out)],
             ].map(([k, v]) => html`
               <div class="bg-white rounded-xl border border-slate-200 p-4">
                 <div class="text-xs text-slate-500">${k}</div>
@@ -509,7 +559,9 @@
                     <th class="py-2 px-3">Slots</th>
                     <th class="py-2 px-3">Proxy</th>
                     <th class="py-2 px-3">Token exp</th>
-                    <th class="py-2 px-3">Usage (total)</th>
+                    <th class="py-2 px-3">Total</th>
+                    <th class="py-2 px-3">Last 24h</th>
+                    <th class="py-2 px-3">14-day in+out</th>
                     <th class="py-2 px-3 text-right">Actions</th>
                   </tr>
                 </thead>

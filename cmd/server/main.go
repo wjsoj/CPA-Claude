@@ -90,8 +90,11 @@ func main() {
 
 	s := server.New(cfg, pool, store)
 
-	// Graceful shutdown.
+	// Graceful shutdown. We block main on the done channel so store.Close()
+	// is guaranteed to finish (final usage flush + fsync) before we exit.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 		<-sigCh
@@ -105,4 +108,5 @@ func main() {
 	if err := s.Start(); err != nil {
 		log.Infof("server stopped: %v", err)
 	}
+	<-shutdownDone
 }
