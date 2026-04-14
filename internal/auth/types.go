@@ -1,0 +1,120 @@
+package auth
+
+import (
+	"sync"
+	"time"
+)
+
+// Kind distinguishes OAuth credentials (concurrency-limited) from API keys
+// (unlimited; used as fallback).
+type Kind int
+
+const (
+	KindOAuth Kind = iota
+	KindAPIKey
+)
+
+// Auth is a single upstream credential.
+// For OAuth: AccessToken/RefreshToken/ExpiresAt are managed by the refresher.
+// For APIKey: only AccessToken (the literal key) is used.
+type Auth struct {
+	mu sync.RWMutex
+
+	ID    string // stable identifier (OAuth: file basename; APIKey: "apikey:<label-or-prefix>")
+	Kind  Kind
+	Label string
+	Email string
+
+	// Credentials
+	AccessToken  string
+	RefreshToken string // OAuth only
+	ExpiresAt    time.Time
+
+	// Routing
+	ProxyURL      string // per-credential upstream proxy (empty = direct/use default)
+	MaxConcurrent int    // OAuth: max client sessions; 0 = unlimited. APIKey: ignored.
+
+	// Source file for OAuth (empty for APIKey)
+	FilePath string
+
+	// Health
+	Disabled          bool
+	QuotaExceededAt   time.Time // zero = not flagged
+	QuotaResetAt      time.Time // when to try again (may be zero = manual reset)
+	LastFailure       time.Time
+	LastFailureReason string
+}
+
+func (a *Auth) Snapshot() AuthInfo {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return AuthInfo{
+		ID:            a.ID,
+		Kind:          a.Kind,
+		Label:         a.Label,
+		Email:         a.Email,
+		ExpiresAt:     a.ExpiresAt,
+		ProxyURL:      a.ProxyURL,
+		MaxConcurrent: a.MaxConcurrent,
+		Disabled:      a.Disabled,
+		QuotaExceededAt: a.QuotaExceededAt,
+		QuotaResetAt: a.QuotaResetAt,
+	}
+}
+
+type AuthInfo struct {
+	ID              string
+	Kind            Kind
+	Label           string
+	Email           string
+	ExpiresAt       time.Time
+	ProxyURL        string
+	MaxConcurrent   int
+	Disabled        bool
+	QuotaExceededAt time.Time
+	QuotaResetAt    time.Time
+}
+
+// IsQuotaExceeded reports true if Anthropic has signalled this auth is out of
+// quota and we should skip it until QuotaResetAt (or until manually cleared).
+func (a *Auth) IsQuotaExceeded(now time.Time) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.QuotaExceededAt.IsZero() {
+		return false
+	}
+	if a.QuotaResetAt.IsZero() {
+		// No known reset; keep skipping for 1 hour.
+		return now.Before(a.QuotaExceededAt.Add(time.Hour))
+	}
+	return now.Before(a.QuotaResetAt)
+}
+
+func (a *Auth) MarkQuotaExceeded(resetAt time.Time) {
+	a.mu.Lock()
+	a.QuotaExceededAt = time.Now()
+	a.QuotaResetAt = resetAt
+	a.mu.Unlock()
+}
+
+func (a *Auth) MarkFailure(reason string) {
+	a.mu.Lock()
+	a.LastFailure = time.Now()
+	a.LastFailureReason = reason
+	a.mu.Unlock()
+}
+
+// Credentials returns a snapshot of the fields needed to authenticate an
+// upstream request. Safe for concurrent callers.
+func (a *Auth) Credentials() (accessToken string, kind Kind) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.AccessToken, a.Kind
+}
+
+func (a *Auth) ClearQuota() {
+	a.mu.Lock()
+	a.QuotaExceededAt = time.Time{}
+	a.QuotaResetAt = time.Time{}
+	a.mu.Unlock()
+}
