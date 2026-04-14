@@ -1,0 +1,235 @@
+package requestlog
+
+import (
+	"bufio"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Aggregate sums counters over a set of records.
+type Aggregate struct {
+	Count             int64   `json:"count"`
+	InputTokens       int64   `json:"input_tokens"`
+	OutputTokens      int64   `json:"output_tokens"`
+	CacheReadTokens   int64   `json:"cache_read_tokens"`
+	CacheCreateTokens int64   `json:"cache_create_tokens"`
+	CostUSD           float64 `json:"cost_usd"`
+	Errors            int64   `json:"errors"`
+	TotalDurationMs   int64   `json:"total_duration_ms"`
+}
+
+func (a *Aggregate) add(r Record) {
+	a.Count++
+	a.InputTokens += r.Input
+	a.OutputTokens += r.Output
+	a.CacheReadTokens += r.CacheRead
+	a.CacheCreateTokens += r.CacheCreate
+	a.CostUSD += r.CostUSD
+	a.TotalDurationMs += r.DurationMs
+	if r.Status >= 400 || r.Error != "" {
+		a.Errors++
+	}
+}
+
+// Filter selects records. Empty string fields and zero time fields mean
+// "no constraint".
+type Filter struct {
+	Dir    string
+	From   time.Time // inclusive; compared at day granularity (UTC)
+	To     time.Time // inclusive
+	Client string    // exact match on Record.Client
+	Model  string    // exact match on Record.Model
+	Status int       // 0 = any; otherwise exact match
+	Limit  int       // max recent entries to return (0 = 500)
+}
+
+// Result is the Query return value.
+type Result struct {
+	Summary  Aggregate            `json:"summary"`
+	ByClient map[string]Aggregate `json:"by_client"`
+	ByModel  map[string]Aggregate `json:"by_model"`
+	ByDay    map[string]Aggregate `json:"by_day"`
+	Entries  []Record             `json:"entries"`
+	Scanned  int64                `json:"scanned"`
+}
+
+// Clients returns the sorted set of distinct client names seen across all
+// rotated log files. Useful to populate a filter dropdown.
+func Clients(dir string) ([]string, error) {
+	files, err := listLogFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	for _, f := range files {
+		fh, err := os.Open(f)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(fh)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			var r Record
+			if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+				continue
+			}
+			if r.Client != "" {
+				seen[r.Client] = struct{}{}
+			}
+		}
+		_ = fh.Close()
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Query scans rotated log files in dir that intersect the [From, To]
+// window, applies the filter, aggregates counts, and collects the most
+// recent matching entries up to Limit.
+func Query(f Filter) (*Result, error) {
+	if f.Limit <= 0 {
+		f.Limit = 500
+	}
+	files, err := listLogFiles(f.Dir)
+	if err != nil {
+		return nil, err
+	}
+	// Files are "requests-YYYY-MM-DD.jsonl"; sort descending (newest first)
+	// so we can stop early on Entries once Limit is reached. Aggregates
+	// still need the full sweep.
+	sort.Sort(sort.Reverse(sort.StringSlice(files)))
+
+	res := &Result{
+		ByClient: make(map[string]Aggregate),
+		ByModel:  make(map[string]Aggregate),
+		ByDay:    make(map[string]Aggregate),
+	}
+	for _, path := range files {
+		day := extractDay(path)
+		if !dayInRange(day, f.From, f.To) {
+			continue
+		}
+		if err := scanFile(path, f, res); err != nil {
+			return nil, err
+		}
+	}
+	// Newest-first within one file isn't strictly guaranteed by writer
+	// ordering when concurrent writes arrive out of order, but scan order
+	// across files is; sort the collected recent entries just in case.
+	sort.Slice(res.Entries, func(i, j int) bool {
+		return res.Entries[i].TS.After(res.Entries[j].TS)
+	})
+	if len(res.Entries) > f.Limit {
+		res.Entries = res.Entries[:f.Limit]
+	}
+	return res, nil
+}
+
+func scanFile(path string, f Filter, res *Result) error {
+	fh, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer fh.Close()
+	sc := bufio.NewScanner(fh)
+	sc.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	for sc.Scan() {
+		res.Scanned++
+		var r Record
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			continue
+		}
+		if !matches(r, f) {
+			continue
+		}
+		res.Summary.add(r)
+		by := res.ByClient[r.Client]
+		by.add(r)
+		res.ByClient[r.Client] = by
+		bm := res.ByModel[r.Model]
+		bm.add(r)
+		res.ByModel[r.Model] = bm
+		dayKey := r.TS.UTC().Format("2006-01-02")
+		bd := res.ByDay[dayKey]
+		bd.add(r)
+		res.ByDay[dayKey] = bd
+		// Collect recent entries. We keep up to 2× Limit here to give the
+		// final top-sort headroom, then trim in Query.
+		if len(res.Entries) < f.Limit*2 {
+			res.Entries = append(res.Entries, r)
+		}
+	}
+	return sc.Err()
+}
+
+func matches(r Record, f Filter) bool {
+	if f.Client != "" && !strings.EqualFold(r.Client, f.Client) {
+		return false
+	}
+	if f.Model != "" && !strings.EqualFold(r.Model, f.Model) {
+		return false
+	}
+	if f.Status != 0 && r.Status != f.Status {
+		return false
+	}
+	if !f.From.IsZero() && r.TS.Before(f.From) {
+		return false
+	}
+	if !f.To.IsZero() && r.TS.After(f.To) {
+		return false
+	}
+	return true
+}
+
+func listLogFiles(dir string) ([]string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		out = append(out, filepath.Join(dir, name))
+	}
+	return out, nil
+}
+
+func extractDay(path string) string {
+	base := filepath.Base(path)
+	base = strings.TrimPrefix(base, "requests-")
+	base = strings.TrimSuffix(base, ".jsonl")
+	return base
+}
+
+func dayInRange(day string, from, to time.Time) bool {
+	if !from.IsZero() && day < from.UTC().Format("2006-01-02") {
+		return false
+	}
+	if !to.IsZero() && day > to.UTC().Format("2006-01-02") {
+		return false
+	}
+	return true
+}

@@ -238,6 +238,206 @@
       `;
     }
 
+    function RequestsExplorer() {
+      const today = new Date().toISOString().slice(0, 10);
+      const sevenAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+      const [from, setFrom] = useState(sevenAgo);
+      const [to, setTo] = useState(today);
+      const [client, setClient] = useState("");
+      const [model, setModel] = useState("");
+      const [limit, setLimit] = useState(200);
+      const [clientsList, setClientsList] = useState([]);
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState("");
+      const [busy, setBusy] = useState(false);
+
+      const loadClients = useCallback(async () => {
+        try {
+          const d = await api("/admin/api/requests/clients");
+          setClientsList(d.clients || []);
+        } catch {}
+      }, []);
+      useEffect(() => { loadClients(); }, [loadClients]);
+
+      const run = useCallback(async () => {
+        setBusy(true); setErr("");
+        try {
+          const qs = new URLSearchParams();
+          if (from) qs.set("from", from);
+          if (to) qs.set("to", to);
+          if (client) qs.set("client", client);
+          if (model) qs.set("model", model);
+          if (limit) qs.set("limit", String(limit));
+          const d = await api("/admin/api/requests?" + qs.toString());
+          setData(d);
+        } catch (x) { setErr(x.message); }
+        finally { setBusy(false); }
+      }, [from, to, client, model, limit]);
+
+      useEffect(() => { run(); /* initial run */ }, []); // eslint-disable-line
+
+      const cost = (v) => "$" + (v || 0).toFixed(4);
+      const renderAgg = (a) => html`
+        <span class="mono">${fmtInt(a.count)}</span> req · <span class="mono">${cost(a.cost_usd)}</span>
+        <span class="text-slate-500"> (in ${fmtInt(a.input_tokens)}/out ${fmtInt(a.output_tokens)})</span>
+        ${a.errors > 0 && html`<span class="text-red-600"> · ${fmtInt(a.errors)} err</span>`}
+      `;
+
+      const sortedByClient = data ? Object.entries(data.by_client).sort(([,a],[,b]) => b.cost_usd - a.cost_usd) : [];
+      const sortedByModel  = data ? Object.entries(data.by_model).sort(([,a],[,b]) => b.cost_usd - a.cost_usd) : [];
+      const sortedByDay    = data ? Object.entries(data.by_day).sort(([a],[b]) => a.localeCompare(b)) : [];
+
+      // derive models list from current data for the filter dropdown
+      const modelsList = data ? Object.keys(data.by_model).sort() : [];
+
+      const maxDayCost = Math.max(1e-9, ...sortedByDay.map(([, a]) => a.cost_usd));
+
+      return html`
+        <section class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div class="px-4 py-2 border-b border-slate-200 flex items-center justify-between">
+            <h2 class="font-semibold">Requests</h2>
+            <span class="text-xs text-slate-400">${data ? `${fmtInt(data.scanned)} lines scanned · ${fmtInt(data.summary.count)} match` : ""}</span>
+          </div>
+          <div class="p-4 grid grid-cols-1 md:grid-cols-6 gap-3 items-end border-b border-slate-100">
+            <label class="block">
+              <span class="text-xs text-slate-500">From</span>
+              <input type="date" class="mt-1 w-full border rounded-lg px-2 py-1.5" value=${from} onInput=${(e) => setFrom(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="text-xs text-slate-500">To</span>
+              <input type="date" class="mt-1 w-full border rounded-lg px-2 py-1.5" value=${to} onInput=${(e) => setTo(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="text-xs text-slate-500">Client</span>
+              <select class="mt-1 w-full border rounded-lg px-2 py-1.5" value=${client} onChange=${(e) => setClient(e.target.value)}>
+                <option value="">(any)</option>
+                ${clientsList.map((c) => html`<option value=${c}>${c}</option>`)}
+              </select>
+            </label>
+            <label class="block">
+              <span class="text-xs text-slate-500">Model</span>
+              <select class="mt-1 w-full border rounded-lg px-2 py-1.5" value=${model} onChange=${(e) => setModel(e.target.value)}>
+                <option value="">(any)</option>
+                ${modelsList.map((m) => html`<option value=${m}>${m}</option>`)}
+              </select>
+            </label>
+            <label class="block">
+              <span class="text-xs text-slate-500">Entry limit</span>
+              <input type="number" min="1" max="5000" class="mt-1 w-full border rounded-lg px-2 py-1.5 mono text-xs" value=${limit} onInput=${(e) => setLimit(e.target.value)} />
+            </label>
+            <button disabled=${busy} onClick=${run} class="px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50">${busy ? "…" : "Query"}</button>
+          </div>
+
+          ${err && html`<div class="p-3 bg-red-50 text-red-700 text-sm">${err}</div>`}
+
+          ${data && html`
+            <div class="p-4 grid grid-cols-2 md:grid-cols-5 gap-3 bg-slate-50 border-b border-slate-100">
+              ${[
+                ["Requests", fmtInt(data.summary.count)],
+                ["Total $", cost(data.summary.cost_usd)],
+                ["Input", fmtInt(data.summary.input_tokens)],
+                ["Output", fmtInt(data.summary.output_tokens)],
+                ["Errors", fmtInt(data.summary.errors)],
+              ].map(([k, v]) => html`
+                <div class="bg-white rounded-lg border border-slate-200 px-3 py-2">
+                  <div class="text-[11px] text-slate-500">${k}</div>
+                  <div class="text-lg font-semibold">${v}</div>
+                </div>
+              `)}
+            </div>
+          `}
+
+          ${data && sortedByDay.length > 0 && html`
+            <div class="p-4 border-b border-slate-100">
+              <div class="text-sm font-medium text-slate-700 mb-2">Daily cost</div>
+              <div class="flex items-end gap-[3px] h-16">
+                ${sortedByDay.map(([day, a]) => {
+                  const pct = Math.round((a.cost_usd / maxDayCost) * 100);
+                  const title = `${day}: ${cost(a.cost_usd)} · ${fmtInt(a.count)} req`;
+                  return html`<div class="flex-1 min-w-[6px] flex flex-col items-stretch justify-end">
+                    <div title=${title} class="bg-slate-700 rounded-sm" style=${"height:" + Math.max(pct, a.cost_usd > 0 ? 4 : 1) + "%"}></div>
+                  </div>`;
+                })}
+              </div>
+              <div class="flex justify-between mt-1 text-[10px] text-slate-400 mono">
+                <span>${sortedByDay[0][0]}</span>
+                <span>${sortedByDay[sortedByDay.length - 1][0]}</span>
+              </div>
+            </div>
+          `}
+
+          ${data && html`
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 border-b border-slate-100">
+              <div>
+                <div class="text-sm font-medium text-slate-700 mb-2">By client</div>
+                ${sortedByClient.length === 0 ? html`<div class="text-xs text-slate-400">—</div>` :
+                  html`<table class="w-full text-xs">
+                    ${sortedByClient.map(([k, a]) => html`
+                      <tr class="border-b border-slate-100">
+                        <td class="py-1.5 pr-3 font-medium">${k || html`<span class="text-slate-400">(unnamed)</span>`}</td>
+                        <td class="py-1.5 mono text-right">${cost(a.cost_usd)}</td>
+                        <td class="py-1.5 mono text-right text-slate-500 w-20">${fmtInt(a.count)} req</td>
+                      </tr>
+                    `)}
+                  </table>`}
+              </div>
+              <div>
+                <div class="text-sm font-medium text-slate-700 mb-2">By model</div>
+                ${sortedByModel.length === 0 ? html`<div class="text-xs text-slate-400">—</div>` :
+                  html`<table class="w-full text-xs">
+                    ${sortedByModel.map(([k, a]) => html`
+                      <tr class="border-b border-slate-100">
+                        <td class="py-1.5 pr-3 mono">${k}</td>
+                        <td class="py-1.5 mono text-right">${cost(a.cost_usd)}</td>
+                        <td class="py-1.5 mono text-right text-slate-500 w-20">${fmtInt(a.count)} req</td>
+                      </tr>
+                    `)}
+                  </table>`}
+              </div>
+            </div>
+          `}
+
+          ${data && data.entries && data.entries.length > 0 && html`
+            <div class="p-4">
+              <div class="text-sm font-medium text-slate-700 mb-2">Recent matching entries</div>
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                  <thead class="text-left text-[10px] uppercase text-slate-500 border-b border-slate-200">
+                    <tr>
+                      <th class="py-2 pr-2">Time (UTC)</th>
+                      <th class="py-2 pr-2">Client</th>
+                      <th class="py-2 pr-2">Model</th>
+                      <th class="py-2 pr-2">Auth</th>
+                      <th class="py-2 pr-2 text-right">In</th>
+                      <th class="py-2 pr-2 text-right">Out</th>
+                      <th class="py-2 pr-2 text-right">Cost</th>
+                      <th class="py-2 pr-2 text-right">Status</th>
+                      <th class="py-2 pr-2 text-right">Dur</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${data.entries.slice(0, limit).map((r, i) => html`
+                      <tr class=${"border-b border-slate-50 " + (r.status >= 400 ? "bg-red-50/40" : "")} key=${i}>
+                        <td class="py-1 pr-2 mono text-slate-500">${r.ts.replace("T"," ").slice(0,19)}</td>
+                        <td class="py-1 pr-2">${r.client || html`<span class="text-slate-400">(—)</span>`}</td>
+                        <td class="py-1 pr-2 mono">${r.model}</td>
+                        <td class="py-1 pr-2 mono text-[10px] text-slate-500">${r.auth_label || r.auth_id}</td>
+                        <td class="py-1 pr-2 mono text-right">${fmtInt(r.input_tokens)}</td>
+                        <td class="py-1 pr-2 mono text-right">${fmtInt(r.output_tokens)}</td>
+                        <td class="py-1 pr-2 mono text-right">${cost(r.cost_usd)}</td>
+                        <td class=${"py-1 pr-2 mono text-right " + (r.status >= 400 ? "text-red-600" : "")}>${r.status}</td>
+                        <td class="py-1 pr-2 mono text-right text-slate-500">${r.duration_ms}ms</td>
+                      </tr>
+                    `)}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          `}
+        </section>
+      `;
+    }
+
     function Sparkline({ daily }) {
       // Fill missing days with zero so the sparkline width reflects real
       // elapsed time, not just days with activity.
@@ -616,6 +816,8 @@
               </table>
             `}
           </section>
+
+          <${RequestsExplorer} />
 
           <details class="bg-white rounded-xl border border-slate-200">
             <summary class="px-4 py-2 border-b border-slate-200 font-semibold cursor-pointer">

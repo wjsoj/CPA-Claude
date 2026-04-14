@@ -23,6 +23,7 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/pricing"
+	"github.com/wjsoj/CPA-Claude/internal/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 )
 
@@ -83,6 +84,8 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/auths/:id/clear-quota", h.handleClearQuota)
 		api.POST("/oauth/start", h.handleOAuthStart)
 		api.POST("/oauth/finish", h.handleOAuthFinish)
+		api.GET("/requests", h.handleRequestsQuery)
+		api.GET("/requests/clients", h.handleRequestsClients)
 	}
 }
 
@@ -525,6 +528,72 @@ func (h *Handler) handleOAuthFinish(c *gin.Context) {
 	}
 	h.pool.AddOAuth(a)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID, "email": a.Email})
+}
+
+// ---- request log query ----
+
+func (h *Handler) handleRequestsClients(c *gin.Context) {
+	if h.cfg.LogDir == "" {
+		c.JSON(http.StatusOK, gin.H{"clients": []string{}})
+		return
+	}
+	cls, err := requestlog.Clients(h.cfg.LogDir)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"clients": cls})
+}
+
+func (h *Handler) handleRequestsQuery(c *gin.Context) {
+	if h.cfg.LogDir == "" {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "log_dir not configured"})
+		return
+	}
+	f := requestlog.Filter{
+		Dir:    h.cfg.LogDir,
+		Client: strings.TrimSpace(c.Query("client")),
+		Model:  strings.TrimSpace(c.Query("model")),
+	}
+	if v := strings.TrimSpace(c.Query("from")); v != "" {
+		if t, err := parseDateBound(v, false); err == nil {
+			f.From = t
+		}
+	}
+	if v := strings.TrimSpace(c.Query("to")); v != "" {
+		if t, err := parseDateBound(v, true); err == nil {
+			f.To = t
+		}
+	}
+	if v := c.Query("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &f.Limit)
+	}
+	if v := c.Query("status"); v != "" {
+		fmt.Sscanf(v, "%d", &f.Status)
+	}
+	res, err := requestlog.Query(f)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+// parseDateBound accepts "YYYY-MM-DD" (start-of-day) or full RFC3339.
+// endOfDay=true shifts bare dates to 23:59:59 so `to=2026-04-14` covers
+// the whole day.
+func parseDateBound(s string, endOfDay bool) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if endOfDay {
+		return t.Add(24*time.Hour - time.Second), nil
+	}
+	return t, nil
 }
 
 func sanitizeFilename(s string) string {
