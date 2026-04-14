@@ -5,6 +5,16 @@ requests across multiple Claude OAuth credentials and API keys, with per-user
 sticky slot allocation, per-credential proxies, persistent usage tracking, and
 automatic API-key fallback.
 
+> **Credit.** This project is a heavily simplified and refocused derivative of
+> [**CLIProxyAPI**](https://github.com/router-for-me/CLIProxyAPI) (MIT). The
+> original supports many AI providers (Gemini, Codex/OpenAI, Qwen, Kimi,
+> iFlow, Antigravity, Vertex, Claude, …) and ships a management UI, TUI,
+> translator layer, and multi-protocol entry points. CPA-Claude keeps **only**
+> the Claude passthrough, adds slot-based concurrency, per-credential
+> SOCKS/HTTP proxies, and persistent usage tracking, and drops everything
+> else. The Anthropic OAuth refresh flow and the uTLS Chrome transport were
+> borrowed from the upstream project — huge thanks to its authors.
+
 ## Features
 
 - **Native Claude only** — no protocol translation, pure passthrough to
@@ -107,4 +117,5 @@ On each request for a client token:
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE) for the full text and the attribution note to
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
