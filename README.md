@@ -23,12 +23,36 @@ automatic API-key fallback.
 - **Proxy schemes** — `http://`, `https://`, `socks5://`, `socks5h://` all
   supported, both with and without uTLS.
 
+## Install
+
+One-liner (Linux/macOS, amd64/arm64) — installs to `/usr/local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wjsoj/CPA-Claude/main/install.sh | bash
+```
+
+Pin a version or change prefix:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wjsoj/CPA-Claude/main/install.sh \
+  | bash -s -- --version v0.1.0 --prefix ~/.local
+```
+
+Re-run the same command to upgrade.
+
+From source:
+
+```bash
+go install github.com/wjsoj/CPA-Claude/cmd/server@latest
+# binary will be named "server"; rename to cpa-claude or adjust PATH usage.
+```
+
 ## Quick start
 
 ```bash
 cp config.example.yaml config.yaml
 # edit config.yaml, populate ./auths/*.json, then:
-go run ./cmd/server -config config.yaml
+cpa-claude -config config.yaml
 ```
 
 ## OAuth credential file format
