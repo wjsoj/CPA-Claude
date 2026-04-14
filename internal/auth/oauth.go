@@ -126,7 +126,8 @@ func LoadOAuthDir(dir string) ([]*Auth, error) {
 
 var saveMu sync.Mutex
 
-// saveAuth atomically rewrites the OAuth file with fresh tokens, preserving
+// saveAuth atomically rewrites the OAuth file with fresh tokens plus
+// admin-editable fields (disabled, max_concurrent, proxy_url), preserving
 // any extra keys from the original file.
 func saveAuth(a *Auth) error {
 	saveMu.Lock()
@@ -148,6 +149,16 @@ func saveAuth(a *Auth) error {
 	if !a.ExpiresAt.IsZero() {
 		raw["expired"] = a.ExpiresAt.UTC().Format(time.RFC3339)
 	}
+	raw["disabled"] = a.Disabled
+	raw["max_concurrent"] = a.MaxConcurrent
+	if a.ProxyURL != "" {
+		raw["proxy_url"] = a.ProxyURL
+	} else {
+		delete(raw, "proxy_url")
+	}
+	if a.Label != "" {
+		raw["label"] = a.Label
+	}
 	a.mu.RUnlock()
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
@@ -159,6 +170,12 @@ func saveAuth(a *Auth) error {
 	}
 	return os.Rename(tmp, a.FilePath)
 }
+
+// Persist writes the current admin-editable fields of the auth back to disk.
+func (a *Auth) Persist() error { return saveAuth(a) }
+
+// ParseFile is the exported variant of parseFile for admin upload handlers.
+func ParseFile(path string, data []byte) (*Auth, error) { return parseFile(path, data) }
 
 type refreshResponse struct {
 	AccessToken  string `json:"access_token"`

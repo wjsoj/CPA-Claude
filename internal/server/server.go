@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/wjsoj/CPA-Claude/internal/admin"
 	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
@@ -40,6 +41,9 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store) *Server {
 
 	// Status endpoint (also behind client auth if tokens configured).
 	engine.GET("/status", s.clientAuth(), s.handleStatus)
+
+	// Admin SPA + API.
+	admin.New(cfg, pool, store).Register(engine)
 
 	s.http = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),

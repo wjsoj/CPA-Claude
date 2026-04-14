@@ -118,3 +118,27 @@ func (a *Auth) ClearQuota() {
 	a.QuotaResetAt = time.Time{}
 	a.mu.Unlock()
 }
+
+// SetDisabled toggles the disabled flag.
+func (a *Auth) SetDisabled(v bool) {
+	a.mu.Lock()
+	a.Disabled = v
+	a.mu.Unlock()
+}
+
+// SetMaxConcurrent updates the slot cap for this credential.
+func (a *Auth) SetMaxConcurrent(n int) {
+	if n < 0 {
+		n = 0
+	}
+	a.mu.Lock()
+	a.MaxConcurrent = n
+	a.mu.Unlock()
+}
+
+// SetProxyURL updates the per-credential upstream proxy. Empty string clears it.
+func (a *Auth) SetProxyURL(u string) {
+	a.mu.Lock()
+	a.ProxyURL = u
+	a.mu.Unlock()
+}

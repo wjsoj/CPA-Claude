@@ -249,6 +249,62 @@ func maskToken(t string) string {
 	return t[:4] + "..." + t[len(t)-4:]
 }
 
+// FindByID returns the Auth (OAuth or APIKey) with the given ID, or nil.
+func (p *Pool) FindByID(id string) *Auth {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.oauths {
+		if a.ID == id {
+			return a
+		}
+	}
+	for _, a := range p.apikeys {
+		if a.ID == id {
+			return a
+		}
+	}
+	return nil
+}
+
+// AddOAuth registers a newly uploaded OAuth credential into the live pool.
+// Any existing auth with the same ID is replaced.
+func (p *Pool) AddOAuth(a *Auth) {
+	if a == nil || a.Kind != KindOAuth {
+		return
+	}
+	if a.ProxyURL == "" && p.defaultProxy != "" {
+		a.ProxyURL = p.defaultProxy
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, existing := range p.oauths {
+		if existing.ID == a.ID {
+			p.oauths[i] = a
+			return
+		}
+	}
+	p.oauths = append(p.oauths, a)
+}
+
+// RemoveOAuth detaches an OAuth credential from the pool and drops any
+// sticky sessions assigned to it. Returns the removed auth or nil.
+func (p *Pool) RemoveOAuth(id string) *Auth {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, a := range p.oauths {
+		if a.ID == id {
+			p.oauths = append(p.oauths[:i], p.oauths[i+1:]...)
+			for k, s := range p.sessions {
+				if s.authID == id {
+					delete(p.sessions, k)
+				}
+			}
+			return a
+		}
+	}
+	return nil
+}
+
 // ReportUpstreamError inspects an upstream HTTP error status and marks the
 // auth as quota-exceeded (so subsequent requests fall through) if appropriate.
 func (p *Pool) ReportUpstreamError(a *Auth, status int, resetAt time.Time) {

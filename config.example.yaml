@@ -25,6 +25,10 @@ default_proxy_url: ""
 # Override Anthropic base URL (normally leave default).
 anthropic_base_url: "https://api.anthropic.com"
 
+# Admin panel token. If set, the SPA is served at /admin/ and protected by
+# this token (X-Admin-Token header). Leave empty to disable the panel.
+admin_token: "change-me-long-random-string"
+
 # Tokens that clients must present in Authorization: Bearer. Empty = open.
 # Each unique token counts as one "client session" and occupies one OAuth
 # slot while active.

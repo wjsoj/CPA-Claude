@@ -97,6 +97,22 @@ cpa-claude -config config.yaml
 | POST   | `/v1/messages/count_tokens`   | Pass-through                    |
 | GET    | `/status`                     | Auth pool + usage snapshot      |
 | GET    | `/healthz`                    | Liveness                        |
+| GET    | `/admin/`                     | Web admin panel (if configured) |
+
+## Admin panel
+
+Set `admin_token` in `config.yaml` and open `http://<host>:<port>/admin/`.
+The panel is a single embedded HTML page (Preact + Tailwind via CDN) that
+lets you:
+
+- view every OAuth / API-key credential with live slot usage, quota status,
+  expiry, and accumulated token usage;
+- toggle disabled, edit `max_concurrent` and `proxy_url`, rename labels;
+- force-refresh an OAuth token, clear a quota-exceeded flag;
+- upload a new OAuth JSON file or delete one.
+
+API keys are read-only in v1 — edit `config.yaml` and restart to change
+them.
 
 Clients authenticate with `Authorization: Bearer <token>` matching one of the
 `access_tokens` in `config.yaml`. Each distinct token is one "client session"

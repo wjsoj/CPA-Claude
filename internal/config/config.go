@@ -32,6 +32,10 @@ type Config struct {
 	// Empty list disables client auth (open proxy).
 	AccessTokens []string `yaml:"access_tokens"`
 
+	// Token required to access the /admin/* management panel and APIs.
+	// Empty = panel disabled. Send as X-Admin-Token header (or Authorization: Bearer).
+	AdminToken string `yaml:"admin_token,omitempty"`
+
 	// API-key fallback pool. No concurrency limit.
 	APIKeys []APIKey `yaml:"api_keys"`
 

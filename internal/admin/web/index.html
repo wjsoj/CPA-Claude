@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CPA-Claude Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    [hidden] { display: none !important; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:9999px; font-size:11px; font-weight:600; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+    details>summary { list-style:none; cursor:pointer; }
+    details>summary::-webkit-details-marker { display:none; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div id="app"></div>
+
+  <script type="module">
+    import { h, render } from "https://esm.sh/preact@10.24.3";
+    import { useState, useEffect, useCallback, useRef } from "https://esm.sh/preact@10.24.3/hooks";
+    import htm from "https://esm.sh/htm@3.1.1";
+    const html = htm.bind(h);
+
+    const TOKEN_KEY = "cpa.admin.token";
+    const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
+    const setToken = (t) => { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); };
+
+    async function api(path, opts = {}) {
+      const token = getToken();
+      const res = await fetch(path, {
+        ...opts,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Admin-Token": token,
+          ...(opts.headers || {}),
+        },
+      });
+      const text = await res.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+      if (!res.ok) {
+        const err = new Error((data && data.error) || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      return data;
+    }
+
+    const fmtInt = (n) => (n == null ? "—" : Number(n).toLocaleString());
+    const fmtDate = (s) => {
+      if (!s) return "—";
+      const d = new Date(s);
+      if (isNaN(d)) return "—";
+      const diff = d.getTime() - Date.now();
+      const abs = Math.abs(diff);
+      const m = Math.round(abs / 60000);
+      const h_ = Math.round(abs / 3600000);
+      const day = Math.round(abs / 86400000);
+      let rel = "";
+      if (abs < 60000) rel = "now";
+      else if (m < 60) rel = `${m}m`;
+      else if (h_ < 48) rel = `${h_}h`;
+      else rel = `${day}d`;
+      return diff < 0 ? `${rel} ago` : `in ${rel}`;
+    };
+
+    function Login({ onOk }) {
+      const [val, setVal] = useState("");
+      const [err, setErr] = useState("");
+      const submit = async (e) => {
+        e.preventDefault();
+        setErr("");
+        setToken(val.trim());
+        try {
+          await api("/admin/api/summary");
+          onOk();
+        } catch (x) {
+          setToken("");
+          setErr(x.message || "auth failed");
+        }
+      };
+      return html`
+        <div class="min-h-screen flex items-center justify-center p-6">
+          <form onSubmit=${submit} class="bg-white shadow-xl rounded-2xl p-8 w-full max-w-sm space-y-4 border border-slate-200">
+            <h1 class="text-xl font-semibold">CPA-Claude Admin</h1>
+            <p class="text-sm text-slate-500">Enter admin token to continue.</p>
+            <input
+              type="password" autofocus
+              class="w-full border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
+              placeholder="admin token"
+              value=${val}
+              onInput=${(e) => setVal(e.target.value)}
+            />
+            ${err && html`<div class="text-sm text-red-600">${err}</div>`}
+            <button type="submit" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-medium py-2 rounded-lg">Sign in</button>
+          </form>
+        </div>
+      `;
+    }
+
+    function Badge({ color = "slate", children }) {
+      const palette = {
+        slate: "bg-slate-100 text-slate-700",
+        green: "bg-emerald-100 text-emerald-700",
+        red:   "bg-red-100 text-red-700",
+        amber: "bg-amber-100 text-amber-800",
+        blue:  "bg-blue-100 text-blue-700",
+      };
+      return html`<span class="badge ${palette[color] || palette.slate}">${children}</span>`;
+    }
+
+    function EditModal({ auth, onClose, onSaved }) {
+      const [disabled, setDisabled] = useState(auth.disabled);
+      const [maxC, setMaxC] = useState(auth.max_concurrent || 0);
+      const [proxy, setProxy] = useState(auth.proxy_url || "");
+      const [label, setLabel] = useState(auth.label || "");
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState("");
+      const save = async () => {
+        setBusy(true); setErr("");
+        try {
+          await api(`/admin/api/auths/${encodeURIComponent(auth.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              disabled, max_concurrent: Number(maxC), proxy_url: proxy, label,
+            }),
+          });
+          onSaved();
+        } catch (x) { setErr(x.message); }
+        finally { setBusy(false); }
+      };
+      return html`
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick=${onClose}>
+          <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
+            <div class="flex items-center justify-between">
+              <h2 class="text-lg font-semibold">Edit credential</h2>
+              <button onClick=${onClose} class="text-slate-400 hover:text-slate-700">✕</button>
+            </div>
+            <div class="text-xs mono text-slate-500">${auth.id}</div>
+            <label class="block">
+              <span class="text-sm text-slate-600">Label</span>
+              <input class="mt-1 w-full border rounded-lg px-3 py-2" value=${label} onInput=${(e)=>setLabel(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="text-sm text-slate-600">Max concurrent sessions</span>
+              <input type="number" min="0" class="mt-1 w-full border rounded-lg px-3 py-2" value=${maxC} onInput=${(e)=>setMaxC(e.target.value)} />
+              <span class="text-xs text-slate-400">0 = unlimited</span>
+            </label>
+            <label class="block">
+              <span class="text-sm text-slate-600">Proxy URL</span>
+              <input class="mt-1 w-full border rounded-lg px-3 py-2 mono" placeholder="http://host:port or socks5://host:port" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
+            </label>
+            <label class="flex items-center gap-2">
+              <input type="checkbox" checked=${disabled} onChange=${(e)=>setDisabled(e.target.checked)} />
+              <span class="text-sm">Disabled</span>
+            </label>
+            ${err && html`<div class="text-sm text-red-600">${err}</div>`}
+            <div class="flex justify-end gap-2 pt-2">
+              <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">Cancel</button>
+              <button disabled=${busy} onClick=${save} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">${busy ? "Saving..." : "Save"}</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function UploadModal({ onClose, onSaved }) {
+      const [filename, setFilename] = useState("");
+      const [content, setContent] = useState("");
+      const [label, setLabel] = useState("");
+      const [maxC, setMaxC] = useState(5);
+      const [proxy, setProxy] = useState("");
+      const [err, setErr] = useState("");
+      const [busy, setBusy] = useState(false);
+      const fileInputRef = useRef(null);
+
+      const onPick = () => fileInputRef.current && fileInputRef.current.click();
+      const onFile = async (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (!f) return;
+        setFilename(f.name);
+        setContent(await f.text());
+      };
+      const save = async () => {
+        setBusy(true); setErr("");
+        try {
+          JSON.parse(content); // validate
+          await api("/admin/api/auths/upload", {
+            method: "POST",
+            body: JSON.stringify({
+              filename, content: JSON.parse(content),
+              label, max_concurrent: Number(maxC), proxy_url: proxy,
+            }),
+          });
+          onSaved();
+        } catch (x) { setErr(x.message || String(x)); }
+        finally { setBusy(false); }
+      };
+      return html`
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick=${onClose}>
+          <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 space-y-4" onClick=${(e) => e.stopPropagation()}>
+            <div class="flex items-center justify-between">
+              <h2 class="text-lg font-semibold">Add OAuth credential</h2>
+              <button onClick=${onClose} class="text-slate-400 hover:text-slate-700">✕</button>
+            </div>
+            <input type="file" accept=".json,application/json" ref=${fileInputRef} onChange=${onFile} class="hidden" />
+            <div class="flex gap-2">
+              <button onClick=${onPick} class="px-3 py-1.5 rounded-lg border border-slate-300 text-sm hover:bg-slate-50">Choose JSON file…</button>
+              <input class="flex-1 border rounded-lg px-3 py-2 mono text-sm" placeholder="filename (optional)" value=${filename} onInput=${(e)=>setFilename(e.target.value)} />
+            </div>
+            <label class="block">
+              <span class="text-sm text-slate-600">or paste JSON</span>
+              <textarea class="mt-1 w-full border rounded-lg px-3 py-2 mono h-40" value=${content} onInput=${(e)=>setContent(e.target.value)} placeholder='{"type":"claude","access_token":"...","refresh_token":"...","email":"..."}'></textarea>
+            </label>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="block">
+                <span class="text-sm text-slate-600">Label</span>
+                <input class="mt-1 w-full border rounded-lg px-3 py-2" value=${label} onInput=${(e)=>setLabel(e.target.value)} />
+              </label>
+              <label class="block">
+                <span class="text-sm text-slate-600">Max concurrent</span>
+                <input type="number" min="0" class="mt-1 w-full border rounded-lg px-3 py-2" value=${maxC} onInput=${(e)=>setMaxC(e.target.value)} />
+              </label>
+            </div>
+            <label class="block">
+              <span class="text-sm text-slate-600">Proxy URL (optional)</span>
+              <input class="mt-1 w-full border rounded-lg px-3 py-2 mono" placeholder="http:// or socks5://" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
+            </label>
+            ${err && html`<div class="text-sm text-red-600 whitespace-pre-wrap">${err}</div>`}
+            <div class="flex justify-end gap-2 pt-2">
+              <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">Cancel</button>
+              <button disabled=${busy || !content} onClick=${save} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white disabled:opacity-50">${busy ? "Uploading..." : "Add"}</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function AuthRow({ a, onAction, onEdit }) {
+      const slot = a.max_concurrent > 0 ? `${a.active_clients}/${a.max_concurrent}` : `${a.active_clients}/∞`;
+      let status;
+      if (a.disabled) status = html`<${Badge} color="slate">disabled<//>`;
+      else if (a.quota_exceeded) status = html`<${Badge} color="amber">quota<//>`;
+      else status = html`<${Badge} color="green">active<//>`;
+      const u = a.usage && a.usage.total;
+      return html`
+        <tr class="border-b border-slate-100 hover:bg-slate-50/60">
+          <td class="py-3 px-3">
+            <div class="font-medium">${a.label || a.id}</div>
+            <div class="mono text-slate-400 text-[11px]">${a.id}</div>
+            ${a.email && html`<div class="text-xs text-slate-500">${a.email}</div>`}
+          </td>
+          <td class="py-3 px-3">
+            <${Badge} color=${a.kind === "apikey" ? "blue" : "slate"}>${a.kind}<//>
+            <div class="mt-1">${status}</div>
+          </td>
+          <td class="py-3 px-3 mono">${slot}</td>
+          <td class="py-3 px-3 mono text-xs">${a.proxy_url || html`<span class="text-slate-400">—</span>`}</td>
+          <td class="py-3 px-3 text-xs">${a.expires_at ? fmtDate(a.expires_at) : html`<span class="text-slate-400">—</span>`}</td>
+          <td class="py-3 px-3 mono text-xs">
+            ${u ? html`
+              <div>in: ${fmtInt(u.input_tokens)}</div>
+              <div>out: ${fmtInt(u.output_tokens)}</div>
+              <div class="text-slate-500">req: ${fmtInt(u.requests)} / err: ${fmtInt(u.errors)}</div>
+            ` : html`<span class="text-slate-400">—</span>`}
+          </td>
+          <td class="py-3 px-3">
+            <div class="flex gap-1 flex-wrap justify-end">
+              ${a.kind === "oauth" && html`
+                <button onClick=${() => onEdit(a)} class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Edit</button>
+                <button onClick=${() => onAction(a, "toggle")} class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">${a.disabled ? "Enable" : "Disable"}</button>
+                <button onClick=${() => onAction(a, "refresh")} class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Refresh</button>
+                ${a.quota_exceeded && html`<button onClick=${() => onAction(a, "clear-quota")} class="text-xs px-2 py-1 rounded border border-amber-400 text-amber-700 hover:bg-amber-50">Clear quota</button>`}
+                <button onClick=${() => onAction(a, "delete")} class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50">Delete</button>
+              `}
+              ${a.kind === "apikey" && html`
+                ${a.quota_exceeded && html`<button onClick=${() => onAction(a, "clear-quota")} class="text-xs px-2 py-1 rounded border border-amber-400 text-amber-700 hover:bg-amber-50">Clear quota</button>`}
+              `}
+            </div>
+          </td>
+        </tr>
+      `;
+    }
+
+    function Dashboard({ onLogout }) {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState("");
+      const [editing, setEditing] = useState(null);
+      const [uploading, setUploading] = useState(false);
+      const [lastTick, setLastTick] = useState(Date.now());
+
+      const refresh = useCallback(async () => {
+        try {
+          const d = await api("/admin/api/summary");
+          setData(d); setErr(""); setLastTick(Date.now());
+        } catch (x) {
+          if (x.status === 401) { setToken(""); onLogout(); return; }
+          setErr(x.message);
+        }
+      }, [onLogout]);
+
+      useEffect(() => { refresh(); const t = setInterval(refresh, 10000); return () => clearInterval(t); }, [refresh]);
+
+      const onAction = async (a, act) => {
+        try {
+          if (act === "toggle") {
+            await api(`/admin/api/auths/${encodeURIComponent(a.id)}`, {
+              method: "PATCH",
+              body: JSON.stringify({ disabled: !a.disabled }),
+            });
+          } else if (act === "refresh") {
+            await api(`/admin/api/auths/${encodeURIComponent(a.id)}/refresh`, { method: "POST" });
+          } else if (act === "clear-quota") {
+            await api(`/admin/api/auths/${encodeURIComponent(a.id)}/clear-quota`, { method: "POST" });
+          } else if (act === "delete") {
+            if (!confirm(`Delete ${a.label || a.id}? This removes the JSON file.`)) return;
+            await api(`/admin/api/auths/${encodeURIComponent(a.id)}`, { method: "DELETE" });
+          }
+          await refresh();
+        } catch (x) { alert("Action failed: " + x.message); }
+      };
+
+      const oauths = data ? data.auths.filter((a) => a.kind === "oauth") : [];
+      const apikeys = data ? data.auths.filter((a) => a.kind === "apikey") : [];
+      const totals = { in: 0, out: 0, req: 0, err: 0 };
+      if (data) for (const a of data.auths) {
+        const t = a.usage && a.usage.total;
+        if (!t) continue;
+        totals.in += t.input_tokens || 0;
+        totals.out += t.output_tokens || 0;
+        totals.req += t.requests || 0;
+        totals.err += t.errors || 0;
+      }
+
+      return html`
+        <div class="max-w-7xl mx-auto p-6 space-y-6">
+          <header class="flex items-center justify-between">
+            <div>
+              <h1 class="text-2xl font-semibold">CPA-Claude</h1>
+              <p class="text-sm text-slate-500">Active window: ${data ? data.active_window_minutes : "…"} min
+              ${data && data.default_proxy_url ? html` · default proxy ${data.default_proxy_url}` : ""}</p>
+            </div>
+            <div class="flex gap-2">
+              <button onClick=${() => setUploading(true)} class="px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 text-sm">+ Add OAuth</button>
+              <button onClick=${refresh} class="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-sm">Refresh</button>
+              <button onClick=${() => { setToken(""); onLogout(); }} class="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-sm">Logout</button>
+            </div>
+          </header>
+
+          ${err && html`<div class="rounded-lg bg-red-50 text-red-700 px-4 py-2 text-sm">${err}</div>`}
+
+          <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            ${[
+              ["OAuth credentials", oauths.length],
+              ["API keys", apikeys.length],
+              ["Σ input tokens", fmtInt(totals.in)],
+              ["Σ output tokens", fmtInt(totals.out)],
+            ].map(([k, v]) => html`
+              <div class="bg-white rounded-xl border border-slate-200 p-4">
+                <div class="text-xs text-slate-500">${k}</div>
+                <div class="mt-1 text-xl font-semibold">${v}</div>
+              </div>
+            `)}
+          </section>
+
+          <section class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div class="px-4 py-2 border-b border-slate-200 flex items-center justify-between">
+              <h2 class="font-semibold">Credentials</h2>
+              <span class="text-xs text-slate-400">updated ${fmtDate(new Date(lastTick).toISOString())}</span>
+            </div>
+            ${!data ? html`<div class="p-6 text-center text-slate-400">loading…</div>` :
+              html`
+              <table class="w-full text-sm">
+                <thead class="text-left text-xs uppercase text-slate-500 border-b border-slate-200">
+                  <tr>
+                    <th class="py-2 px-3">Identity</th>
+                    <th class="py-2 px-3">Kind</th>
+                    <th class="py-2 px-3">Slots</th>
+                    <th class="py-2 px-3">Proxy</th>
+                    <th class="py-2 px-3">Token exp</th>
+                    <th class="py-2 px-3">Usage (total)</th>
+                    <th class="py-2 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${[...oauths, ...apikeys].map((a) => html`<${AuthRow} key=${a.id} a=${a} onAction=${onAction} onEdit=${setEditing} />`)}
+                </tbody>
+              </table>
+            `}
+          </section>
+
+          <footer class="text-xs text-slate-400 text-center py-4">
+            v1 · OAuth credentials are mutable · API keys are read-only (edit config.yaml and restart)
+          </footer>
+
+          ${editing && html`<${EditModal} auth=${editing} onClose=${() => setEditing(null)} onSaved=${() => { setEditing(null); refresh(); }} />`}
+          ${uploading && html`<${UploadModal} onClose=${() => setUploading(false)} onSaved=${() => { setUploading(false); refresh(); }} />`}
+        </div>
+      `;
+    }
+
+    function App() {
+      const [authed, setAuthed] = useState(!!getToken());
+      useEffect(() => {
+        if (!authed) return;
+        // Verify on mount.
+        api("/admin/api/summary").catch((x) => {
+          if (x.status === 401) { setToken(""); setAuthed(false); }
+        });
+      }, [authed]);
+      return authed
+        ? html`<${Dashboard} onLogout=${() => setAuthed(false)} />`
+        : html`<${Login} onOk=${() => setAuthed(true)} />`;
+    }
+
+    render(h(App), document.getElementById("app"));
+  </script>
+</body>
+</html>
