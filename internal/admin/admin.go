@@ -58,21 +58,9 @@ func (h *Handler) Register(r *gin.Engine) {
 		log.Errorf("admin: failed to scope embed FS: %v", err)
 		return
 	}
-	r.GET("/admin", func(c *gin.Context) {
-		c.Redirect(http.StatusFound, "/admin/")
-	})
-	r.GET("/admin/", func(c *gin.Context) {
-		serveAsset(c, sub, "index.html")
-	})
-	r.GET("/admin/*filepath", func(c *gin.Context) {
-		p := strings.TrimPrefix(c.Param("filepath"), "/")
-		if p == "" || strings.HasSuffix(p, "/") {
-			p = "index.html"
-		}
-		serveAsset(c, sub, p)
-	})
-
-	// API group.
+	// API group must be registered BEFORE the static catch-all — gin's
+	// radix tree won't accept fixed-path routes underneath a wildcard
+	// sibling at the same prefix.
 	api := r.Group("/admin/api")
 	api.Use(h.adminAuth())
 	{
@@ -87,6 +75,23 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.GET("/requests", h.handleRequestsQuery)
 		api.GET("/requests/clients", h.handleRequestsClients)
 	}
+
+	// Static SPA under a dedicated sub-path so no wildcard conflicts with
+	// /admin/api/*. Bare /admin/ and any /admin/app/* fall through to
+	// index.html.
+	r.GET("/admin", func(c *gin.Context) {
+		c.Redirect(http.StatusFound, "/admin/")
+	})
+	r.GET("/admin/", func(c *gin.Context) {
+		serveAsset(c, sub, "index.html")
+	})
+	r.GET("/admin/app/*filepath", func(c *gin.Context) {
+		p := strings.TrimPrefix(c.Param("filepath"), "/")
+		if p == "" || strings.HasSuffix(p, "/") {
+			p = "index.html"
+		}
+		serveAsset(c, sub, p)
+	})
 }
 
 func serveAsset(c *gin.Context, root fs.FS, name string) {
