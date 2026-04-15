@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -39,13 +40,26 @@ type Auth struct {
 	FilePath string
 
 	// Health
-	Disabled          bool
-	QuotaExceededAt   time.Time // zero = not flagged
-	QuotaResetAt      time.Time // when to try again (may be zero = manual reset)
-	LastFailure       time.Time
-	LastFailureReason string
-	LastSuccess       time.Time // set on every <400 upstream response
+	Disabled            bool
+	QuotaExceededAt     time.Time // zero = not flagged
+	QuotaResetAt        time.Time // when to try again (may be zero = manual reset)
+	LastFailure         time.Time
+	LastFailureReason   string
+	LastSuccess         time.Time // set on every <400 upstream response
+	ConsecutiveFailures int       // reset on success; drives auto hard-fail
+	HardFailureAt       time.Time // sticky unhealthy; cleared only by ClearFailure
+	HardFailureReason   string
 }
+
+// healthGrace is how long after an isolated failure we still treat the
+// credential as healthy (optimistic recovery). Hard failures and repeated
+// failures bypass this.
+const healthGrace = 2 * time.Minute
+
+// hardFailureThreshold is the number of consecutive non-cooldown failures
+// after which a credential is marked hard-unhealthy and must be manually
+// reset from the admin panel.
+const hardFailureThreshold = 5
 
 func (a *Auth) Snapshot() AuthInfo {
 	a.mu.RLock()
@@ -107,6 +121,23 @@ func (a *Auth) MarkFailure(reason string) {
 	a.mu.Lock()
 	a.LastFailure = time.Now()
 	a.LastFailureReason = reason
+	a.ConsecutiveFailures++
+	if a.ConsecutiveFailures >= hardFailureThreshold && a.HardFailureAt.IsZero() {
+		a.HardFailureAt = a.LastFailure
+		a.HardFailureReason = fmt.Sprintf("%d consecutive failures: %s", a.ConsecutiveFailures, reason)
+	}
+	a.mu.Unlock()
+}
+
+// MarkHardFailure flags the credential as sticky-unhealthy. The admin panel
+// must manually clear it before traffic resumes. Used for obvious terminal
+// signals (e.g. account disabled, upstream dead).
+func (a *Auth) MarkHardFailure(reason string) {
+	a.mu.Lock()
+	a.HardFailureAt = time.Now()
+	a.HardFailureReason = reason
+	a.LastFailure = a.HardFailureAt
+	a.LastFailureReason = reason
 	a.mu.Unlock()
 }
 
@@ -114,6 +145,20 @@ func (a *Auth) MarkFailure(reason string) {
 // credential succeeded. Used by the admin panel to compute "healthy" status.
 func (a *Auth) MarkSuccess() {
 	a.mu.Lock()
+	a.LastSuccess = time.Now()
+	a.ConsecutiveFailures = 0
+	a.mu.Unlock()
+}
+
+// ClearFailure wipes transient and hard failure state, returning the
+// credential to "healthy". Invoked from the admin panel.
+func (a *Auth) ClearFailure() {
+	a.mu.Lock()
+	a.LastFailure = time.Time{}
+	a.LastFailureReason = ""
+	a.ConsecutiveFailures = 0
+	a.HardFailureAt = time.Time{}
+	a.HardFailureReason = ""
 	a.LastSuccess = time.Now()
 	a.mu.Unlock()
 }
@@ -128,6 +173,9 @@ func (a *Auth) IsHealthy() bool {
 	if a.Disabled {
 		return false
 	}
+	if !a.HardFailureAt.IsZero() {
+		return false
+	}
 	if !a.QuotaExceededAt.IsZero() {
 		// Still in cooldown? Treat as unhealthy.
 		if a.QuotaResetAt.IsZero() || time.Now().Before(a.QuotaResetAt) {
@@ -137,7 +185,47 @@ func (a *Auth) IsHealthy() bool {
 	if a.LastFailure.IsZero() {
 		return true
 	}
-	return a.LastSuccess.After(a.LastFailure)
+	if a.LastSuccess.After(a.LastFailure) {
+		return true
+	}
+	// Optimistic recovery: a single stale failure no longer counts. Repeated
+	// failures within the grace window keep the credential red.
+	if a.ConsecutiveFailures < 2 && time.Since(a.LastFailure) > healthGrace {
+		return true
+	}
+	return false
+}
+
+// HealthSnapshot returns a copy of the fields the admin panel needs to
+// render health state, taken under the read lock.
+func (a *Auth) HealthSnapshot() (healthy, hardFailure bool, reason string, consecutive int) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	hardFailure = !a.HardFailureAt.IsZero()
+	consecutive = a.ConsecutiveFailures
+	switch {
+	case hardFailure:
+		reason = a.HardFailureReason
+	case !a.LastFailure.IsZero() && !a.LastSuccess.After(a.LastFailure):
+		reason = a.LastFailureReason
+	}
+	// Recompute healthy with the same logic as IsHealthy but without
+	// re-acquiring the lock.
+	switch {
+	case a.Disabled:
+		healthy = false
+	case hardFailure:
+		healthy = false
+	case !a.QuotaExceededAt.IsZero() && (a.QuotaResetAt.IsZero() || time.Now().Before(a.QuotaResetAt)):
+		healthy = false
+	case a.LastFailure.IsZero(), a.LastSuccess.After(a.LastFailure):
+		healthy = true
+	case a.ConsecutiveFailures < 2 && time.Since(a.LastFailure) > healthGrace:
+		healthy = true
+	default:
+		healthy = false
+	}
+	return
 }
 
 // Credentials returns a snapshot of the fields needed to authenticate an
@@ -146,6 +234,14 @@ func (a *Auth) Credentials() (accessToken string, kind Kind) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.AccessToken, a.Kind
+}
+
+// IsHardFailed reports whether the credential has been flagged sticky-
+// unhealthy and must be manually cleared before traffic resumes.
+func (a *Auth) IsHardFailed() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return !a.HardFailureAt.IsZero()
 }
 
 func (a *Auth) ClearQuota() {

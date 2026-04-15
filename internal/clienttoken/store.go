@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,16 +49,17 @@ type View struct {
 }
 
 type Store struct {
-	mu      sync.RWMutex
-	cfgs    []Token // from config.yaml, read-only
-	runtime []Token // from tokens.json, mutable
-	path    string
+	mu        sync.RWMutex
+	cfgs      []Token          // from config.yaml, read-only base values
+	runtime   []Token          // from tokens.json, mutable
+	overrides map[string]Token // token -> name/weekly override applied on top of cfgs
+	path      string
 }
 
 // Open loads tokens.json (if it exists) and merges config-defined tokens.
 // path may be "" to disable persistence.
 func Open(path string, cfgTokens []config.AccessToken) (*Store, error) {
-	s := &Store{path: path}
+	s := &Store{path: path, overrides: map[string]Token{}}
 
 	for _, at := range cfgTokens {
 		t := strings.TrimSpace(at.Token)
@@ -74,7 +76,8 @@ func Open(path string, cfgTokens []config.AccessToken) (*Store, error) {
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil {
 			var file struct {
-				Tokens []Token `json:"tokens"`
+				Tokens    []Token `json:"tokens"`
+				Overrides []Token `json:"overrides"`
 			}
 			if err := json.Unmarshal(data, &file); err != nil {
 				return nil, fmt.Errorf("parse %s: %w", path, err)
@@ -86,11 +89,27 @@ func Open(path string, cfgTokens []config.AccessToken) (*Store, error) {
 				}
 				s.runtime = append(s.runtime, t)
 			}
+			for _, t := range file.Overrides {
+				t.Token = strings.TrimSpace(t.Token)
+				if t.Token == "" {
+					continue
+				}
+				s.overrides[t.Token] = t
+			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
 	}
 	return s, nil
+}
+
+// effectiveCfg returns a cfg-defined Token with any runtime override applied.
+func (s *Store) effectiveCfg(t Token) Token {
+	if o, ok := s.overrides[t.Token]; ok {
+		t.Name = o.Name
+		t.WeeklyUSD = o.WeeklyUSD
+	}
+	return t
 }
 
 // Lookup reports whether tok is a known client token. If so, it returns the
@@ -105,7 +124,8 @@ func (s *Store) Lookup(tok string) (name string, weekly float64, ok bool) {
 	}
 	for _, t := range s.cfgs {
 		if t.Token == tok {
-			return t.Name, t.WeeklyUSD, true
+			e := s.effectiveCfg(t)
+			return e.Name, e.WeeklyUSD, true
 		}
 	}
 	return "", 0, false
@@ -126,9 +146,10 @@ func (s *Store) List() []View {
 	defer s.mu.RUnlock()
 	out := make([]View, 0, len(s.cfgs)+len(s.runtime))
 	for _, t := range s.cfgs {
+		e := s.effectiveCfg(t)
 		out = append(out, View{
-			Token: t.Token, Name: t.Name, WeeklyUSD: t.WeeklyUSD,
-			CreatedAt: t.CreatedAt, FromConfig: true,
+			Token: e.Token, Name: e.Name, WeeklyUSD: e.WeeklyUSD,
+			CreatedAt: e.CreatedAt, FromConfig: true,
 		})
 	}
 	for _, t := range s.runtime {
@@ -176,7 +197,21 @@ func (s *Store) Update(token string, name *string, weekly *float64) error {
 	defer s.mu.Unlock()
 	for _, t := range s.cfgs {
 		if t.Token == token {
-			return fmt.Errorf("token defined in config.yaml is read-only; edit the yaml file and restart")
+			cur := s.effectiveCfg(t)
+			if name != nil {
+				cur.Name = strings.TrimSpace(*name)
+			}
+			if weekly != nil {
+				w := *weekly
+				if w < 0 {
+					w = 0
+				}
+				cur.WeeklyUSD = w
+			}
+			s.overrides[token] = Token{
+				Token: token, Name: cur.Name, WeeklyUSD: cur.WeeklyUSD,
+			}
+			return s.saveLocked()
 		}
 	}
 	for i := range s.runtime {
@@ -222,9 +257,15 @@ func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err
 	}
+	overrides := make([]Token, 0, len(s.overrides))
+	for _, o := range s.overrides {
+		overrides = append(overrides, o)
+	}
+	sort.Slice(overrides, func(i, j int) bool { return overrides[i].Token < overrides[j].Token })
 	payload := struct {
-		Tokens []Token `json:"tokens"`
-	}{Tokens: s.runtime}
+		Tokens    []Token `json:"tokens"`
+		Overrides []Token `json:"overrides,omitempty"`
+	}{Tokens: s.runtime, Overrides: overrides}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err

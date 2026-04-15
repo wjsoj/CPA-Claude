@@ -75,6 +75,7 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.DELETE("/auths/:id", h.handleDeleteAuth)
 		api.POST("/auths/:id/refresh", h.handleRefresh)
 		api.POST("/auths/:id/clear-quota", h.handleClearQuota)
+		api.POST("/auths/:id/clear-failure", h.handleClearFailure)
 		api.POST("/oauth/start", h.handleOAuthStart)
 		api.POST("/oauth/finish", h.handleOAuthFinish)
 		api.POST("/apikeys", h.handleCreateAPIKey)
@@ -181,13 +182,15 @@ type authRow struct {
 	LastFailure   string        `json:"last_failure,omitempty"`
 	FileBacked    bool          `json:"file_backed"`
 	Healthy       bool          `json:"healthy"`
+	HardFailure   bool          `json:"hard_failure"`
+	FailureReason string        `json:"failure_reason,omitempty"`
 	Usage         *usageSummary `json:"usage,omitempty"`
 }
 
 type usageSummary struct {
-	Total    usage.Counts    `json:"total"`
-	Sum24h   usage.Counts    `json:"sum_24h"`
-	LastUsed *time.Time      `json:"last_used,omitempty"`
+	Total    usage.Counts     `json:"total"`
+	Sum24h   usage.Counts     `json:"sum_24h"`
+	LastUsed *time.Time       `json:"last_used,omitempty"`
 	Daily    []usage.DayEntry `json:"daily"` // last 14 days, oldest first
 }
 
@@ -224,7 +227,11 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			}
 		}
 		live := h.pool.FindByID(st.Auth.ID)
-		healthy := live != nil && live.IsHealthy()
+		var healthy, hardFail bool
+		var failReason string
+		if live != nil {
+			healthy, hardFail, failReason, _ = live.HealthSnapshot()
+		}
 		rows = append(rows, authRow{
 			ID:            st.Auth.ID,
 			Kind:          kind,
@@ -241,6 +248,8 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			ExpiresAt:     expAt,
 			FileBacked:    strings.TrimSpace(st.Auth.FilePath) != "",
 			Healthy:       healthy,
+			HardFailure:   hardFail,
+			FailureReason: failReason,
 			Usage:         u,
 		})
 	}
@@ -279,7 +288,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			Weekly:      weeks,
 			LastUsed:    last,
 		}
-		if managed {
+		if managed || fromConfig {
 			row.FullToken = token
 		}
 		clientRows = append(clientRows, row)
@@ -431,6 +440,17 @@ func (h *Handler) handleClearQuota(c *gin.Context) {
 		return
 	}
 	a.ClearQuota()
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (h *Handler) handleClearFailure(c *gin.Context) {
+	id := c.Param("id")
+	a := h.pool.FindByID(id)
+	if a == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+	a.ClearFailure()
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 

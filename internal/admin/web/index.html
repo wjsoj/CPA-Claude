@@ -864,8 +864,9 @@
       let status, statusTone;
       if (a.disabled) { status = "disabled"; statusTone = "bg-slate-400 dark:bg-slate-500"; }
       else if (a.quota_exceeded) { status = "quota"; statusTone = "bg-amber-500"; }
+      else if (a.hard_failure) { status = "unhealthy"; statusTone = "bg-rose-600"; }
       else if (a.healthy) { status = "healthy"; statusTone = "bg-emerald-500"; }
-      else { status = "degraded"; statusTone = "bg-rose-500"; }
+      else { status = "degraded"; statusTone = "bg-amber-500"; }
       const u = a.usage;
       const kindLabel = a.kind === "apikey" ? "API key" : "OAuth";
       const btnBase = "px-3 py-1.5 rounded-md border text-sm font-medium transition";
@@ -896,6 +897,12 @@
                   ? html`resets ${fmtDate(a.quota_reset_at)}`
                   : "no reset time reported"}
               </span>
+            </div>
+          `}
+          ${!a.quota_exceeded && a.failure_reason && html`
+            <div class=${"px-5 py-3 border-b flex items-center justify-between gap-3 text-sm " + (a.hard_failure ? "bg-rose-50 dark:bg-rose-900/20 border-rose-200 dark:border-rose-900/40" : "bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-900/40")}>
+              <span class=${"font-medium " + (a.hard_failure ? "text-rose-800 dark:text-rose-300" : "text-amber-800 dark:text-amber-300")}>${a.hard_failure ? "Unhealthy" : "Recent failure"}</span>
+              <span class=${"mono text-xs truncate ml-3 " + (a.hard_failure ? "text-rose-700 dark:text-rose-400" : "text-amber-700 dark:text-amber-400")} title=${a.failure_reason}>${a.failure_reason}</span>
             </div>
           `}
 
@@ -958,6 +965,7 @@
               <button onClick=${() => onAction(a, "toggle")} class=${btnNeutral}>${a.disabled ? "Enable" : "Disable"}</button>
               <button onClick=${() => onAction(a, "refresh")} class=${btnNeutral}>Refresh token</button>
               ${a.quota_exceeded && html`<button onClick=${() => onAction(a, "clear-quota")} class=${btnAmber}>Clear quota</button>`}
+              ${(a.hard_failure || (!a.healthy && !a.quota_exceeded && !a.disabled)) && html`<button onClick=${() => onAction(a, "clear-failure")} class=${btnAmber}>Mark healthy</button>`}
               <button onClick=${() => onAction(a, "delete")} class=${btnDanger + " ml-auto"}>Delete</button>
             `}
             ${a.kind === "apikey" && html`
@@ -966,6 +974,7 @@
                 <button onClick=${() => onAction(a, "toggle")} class=${btnNeutral}>${a.disabled ? "Enable" : "Disable"}</button>
               `}
               ${a.quota_exceeded && html`<button onClick=${() => onAction(a, "clear-quota")} class=${btnAmber}>Clear quota</button>`}
+              ${(a.hard_failure || (!a.healthy && !a.quota_exceeded && !a.disabled)) && html`<button onClick=${() => onAction(a, "clear-failure")} class=${btnAmber}>Mark healthy</button>`}
               ${a.file_backed && html`<button onClick=${() => onAction(a, "delete")} class=${btnDanger + " ml-auto"}>Delete</button>`}
             `}
           </footer>
@@ -1160,6 +1169,8 @@
             await api(`/admin/api/auths/${encodeURIComponent(a.id)}/refresh`, { method: "POST" });
           } else if (act === "clear-quota") {
             await api(`/admin/api/auths/${encodeURIComponent(a.id)}/clear-quota`, { method: "POST" });
+          } else if (act === "clear-failure") {
+            await api(`/admin/api/auths/${encodeURIComponent(a.id)}/clear-failure`, { method: "POST" });
           } else if (act === "delete") {
             if (!confirm(`Delete ${a.label || a.id}? This removes the JSON file.`)) return;
             await api(`/admin/api/auths/${encodeURIComponent(a.id)}`, { method: "DELETE" });
@@ -1294,12 +1305,12 @@
                       </td>
                       <td class="py-3 px-4 text-sm">${cl.last_used ? fmtDate(cl.last_used) : html`<span class="text-slate-400 dark:text-slate-500">—</span>`}</td>
                       <td class="py-3 px-4 text-right">
-                        ${cl.managed ? html`
+                        ${cl.full_token ? html`
                           <div class="flex gap-2 justify-end">
                             <button onClick=${() => setEditingToken(cl)} class="px-3 py-1 rounded-md border border-slate-300 dark:border-slate-600 text-sm hover:bg-slate-100 dark:hover:bg-slate-700">Edit</button>
-                            <button onClick=${() => onDeleteToken(cl)} class="px-3 py-1 rounded-md border border-rose-300 dark:border-rose-700/60 text-rose-600 dark:text-rose-400 text-sm hover:bg-rose-50 dark:hover:bg-rose-900/30">Delete</button>
+                            ${cl.managed && html`<button onClick=${() => onDeleteToken(cl)} class="px-3 py-1 rounded-md border border-rose-300 dark:border-rose-700/60 text-rose-600 dark:text-rose-400 text-sm hover:bg-rose-50 dark:hover:bg-rose-900/30">Delete</button>`}
                           </div>
-                        ` : cl.from_config ? html`<span class="text-xs text-slate-400 dark:text-slate-500">locked</span>` : html`<span class="text-xs text-slate-400 dark:text-slate-500">—</span>`}
+                        ` : html`<span class="text-xs text-slate-400 dark:text-slate-500">—</span>`}
                       </td>
                     </tr>
                   `)}

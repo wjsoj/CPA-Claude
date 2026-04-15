@@ -21,13 +21,13 @@ import (
 //   - When all OAuth auths are saturated or unhealthy, the session falls back
 //     to an API key (unlimited).
 type Pool struct {
-	mu             sync.Mutex
-	oauths         []*Auth
-	apikeys        []*Auth
-	sessions       map[string]*session // client token -> session
-	activeWindow   time.Duration
-	useUTLS        bool
-	defaultProxy   string
+	mu           sync.Mutex
+	oauths       []*Auth
+	apikeys      []*Auth
+	sessions     map[string]*session // client token -> session
+	activeWindow time.Duration
+	useUTLS      bool
+	defaultProxy string
 }
 
 type session struct {
@@ -55,7 +55,7 @@ func NewPool(oauths, apikeys []*Auth, activeWindow time.Duration, useUTLS bool, 
 	return p
 }
 
-func (p *Pool) UseUTLS() bool         { return p.useUTLS }
+func (p *Pool) UseUTLS() bool               { return p.useUTLS }
 func (p *Pool) ActiveWindow() time.Duration { return p.activeWindow }
 
 // gcLocked expires stale sessions whose lastSeen is older than activeWindow.
@@ -147,6 +147,9 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string, excludeIDs ...st
 		if k.Disabled {
 			continue
 		}
+		if k.IsHardFailed() {
+			continue
+		}
 		if k.IsQuotaExceeded(now) {
 			continue
 		}
@@ -182,6 +185,9 @@ func (p *Pool) findOAuthLocked(id string) *Auth {
 
 func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 	if a.Disabled {
+		return false
+	}
+	if a.IsHardFailed() {
 		return false
 	}
 	if a.IsQuotaExceeded(now) {
