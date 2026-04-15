@@ -38,6 +38,7 @@ type Config struct {
 	//   access_tokens:
 	//     - token: "sk-xxx"
 	//       name: "alice"
+	//       weekly_usd: 10.0
 	//     - "sk-yyy"
 	AccessTokens []AccessToken `yaml:"access_tokens"`
 
@@ -72,17 +73,15 @@ type Config struct {
 	// Pricing overrides (optional). Built-in defaults cover claude-haiku-4-5,
 	// claude-opus-4-6, and claude-sonnet-4-6.
 	Pricing pricing.Config `yaml:"pricing"`
-
-	// Per-access-token weekly USD budgets. Week boundary is ISO week (Mon
-	// 00:00 UTC). Tokens not listed here are not enforced.
-	ClientBudgets []ClientBudget `yaml:"client_budgets"`
 }
 
-// AccessToken is one entry in the access_tokens list. YAML can write it as
-// either a bare string (only the token) or a mapping with token/name.
+// AccessToken is one entry in the access_tokens list. YAML accepts either a
+// bare string (only the token) or a mapping with token/name/weekly_usd.
+// Week boundary for weekly_usd is ISO week (Mon 00:00 UTC); 0 = unlimited.
 type AccessToken struct {
-	Token string `yaml:"token"`
-	Name  string `yaml:"name,omitempty"`
+	Token     string  `yaml:"token"`
+	Name      string  `yaml:"name,omitempty"`
+	WeeklyUSD float64 `yaml:"weekly_usd,omitempty"`
 }
 
 // UnmarshalYAML accepts scalar (string) or map form for backward compat.
@@ -92,21 +91,17 @@ func (a *AccessToken) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	}
 	var shape struct {
-		Token string `yaml:"token"`
-		Name  string `yaml:"name"`
+		Token     string  `yaml:"token"`
+		Name      string  `yaml:"name"`
+		WeeklyUSD float64 `yaml:"weekly_usd"`
 	}
 	if err := node.Decode(&shape); err != nil {
 		return err
 	}
 	a.Token = shape.Token
 	a.Name = shape.Name
+	a.WeeklyUSD = shape.WeeklyUSD
 	return nil
-}
-
-type ClientBudget struct {
-	Token     string  `yaml:"token"`
-	Label     string  `yaml:"label,omitempty"`
-	WeeklyUSD float64 `yaml:"weekly_usd"`
 }
 
 func Load(path string) (*Config, error) {

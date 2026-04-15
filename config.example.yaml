@@ -45,19 +45,16 @@ admin_token: "change-me-long-random-string"
 # Each unique token counts as one "client session" and occupies one OAuth
 # slot while active.
 #
-# Each entry can be either a bare string or a mapping with `name` for
-# reporting (shows up in request logs and the admin panel).
+# Each entry can be either a bare string or a mapping with:
+#   token       — the client token (required)
+#   name        — human-readable label for logs and the admin panel
+#   weekly_usd  — weekly spend cap in USD; 0 or omitted = unlimited.
+#                 Week boundary is ISO week (Mon 00:00 UTC).
 access_tokens:
   - token: "sk-client-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     name:  "alice-laptop"
-  - "sk-client-yyyyyyyyyyyyyyyyyyyyyyyyyyyy"    # bare form also works
-
-# Per-access-token weekly USD budget. Week boundary is ISO week (Mon 00:00
-# UTC). Tokens not listed here are tracked but not enforced.
-client_budgets:
-  - token: "sk-client-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    label: "alice"
     weekly_usd: 10.0
+  - "sk-client-yyyyyyyyyyyyyyyyyyyyyyyyyyyy"    # bare form also works (no name/budget)
 
 # Pricing table. Built-in defaults already cover:
 #   claude-haiku-4-5-20251001, claude-haiku-4-5

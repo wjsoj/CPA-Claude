@@ -3,9 +3,9 @@
 //
 // Two sources of truth are merged:
 //
-//  1. config.yaml  — the historical "static" access_tokens / client_budgets
-//     blocks. These stay read-only at runtime; the admin panel shows them
-//     for visibility but cannot edit or delete them.
+//  1. config.yaml  — the static access_tokens block. Each entry carries its
+//     own token/name/weekly_usd. These stay read-only at runtime; the admin
+//     panel shows them for visibility but cannot edit or delete them.
 //  2. tokens.json  — a runtime file next to state.json that the admin panel
 //     owns. Any CRUD from the panel writes here.
 //
@@ -56,53 +56,18 @@ type Store struct {
 
 // Open loads tokens.json (if it exists) and merges config-defined tokens.
 // path may be "" to disable persistence.
-func Open(path string, cfgTokens []config.AccessToken, cfgBudgets []config.ClientBudget) (*Store, error) {
+func Open(path string, cfgTokens []config.AccessToken) (*Store, error) {
 	s := &Store{path: path}
 
-	// Index budgets by token so we can attach weekly_usd to each config token.
-	budgetByToken := make(map[string]config.ClientBudget, len(cfgBudgets))
-	for _, b := range cfgBudgets {
-		t := strings.TrimSpace(b.Token)
-		if t != "" {
-			budgetByToken[t] = b
-		}
-	}
 	for _, at := range cfgTokens {
 		t := strings.TrimSpace(at.Token)
 		if t == "" {
 			continue
 		}
-		tok := Token{Token: t, Name: strings.TrimSpace(at.Name)}
-		if b, ok := budgetByToken[t]; ok {
-			tok.WeeklyUSD = b.WeeklyUSD
-			if tok.Name == "" {
-				tok.Name = b.Label
-			}
-		}
-		s.cfgs = append(s.cfgs, tok)
-	}
-	// A client_budget entry without a matching access_tokens entry still
-	// makes sense (historically allowed): treat it as a config token too,
-	// since the middleware will accept it and the budget applies.
-	for _, b := range cfgBudgets {
-		t := strings.TrimSpace(b.Token)
-		if t == "" {
-			continue
-		}
-		already := false
-		for _, existing := range s.cfgs {
-			if existing.Token == t {
-				already = true
-				break
-			}
-		}
-		if already {
-			continue
-		}
 		s.cfgs = append(s.cfgs, Token{
 			Token:     t,
-			Name:      strings.TrimSpace(b.Label),
-			WeeklyUSD: b.WeeklyUSD,
+			Name:      strings.TrimSpace(at.Name),
+			WeeklyUSD: at.WeeklyUSD,
 		})
 	}
 

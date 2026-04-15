@@ -111,7 +111,7 @@ func main() {
 		cfg.UseUTLS, cfg.DefaultProxyURL)
 
 	tokensPath := filepath.Join(filepath.Dir(cfg.StateFile), "tokens.json")
-	tokens, err := clienttoken.Open(tokensPath, cfg.AccessTokens, cfg.ClientBudgets)
+	tokens, err := clienttoken.Open(tokensPath, cfg.AccessTokens)
 	if err != nil {
 		log.Fatalf("open client token store: %v", err)
 	}
