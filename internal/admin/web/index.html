@@ -357,9 +357,6 @@
       }
       const renderWindows = (usage) => {
         if (!usage || !usage.body) return null;
-        const windows = Array.isArray(usage.body.five_hour)
-          ? null
-          : usage.body; // the upstream response structure has named fields
         // Known keys surfaced for display (see reference project).
         const keys = [
           ["five_hour", "5-hour"],
@@ -377,19 +374,33 @@
         }
         return html`
           <table class="w-full text-sm">
+            <thead>
+              <tr class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
+                <th class="py-2 pr-3 text-left font-medium">Window</th>
+                <th class="py-2 text-right font-medium">Used</th>
+                <th class="py-2 pl-2 font-medium">&nbsp;</th>
+                <th class="py-2 pl-3 text-right font-medium">Resets</th>
+              </tr>
+            </thead>
+            <tbody>
             ${rows.map(([label, w]) => {
               const pctRaw = w.utilization != null ? w.utilization : w.utilization_percent;
               const pct = typeof pctRaw === "number" ? Math.round(pctRaw <= 1 ? pctRaw * 100 : pctRaw) : null;
               const color = pct == null ? "bg-slate-400" : pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
               return html`<tr class="border-b border-slate-100 dark:border-slate-700/60">
-                <td class="py-1.5 pr-3">${label}</td>
-                <td class="py-1.5 mono text-right">${pct != null ? pct + "%" : "—"}</td>
-                <td class="py-1.5 pl-2 w-40">
+                <td class="py-2 pr-3">${label}</td>
+                <td class="py-2 mono text-right">${pct != null ? pct + "%" : "—"}</td>
+                <td class="py-2 pl-2 w-40">
                   ${pct != null && html`<div class="h-1.5 bg-slate-100 dark:bg-slate-700 rounded overflow-hidden"><div class=${"h-full " + color} style=${`width:${Math.min(100, pct)}%`}></div></div>`}
                 </td>
-                <td class="py-1.5 pl-3 mono text-right text-slate-500 dark:text-slate-400">${w.reset_at ? new Date(w.reset_at).toISOString().replace("T"," ").slice(0,16) + " UTC" : ""}</td>
+                <td class="py-2 pl-3 text-right">
+                  ${w.reset_at
+                    ? html`<span class="mono text-sm text-slate-700 dark:text-slate-200">${fmtDate(w.reset_at)}</span>`
+                    : html`<span class="text-xs text-slate-400 dark:text-slate-500">—</span>`}
+                </td>
               </tr>`;
             })}
+            </tbody>
           </table>
         `;
       };
