@@ -12,7 +12,10 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	"path/filepath"
+
 	"github.com/wjsoj/CPA-Claude/internal/auth"
+	"github.com/wjsoj/CPA-Claude/internal/clienttoken"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/logging"
 	"github.com/wjsoj/CPA-Claude/internal/requestlog"
@@ -81,7 +84,10 @@ func main() {
 	log.Infof("loaded %d API key(s)", len(apikeys))
 
 	if len(oauths) == 0 && len(apikeys) == 0 {
-		log.Fatalf("no upstream credentials configured (auth_dir empty and api_keys empty)")
+		if strings.TrimSpace(cfg.AdminToken) == "" {
+			log.Fatalf("no upstream credentials configured and admin panel is disabled — add credentials to auth_dir or set admin_token to bootstrap from the panel")
+		}
+		log.Warn("no upstream credentials loaded; waiting for admin panel uploads")
 	}
 
 	store, err := usage.Open(cfg.StateFile)
@@ -104,7 +110,15 @@ func main() {
 		time.Duration(cfg.ActiveWindowMinutes)*time.Minute,
 		cfg.UseUTLS, cfg.DefaultProxyURL)
 
-	s := server.New(cfg, pool, store, reqLog)
+	tokensPath := filepath.Join(filepath.Dir(cfg.StateFile), "tokens.json")
+	tokens, err := clienttoken.Open(tokensPath, cfg.AccessTokens, cfg.ClientBudgets)
+	if err != nil {
+		log.Fatalf("open client token store: %v", err)
+	}
+	log.Infof("client tokens: %d total (%d from config, %d from %s)",
+		len(tokens.List()), countFromConfig(tokens), len(tokens.List())-countFromConfig(tokens), tokensPath)
+
+	s := server.New(cfg, pool, store, reqLog, tokens)
 
 	// Graceful shutdown. We block main on the done channel so store.Close()
 	// is guaranteed to finish (final usage flush + fsync) before we exit.
@@ -128,4 +142,14 @@ func main() {
 		log.Infof("server stopped: %v", err)
 	}
 	<-shutdownDone
+}
+
+func countFromConfig(ts *clienttoken.Store) int {
+	n := 0
+	for _, v := range ts.List() {
+		if v.FromConfig {
+			n++
+		}
+	}
+	return n
 }

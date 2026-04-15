@@ -75,14 +75,14 @@ func (s *Server) forward(c *gin.Context, path string) {
 	// their current-week spend already met or exceeded it, reject with 429.
 	// A request in flight may slightly overshoot (by one request's cost);
 	// that's the acceptable trade-off for not knowing output tokens upfront.
-	if budget, ok := s.budgets[clientToken]; ok {
+	if _, weeklyLimit, ok := s.tokens.Lookup(clientToken); ok && weeklyLimit > 0 {
 		spent := s.usage.WeeklyCostUSD(clientToken)
-		if spent >= budget.WeeklyUSD {
+		if spent >= weeklyLimit {
 			c.Header("Retry-After", "604800")
 			c.AbortWithStatusJSON(429, gin.H{
 				"error":     "weekly budget exceeded",
 				"spent_usd": spent,
-				"limit_usd": budget.WeeklyUSD,
+				"limit_usd": weeklyLimit,
 				"week":      s.usage.CurrentWeekKey(),
 			})
 			s.emitLog(requestlog.Record{
@@ -105,22 +105,21 @@ func (s *Server) forward(c *gin.Context, path string) {
 	tried := make(map[string]bool)
 	attempts := 0
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		a := s.pool.Acquire(c.Request.Context(), clientToken)
-		if a == nil {
-			c.AbortWithStatusJSON(503, gin.H{"error": "no upstream credentials available"})
-			s.emitLog(requestlog.Record{
-				Client: clientName, ClientToken: maskClientToken(clientToken), Model: model,
-				Stream: peek.Stream, Path: path, Status: 503, Attempts: attempts,
-				DurationMs: time.Since(start).Milliseconds(), Error: "no upstream credentials available",
-			})
-			return
+		excludeIDs := make([]string, 0, len(tried))
+		for id := range tried {
+			excludeIDs = append(excludeIDs, id)
 		}
-		if tried[a.ID] {
-			c.AbortWithStatusJSON(503, gin.H{"error": "all upstream credentials exhausted"})
+		a := s.pool.Acquire(c.Request.Context(), clientToken, excludeIDs...)
+		if a == nil {
+			msg := "no upstream credentials available"
+			if len(tried) > 0 {
+				msg = "all upstream credentials exhausted"
+			}
+			c.AbortWithStatusJSON(503, gin.H{"error": msg})
 			s.emitLog(requestlog.Record{
 				Client: clientName, ClientToken: maskClientToken(clientToken), Model: model,
 				Stream: peek.Stream, Path: path, Status: 503, Attempts: attempts,
-				DurationMs: time.Since(start).Milliseconds(), Error: "all upstream credentials exhausted",
+				DurationMs: time.Since(start).Milliseconds(), Error: msg,
 			})
 			return
 		}
@@ -173,6 +172,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		baseURL = ab
 	}
 	url := baseURL + path + "?beta=true"
+	isAnthropicBase := strings.HasPrefix(strings.ToLower(baseURL), "https://api.anthropic.com")
 
 	ctx := c.Request.Context()
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -184,8 +184,8 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	// Forward selected client headers.
 	copyForwardableHeaders(c.Request.Header, upReq.Header)
 
-	// Anthropic auth headers.
-	applyAnthropicHeaders(upReq, a, stream)
+	// Anthropic auth + Claude Code fingerprint headers.
+	applyAnthropicHeaders(upReq, a, stream, isAnthropicBase)
 
 	client := auth.ClientFor(a.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(upReq)
@@ -212,6 +212,9 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	counts.Requests = 1
 	if resp.StatusCode >= 400 {
 		counts.Errors = 1
+		a.MarkFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
+	} else {
+		a.MarkSuccess()
 	}
 
 	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
@@ -227,13 +230,9 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	var costUSD float64
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
 		costUSD = s.pricing.Cost(model, counts)
-		label := clientName
-		if label == "" {
-			if b, ok := s.budgets[clientToken]; ok {
-				label = b.Label
-			}
-		}
-		s.usage.RecordClient(clientToken, label, counts, costUSD)
+		// clientName already carries the store-resolved name (or "" in
+		// open-mode). No additional fallback needed.
+		s.usage.RecordClient(clientToken, clientName, counts, costUSD)
 	}
 	authKind := "oauth"
 	if a.Kind == auth.KindAPIKey {
@@ -287,9 +286,29 @@ func writeResponseHeaders(c *gin.Context, resp *http.Response) {
 	c.Writer.WriteHeader(resp.StatusCode)
 }
 
-func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream bool) {
+// applyAnthropicHeaders rewrites the upstream request to look like a real
+// Claude Code CLI client. Header set and values mirror upstream CLIProxyAPI's
+// runtime/executor/claude_executor.go (Claude Code 2.1.63 / SDK 0.74.0).
+//
+// Two layers of fingerprint matter to Anthropic's edge:
+//  1. TLS — handled by auth.ClientFor + utls Chrome_Auto.
+//  2. HTTP headers — handled here. We must send the same User-Agent /
+//     X-Stainless-* / X-App / Anthropic-Beta / X-Claude-Code-Session-Id /
+//     x-client-request-id set the official client sends, otherwise the
+//     application layer trivially exposes us.
+//
+// Client-supplied values (already populated by copyForwardableHeaders) win
+// over our defaults, except for the Authorization / x-api-key pair which we
+// always overwrite with credentials from the pool.
+//
+// Known intentional deviations:
+//   - Accept-Encoding stays "identity" for both stream and non-stream because
+//     our response path streams raw bytes without decompression. Real Claude
+//     Code sends "gzip, deflate, br, zstd" on non-stream requests.
+func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream, isAnthropicBase bool) {
 	token, kind := a.Credentials()
 
+	// Auth header — always overwrite whatever the client sent.
 	if kind == auth.KindAPIKey {
 		req.Header.Del("Authorization")
 		req.Header.Set("x-api-key", token)
@@ -298,15 +317,55 @@ func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream bool) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if req.Header.Get("Anthropic-Version") == "" {
-		req.Header.Set("Anthropic-Version", "2023-06-01")
+
+	// Anthropic protocol headers.
+	ensureHeader(req.Header, "Anthropic-Version", claudeAnthropicVersion)
+	if existing := strings.TrimSpace(req.Header.Get("Anthropic-Beta")); existing != "" {
+		// Client supplied its own beta list; make sure oauth marker is in it
+		// when we're using OAuth (mirrors upstream behavior).
+		if kind == auth.KindOAuth && !strings.Contains(existing, "oauth") {
+			req.Header.Set("Anthropic-Beta", existing+",oauth-2025-04-20")
+		}
+	} else {
+		req.Header.Set("Anthropic-Beta", claudeAnthropicBetaFull)
 	}
-	if req.Header.Get("Anthropic-Beta") == "" && kind == auth.KindOAuth {
-		req.Header.Set("Anthropic-Beta", "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05")
+	// API-key mode hitting the first-party endpoint needs the browser-access
+	// flag; OAuth mode does not, and real Claude Code never sends it.
+	if kind == auth.KindAPIKey && isAnthropicBase {
+		ensureHeader(req.Header, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
+
+	// Stainless SDK / device profile fingerprint headers.
+	ensureHeader(req.Header, "X-App", "cli")
+	ensureHeader(req.Header, "X-Stainless-Retry-Count", claudeStainlessRetryCnt)
+	ensureHeader(req.Header, "X-Stainless-Lang", claudeStainlessLang)
+	ensureHeader(req.Header, "X-Stainless-Runtime", claudeStainlessRuntime)
+	ensureHeader(req.Header, "X-Stainless-Runtime-Version", claudeStainlessRuntimeV)
+	ensureHeader(req.Header, "X-Stainless-Package-Version", claudeStainlessPackageV)
+	ensureHeader(req.Header, "X-Stainless-Os", claudeStainlessOS)
+	ensureHeader(req.Header, "X-Stainless-Arch", claudeStainlessArch)
+	ensureHeader(req.Header, "X-Stainless-Timeout", claudeStainlessTimeout)
+
+	// Stable per-credential session ID; new UUID per request.
+	ensureHeader(req.Header, "X-Claude-Code-Session-Id", sessionIDFor(a.ID))
+	if isAnthropicBase {
+		ensureHeader(req.Header, "x-client-request-id", newRequestUUID())
+	}
+
+	// User-Agent: keep the client value if it's already a Claude Code UA,
+	// otherwise overwrite with our pinned default. Mirrors upstream's legacy
+	// device-profile mode (helps/claude_device_profile.go:ApplyClaudeLegacyDeviceHeaders).
+	curUA := strings.TrimSpace(req.Header.Get("User-Agent"))
+	if !strings.HasPrefix(curUA, "claude-cli/") {
+		req.Header.Set("User-Agent", claudeCLIUserAgent)
+	}
+
+	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Accept-Encoding", "identity")
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
+	} else {
+		ensureHeader(req.Header, "Accept", "application/json")
 	}
 }
 

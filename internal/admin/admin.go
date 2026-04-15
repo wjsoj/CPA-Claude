@@ -22,6 +22,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/CPA-Claude/internal/auth"
+	"github.com/wjsoj/CPA-Claude/internal/clienttoken"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/pricing"
 	"github.com/wjsoj/CPA-Claude/internal/requestlog"
@@ -36,21 +37,24 @@ type Handler struct {
 	pool    *auth.Pool
 	usage   *usage.Store
 	pricing *pricing.Catalog
-	budgets map[string]config.ClientBudget
+	tokens  *clienttoken.Store
 }
 
-func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.Catalog, budgets map[string]config.ClientBudget) *Handler {
-	return &Handler{cfg: cfg, pool: pool, usage: store, pricing: cat, budgets: budgets}
+func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.Catalog, tokens *clienttoken.Store) *Handler {
+	return &Handler{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens}
 }
 
 // Register attaches the admin SPA and API routes.
 // If cfg.AdminToken is empty the admin surface is disabled.
+// The mount prefix is cfg.AdminPath (default /mgmt-console); changing it
+// per deployment hides the panel from trivial /admin scans.
 func (h *Handler) Register(r *gin.Engine) {
 	if strings.TrimSpace(h.cfg.AdminToken) == "" {
 		log.Info("admin: disabled (admin_token not set)")
 		return
 	}
-	log.Info("admin: panel enabled at /admin/")
+	base := h.cfg.AdminPath
+	log.Infof("admin: panel enabled at %s/", base)
 
 	// Serve the SPA (no auth required for the HTML shell itself; the API
 	// underneath is protected).
@@ -62,7 +66,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	// API group must be registered BEFORE the static catch-all — gin's
 	// radix tree won't accept fixed-path routes underneath a wildcard
 	// sibling at the same prefix.
-	api := r.Group("/admin/api")
+	api := r.Group(base + "/api")
 	api.Use(h.adminAuth())
 	{
 		api.GET("/summary", h.handleSummary)
@@ -77,18 +81,22 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/auths/:id/anthropic-usage", h.handleAnthropicUsage)
 		api.GET("/requests", h.handleRequestsQuery)
 		api.GET("/requests/clients", h.handleRequestsClients)
+		api.GET("/tokens", h.handleListTokens)
+		api.POST("/tokens", h.handleCreateToken)
+		api.PATCH("/tokens/:token", h.handlePatchToken)
+		api.DELETE("/tokens/:token", h.handleDeleteToken)
 	}
 
 	// Static SPA under a dedicated sub-path so no wildcard conflicts with
-	// /admin/api/*. Bare /admin/ and any /admin/app/* fall through to
+	// <base>/api/*. Bare <base>/ and any <base>/app/* fall through to
 	// index.html.
-	r.GET("/admin", func(c *gin.Context) {
-		c.Redirect(http.StatusFound, "/admin/")
+	r.GET(base, func(c *gin.Context) {
+		c.Redirect(http.StatusFound, base+"/")
 	})
-	r.GET("/admin/", func(c *gin.Context) {
+	r.GET(base+"/", func(c *gin.Context) {
 		serveAsset(c, sub, "index.html")
 	})
-	r.GET("/admin/app/*filepath", func(c *gin.Context) {
+	r.GET(base+"/app/*filepath", func(c *gin.Context) {
 		p := strings.TrimPrefix(c.Param("filepath"), "/")
 		if p == "" || strings.HasSuffix(p, "/") {
 			p = "index.html"
@@ -172,6 +180,7 @@ type authRow struct {
 	ExpiresAt     *time.Time    `json:"expires_at,omitempty"`
 	LastFailure   string        `json:"last_failure,omitempty"`
 	FileBacked    bool          `json:"file_backed"`
+	Healthy       bool          `json:"healthy"`
 	Usage         *usageSummary `json:"usage,omitempty"`
 }
 
@@ -214,6 +223,8 @@ func (h *Handler) handleSummary(c *gin.Context) {
 				Daily:    v.DailyOrdered(14),
 			}
 		}
+		live := h.pool.FindByID(st.Auth.ID)
+		healthy := live != nil && live.IsHealthy()
 		rows = append(rows, authRow{
 			ID:            st.Auth.ID,
 			Kind:          kind,
@@ -229,6 +240,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			QuotaResetAt:  quotaReset,
 			ExpiresAt:     expAt,
 			FileBacked:    strings.TrimSpace(st.Auth.FilePath) != "",
+			Healthy:       healthy,
 			Usage:         u,
 		})
 	}
@@ -237,7 +249,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	currentWeek := h.usage.CurrentWeekKey()
 	clientRows := make([]clientRow, 0)
 	seen := make(map[string]bool)
-	addRow := func(token, label string, weeklyLimit float64) {
+	addRow := func(token, label string, weeklyLimit float64, fromConfig, managed bool) {
 		seen[token] = true
 		pc, hasData := clientSnap[token]
 		weekly := 0.0
@@ -255,25 +267,32 @@ func (h *Handler) handleSummary(c *gin.Context) {
 				last = &lu
 			}
 		}
-		clientRows = append(clientRows, clientRow{
+		row := clientRow{
 			Token:       maskToken(token),
 			Label:       label,
 			WeeklyUSD:   weekly,
 			WeeklyLimit: weeklyLimit,
 			Blocked:     weeklyLimit > 0 && weekly >= weeklyLimit,
+			FromConfig:  fromConfig,
+			Managed:     managed,
 			Total:       total,
 			Weekly:      weeks,
 			LastUsed:    last,
-		})
+		}
+		if managed {
+			row.FullToken = token
+		}
+		clientRows = append(clientRows, row)
 	}
-	// Rows for every explicitly-budgeted token.
-	for _, b := range h.cfg.ClientBudgets {
-		addRow(b.Token, b.Label, b.WeeklyUSD)
+	// Rows for every configured or runtime-added access token.
+	for _, t := range h.tokens.List() {
+		addRow(t.Token, t.Name, t.WeeklyUSD, t.FromConfig, !t.FromConfig)
 	}
-	// Rows for every client we've actually seen that isn't already listed.
+	// Rows for every client we've actually seen that isn't already listed
+	// (e.g. open-mode requests keyed by IP).
 	for tok, pc := range clientSnap {
 		if !seen[tok] {
-			addRow(tok, pc.Label, 0)
+			addRow(tok, pc.Label, 0, false, false)
 		}
 	}
 
@@ -297,11 +316,18 @@ func (h *Handler) handleSummary(c *gin.Context) {
 }
 
 type clientRow struct {
-	Token       string            `json:"token"`
+	// Masked token (e.g. "sk-tes…aaaa") for display.
+	Token string `json:"token"`
+	// Full token; only set for rows that correspond to a registered client
+	// token (not for the synthetic IP-keyed rows in open mode). The panel
+	// needs this to build PATCH/DELETE URLs — admin auth covers exposure.
+	FullToken   string            `json:"full_token,omitempty"`
 	Label       string            `json:"label,omitempty"`
 	WeeklyUSD   float64           `json:"weekly_usd"`
 	WeeklyLimit float64           `json:"weekly_limit"`
 	Blocked     bool              `json:"blocked"`
+	FromConfig  bool              `json:"from_config,omitempty"`
+	Managed     bool              `json:"managed,omitempty"` // true = panel can edit/delete
 	Total       usage.ClientCost  `json:"total"`
 	Weekly      []usage.WeekEntry `json:"weekly,omitempty"`
 	LastUsed    *time.Time        `json:"last_used,omitempty"`
@@ -719,6 +745,9 @@ func (h *Handler) handleRequestsQuery(c *gin.Context) {
 	if v := c.Query("limit"); v != "" {
 		fmt.Sscanf(v, "%d", &f.Limit)
 	}
+	if v := c.Query("offset"); v != "" {
+		fmt.Sscanf(v, "%d", &f.Offset)
+	}
 	if v := c.Query("status"); v != "" {
 		fmt.Sscanf(v, "%d", &f.Status)
 	}
@@ -753,4 +782,116 @@ func sanitizeFilename(s string) string {
 	s = strings.ReplaceAll(s, "/", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
 	return s
+}
+
+// ---- Client access token CRUD ----
+
+// tokenView is the shape returned to the panel. The token itself is masked
+// unless the caller asks for the full value (`?full=1`), in which case
+// every row is returned verbatim — used by the "copy to clipboard" button
+// in the Add-token modal right after creation.
+type tokenView struct {
+	Token      string     `json:"token"`
+	Masked     string     `json:"masked"`
+	Name       string     `json:"name"`
+	WeeklyUSD  float64    `json:"weekly_usd"`
+	CreatedAt  *time.Time `json:"created_at,omitempty"`
+	FromConfig bool       `json:"from_config"`
+	// Live usage for the current ISO week, convenient for the panel row.
+	WeeklyUsedUSD float64 `json:"weekly_used_usd"`
+}
+
+func (h *Handler) handleListTokens(c *gin.Context) {
+	full := c.Query("full") == "1"
+	rows := h.tokens.List()
+	out := make([]tokenView, 0, len(rows))
+	for _, t := range rows {
+		v := tokenView{
+			Masked:        maskToken(t.Token),
+			Name:          t.Name,
+			WeeklyUSD:     t.WeeklyUSD,
+			FromConfig:    t.FromConfig,
+			WeeklyUsedUSD: h.usage.WeeklyCostUSD(t.Token),
+		}
+		if !t.CreatedAt.IsZero() {
+			ct := t.CreatedAt
+			v.CreatedAt = &ct
+		}
+		if full {
+			v.Token = t.Token
+		}
+		out = append(out, v)
+	}
+	c.JSON(http.StatusOK, gin.H{"tokens": out})
+}
+
+type createTokenBody struct {
+	Token     string  `json:"token"`
+	Name      string  `json:"name"`
+	WeeklyUSD float64 `json:"weekly_usd"`
+	Generate  bool    `json:"generate"` // if true and Token == "", mint a fresh sk-...
+}
+
+func (h *Handler) handleCreateToken(c *gin.Context) {
+	var body createTokenBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	tok := strings.TrimSpace(body.Token)
+	if tok == "" {
+		if !body.Generate {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "token required (or set generate:true)"})
+			return
+		}
+		v, err := clienttoken.Generate()
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "generate: " + err.Error()})
+			return
+		}
+		tok = v
+	}
+	entry := clienttoken.Token{
+		Token:     tok,
+		Name:      body.Name,
+		WeeklyUSD: body.WeeklyUSD,
+	}
+	if err := h.tokens.Add(entry); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "ok",
+		"token":      tok, // return the full value once so the panel can show it
+		"name":       body.Name,
+		"weekly_usd": body.WeeklyUSD,
+	})
+}
+
+type patchTokenBody struct {
+	Name      *string  `json:"name"`
+	WeeklyUSD *float64 `json:"weekly_usd"`
+}
+
+func (h *Handler) handlePatchToken(c *gin.Context) {
+	tok := c.Param("token")
+	var body patchTokenBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.tokens.Update(tok, body.Name, body.WeeklyUSD); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (h *Handler) handleDeleteToken(c *gin.Context) {
+	tok := c.Param("token")
+	if err := h.tokens.Delete(tok); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

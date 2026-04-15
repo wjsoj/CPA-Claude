@@ -44,7 +44,8 @@ type Filter struct {
 	Client string    // exact match on Record.Client
 	Model  string    // exact match on Record.Model
 	Status int       // 0 = any; otherwise exact match
-	Limit  int       // max recent entries to return (0 = 500)
+	Limit  int       // page size for Entries (0 = 50)
+	Offset int       // number of newest-first records to skip before Limit
 }
 
 // Result is the Query return value.
@@ -92,19 +93,22 @@ func Clients(dir string) ([]string, error) {
 }
 
 // Query scans rotated log files in dir that intersect the [From, To]
-// window, applies the filter, aggregates counts, and collects the most
-// recent matching entries up to Limit.
+// window, applies the filter, aggregates counts, and returns the page
+// [Offset, Offset+Limit) of matching entries sorted newest-first.
+// Summary.Count holds the full match count, so callers can render
+// pagination controls without a second query.
 func Query(f Filter) (*Result, error) {
 	if f.Limit <= 0 {
-		f.Limit = 500
+		f.Limit = 50
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
 	}
 	files, err := listLogFiles(f.Dir)
 	if err != nil {
 		return nil, err
 	}
-	// Files are "requests-YYYY-MM-DD.jsonl"; sort descending (newest first)
-	// so we can stop early on Entries once Limit is reached. Aggregates
-	// still need the full sweep.
+	// Files are "requests-YYYY-MM-DD.jsonl"; sort descending (newest first).
 	sort.Sort(sort.Reverse(sort.StringSlice(files)))
 
 	res := &Result{
@@ -121,12 +125,16 @@ func Query(f Filter) (*Result, error) {
 			return nil, err
 		}
 	}
-	// Newest-first within one file isn't strictly guaranteed by writer
-	// ordering when concurrent writes arrive out of order, but scan order
-	// across files is; sort the collected recent entries just in case.
+	// scanFile collects every matching record. Sort descending by timestamp
+	// then paginate.
 	sort.Slice(res.Entries, func(i, j int) bool {
 		return res.Entries[i].TS.After(res.Entries[j].TS)
 	})
+	if f.Offset >= len(res.Entries) {
+		res.Entries = nil
+	} else {
+		res.Entries = res.Entries[f.Offset:]
+	}
 	if len(res.Entries) > f.Limit {
 		res.Entries = res.Entries[:f.Limit]
 	}
@@ -164,11 +172,10 @@ func scanFile(path string, f Filter, res *Result) error {
 		bd := res.ByDay[dayKey]
 		bd.add(r)
 		res.ByDay[dayKey] = bd
-		// Collect recent entries. We keep up to 2× Limit here to give the
-		// final top-sort headroom, then trim in Query.
-		if len(res.Entries) < f.Limit*2 {
-			res.Entries = append(res.Entries, r)
-		}
+		// Collect every matching record so Query can produce an accurate
+		// total count and paginate by Offset. Memory cost is O(match count);
+		// if that ever becomes a problem we can switch to a windowed scan.
+		res.Entries = append(res.Entries, r)
 	}
 	return sc.Err()
 }

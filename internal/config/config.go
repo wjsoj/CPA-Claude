@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/wjsoj/CPA-Claude/internal/pricing"
 	"gopkg.in/yaml.v3"
@@ -40,9 +41,14 @@ type Config struct {
 	//     - "sk-yyy"
 	AccessTokens []AccessToken `yaml:"access_tokens"`
 
-	// Token required to access the /admin/* management panel and APIs.
+	// Token required to access the management panel and APIs.
 	// Empty = panel disabled. Send as X-Admin-Token header (or Authorization: Bearer).
 	AdminToken string `yaml:"admin_token,omitempty"`
+
+	// URL prefix for the management panel. Changing this from the default
+	// makes trivial `/admin`-style dictionary scans miss the panel. Must
+	// start with "/" and must not end with "/". Default: /mgmt-console.
+	AdminPath string `yaml:"admin_path,omitempty"`
 
 	// API-key fallback pool. No concurrency limit.
 	APIKeys []APIKey `yaml:"api_keys"`
@@ -121,7 +127,7 @@ func applyDefaults(c *Config, path string) {
 		c.Host = "0.0.0.0"
 	}
 	if c.Port == 0 {
-		c.Port = 8080
+		c.Port = 8317
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
@@ -149,4 +155,16 @@ func applyDefaults(c *Config, path string) {
 	if c.LogRetentionDays == 0 {
 		c.LogRetentionDays = 30
 	}
+	p := strings.TrimSpace(c.AdminPath)
+	if p == "" {
+		p = "/mgmt-console"
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = strings.TrimRight(p, "/")
+	if p == "" {
+		p = "/mgmt-console"
+	}
+	c.AdminPath = p
 }

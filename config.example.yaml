@@ -1,7 +1,7 @@
 # CPA-Claude — native Anthropic Claude proxy configuration.
 
 host: "0.0.0.0"
-port: 8080
+port: 8317
 log_level: info
 
 # Directory containing per-credential OAuth JSON files (one per Claude account).
@@ -31,9 +31,15 @@ default_proxy_url: ""
 # Override Anthropic base URL (normally leave default).
 anthropic_base_url: "https://api.anthropic.com"
 
-# Admin panel token. If set, the SPA is served at /admin/ and protected by
-# this token (X-Admin-Token header). Leave empty to disable the panel.
+# Admin panel token. If set, the SPA is served under admin_path and
+# protected by this token (X-Admin-Token header). Leave empty to disable
+# the panel.
 admin_token: "change-me-long-random-string"
+
+# URL prefix for the management panel. Changing this from the default
+# makes trivial /admin-style dictionary scans miss the panel. Must start
+# with "/" and not end with "/". Default: /mgmt-console.
+# admin_path: /mgmt-console
 
 # Tokens that clients must present in Authorization: Bearer. Empty = open.
 # Each unique token counts as one "client session" and occupies one OAuth

@@ -44,6 +44,7 @@ type Auth struct {
 	QuotaResetAt      time.Time // when to try again (may be zero = manual reset)
 	LastFailure       time.Time
 	LastFailureReason string
+	LastSuccess       time.Time // set on every <400 upstream response
 }
 
 func (a *Auth) Snapshot() AuthInfo {
@@ -107,6 +108,36 @@ func (a *Auth) MarkFailure(reason string) {
 	a.LastFailure = time.Now()
 	a.LastFailureReason = reason
 	a.mu.Unlock()
+}
+
+// MarkSuccess records that the most recent upstream request through this
+// credential succeeded. Used by the admin panel to compute "healthy" status.
+func (a *Auth) MarkSuccess() {
+	a.mu.Lock()
+	a.LastSuccess = time.Now()
+	a.mu.Unlock()
+}
+
+// IsHealthy returns true if the credential is enabled, not in cooldown, and
+// the most recent observed upstream attempt either succeeded or there has
+// been no failure recorded at all. A credential that has never been used is
+// considered healthy.
+func (a *Auth) IsHealthy() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.Disabled {
+		return false
+	}
+	if !a.QuotaExceededAt.IsZero() {
+		// Still in cooldown? Treat as unhealthy.
+		if a.QuotaResetAt.IsZero() || time.Now().Before(a.QuotaResetAt) {
+			return false
+		}
+	}
+	if a.LastFailure.IsZero() {
+		return true
+	}
+	return a.LastSuccess.After(a.LastFailure)
 }
 
 // Credentials returns a snapshot of the fields needed to authenticate an

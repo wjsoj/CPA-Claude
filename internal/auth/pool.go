@@ -85,7 +85,17 @@ func (p *Pool) activeCountLocked(authID string, now time.Time) int {
 // Acquire picks an Auth for this client token and stamps the session.
 // Returns the chosen Auth. If no OAuth has capacity, falls back to API key
 // (if configured). Returns nil if no credential is available.
-func (p *Pool) Acquire(ctx context.Context, clientToken string) *Auth {
+//
+// excludeIDs lets a retrying caller skip credentials it has already tried in
+// the current request, so a transient connection error on one credential
+// doesn't keep selecting the same one (the sticky-session logic would
+// otherwise pin the client to the failing auth until its session times out).
+func (p *Pool) Acquire(ctx context.Context, clientToken string, excludeIDs ...string) *Auth {
+	excluded := make(map[string]bool, len(excludeIDs))
+	for _, id := range excludeIDs {
+		excluded[id] = true
+	}
+
 	p.mu.Lock()
 	now := time.Now()
 	p.gcLocked(now)
@@ -96,9 +106,9 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string) *Auth {
 		p.sessions[clientToken] = s
 	}
 
-	// If session has a sticky OAuth assignment and it's still healthy and has
-	// capacity for us, reuse it.
-	if s.authID != "" && s.kind == KindOAuth {
+	// If session has a sticky OAuth assignment, it's still healthy, has
+	// capacity for us, AND isn't on the exclude list, reuse it.
+	if s.authID != "" && s.kind == KindOAuth && !excluded[s.authID] {
 		if a := p.findOAuthLocked(s.authID); a != nil {
 			if p.oauthUsableLocked(a, now) {
 				// Reusing an assignment we already hold a slot for: counts us
@@ -111,11 +121,15 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string) *Auth {
 		}
 		// Previous OAuth is unhealthy/gone; reassign.
 		s.authID = ""
+	} else if excluded[s.authID] {
+		// Sticky pick was just tried and failed — release it so the next
+		// pickOAuthLocked is free to pick anything else.
+		s.authID = ""
 	}
 
 	// Try OAuth allocation: pick the OAuth with the fewest active sessions
 	// that still has spare capacity. Tie-break by ID for determinism.
-	if chosen := p.pickOAuthLocked(now); chosen != nil {
+	if chosen := p.pickOAuthLocked(now, excluded); chosen != nil {
 		s.authID = chosen.ID
 		s.kind = KindOAuth
 		s.lastSeen = now
@@ -127,6 +141,9 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string) *Auth {
 	// Fallback: API key, round-robin-ish (pick first usable; apikeys have no
 	// per-credential concurrency, so order doesn't matter for correctness).
 	for _, k := range p.apikeys {
+		if excluded[k.ID] {
+			continue
+		}
 		if k.Disabled {
 			continue
 		}
@@ -174,8 +191,9 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 }
 
 // pickOAuthLocked returns the OAuth with lowest active-session count that
-// still has capacity, or nil if none available.
-func (p *Pool) pickOAuthLocked(now time.Time) *Auth {
+// still has capacity and isn't on the exclude list, or nil if none available.
+// excluded may be nil.
+func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool) *Auth {
 	type cand struct {
 		a      *Auth
 		active int
@@ -183,6 +201,9 @@ func (p *Pool) pickOAuthLocked(now time.Time) *Auth {
 	}
 	var cands []cand
 	for _, a := range p.oauths {
+		if excluded[a.ID] {
+			continue
+		}
 		if !p.oauthUsableLocked(a, now) {
 			continue
 		}
