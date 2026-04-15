@@ -114,7 +114,19 @@ msg "extracting"
 tar -xzf "$TMP/$ASSET" -C "$TMP"
 [ -f "$TMP/$BIN_NAME" ] || err "extracted archive does not contain $BIN_NAME"
 
-# ---- install ----
+# ---- detect existing systemd unit (for upgrade path) ----
+UNIT_NAME="cpa-claude.service"
+UNIT_PATH="/etc/systemd/system/${UNIT_NAME}"
+UNIT_EXISTS=0
+UNIT_WAS_ACTIVE=0
+if [ "$OS_TAG" = "linux" ] && command -v systemctl >/dev/null 2>&1 && [ -f "$UNIT_PATH" ]; then
+  UNIT_EXISTS=1
+  if systemctl is-active --quiet "$UNIT_NAME"; then
+    UNIT_WAS_ACTIVE=1
+  fi
+fi
+
+# ---- install binary ----
 install_cmd=(install -m 0755 "$TMP/$BIN_NAME" "$BIN_DIR/$BIN_NAME")
 if [ -w "$BIN_DIR" ] || { [ ! -d "$BIN_DIR" ] && [ -w "$(dirname "$BIN_DIR")" ]; }; then
   mkdir -p "$BIN_DIR"
@@ -128,6 +140,109 @@ fi
 msg "installed:"
 "$BIN_DIR/$BIN_NAME" --version || true
 
+# ---- systemd integration ----
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+fi
+
+ask() {
+  # $1 prompt, $2 default; reads from /dev/tty so it works under `curl | bash`
+  local prompt="$1" default="$2" reply=""
+  if [ ! -r /dev/tty ]; then
+    printf '%s' "$default"
+    return
+  fi
+  printf '\033[1;36m?\033[0m %s [%s]: ' "$prompt" "$default" > /dev/tty
+  IFS= read -r reply < /dev/tty || reply=""
+  [ -z "$reply" ] && reply="$default"
+  printf '%s' "$reply"
+}
+
+write_unit() {
+  local cfg="$1" user="$2" workdir tmp_unit
+  workdir="$(getent passwd "$user" | cut -d: -f6)"
+  [ -z "$workdir" ] && workdir="/"
+  tmp_unit="$(mktemp)"
+  cat > "$tmp_unit" <<UNIT
+[Unit]
+Description=CPA-Claude relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${user}
+WorkingDirectory=${workdir}
+ExecStart=${BIN_DIR}/${BIN_NAME} --config ${cfg}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  $SUDO install -m 0644 "$tmp_unit" "$UNIT_PATH"
+  rm -f "$tmp_unit"
+}
+
+if [ "$UNIT_EXISTS" = "1" ]; then
+  # Upgrade path: keep existing unit, just reload + restart if it was running.
+  msg "existing systemd unit detected at $UNIT_PATH — preserving it"
+  $SUDO systemctl daemon-reload || true
+  if [ "$UNIT_WAS_ACTIVE" = "1" ]; then
+    msg "restarting $UNIT_NAME to pick up the new binary"
+    $SUDO systemctl restart "$UNIT_NAME" || warn "restart failed; check: systemctl status $UNIT_NAME"
+  else
+    msg "unit is installed but not active — start it with: $SUDO systemctl start $UNIT_NAME"
+  fi
+elif [ "$OS_TAG" = "linux" ] && command -v systemctl >/dev/null 2>&1 && [ -r /dev/tty ]; then
+  RUN_USER="$(id -un)"
+  DEFAULT_CFG="$HOME/.config/cpa-claude/config.yaml"
+  reply="$(ask "Create systemd service ${UNIT_NAME} running as '${RUN_USER}'? (y/N)" "N")"
+  case "$reply" in
+    y|Y|yes|YES)
+      CFG_PATH="$(ask "Config file path" "$DEFAULT_CFG")"
+
+      CFG_DIR="$(dirname "$CFG_PATH")"
+      mkdir -p "$CFG_DIR" 2>/dev/null || $SUDO mkdir -p "$CFG_DIR"
+      if [ ! -f "$CFG_PATH" ]; then
+        msg "fetching config.example.yaml → $CFG_PATH"
+        if curl -fsSL "${auth_header[@]}" -o "$TMP/config.yaml" \
+             "https://raw.githubusercontent.com/${REPO}/${TAG}/config.example.yaml"; then
+          if [ -w "$CFG_DIR" ]; then
+            install -m 0640 "$TMP/config.yaml" "$CFG_PATH"
+          else
+            $SUDO install -m 0640 -o "$RUN_USER" -g "$RUN_USER" "$TMP/config.yaml" "$CFG_PATH"
+          fi
+        else
+          warn "could not fetch example config — you must create $CFG_PATH manually"
+        fi
+      else
+        msg "config already exists at $CFG_PATH — leaving it alone"
+      fi
+
+      msg "writing $UNIT_PATH"
+      write_unit "$CFG_PATH" "$RUN_USER"
+      $SUDO systemctl daemon-reload
+
+      cat <<EOF
+
+Systemd unit installed. Next:
+
+  1. Edit $CFG_PATH (set access_tokens, OAuth files in auth_dir).
+  2. $SUDO systemctl enable --now $UNIT_NAME
+  3. $SUDO systemctl status $UNIT_NAME
+     journalctl -u $UNIT_NAME -f
+
+Re-running this installer later will upgrade the binary and auto-restart the service if it was running.
+EOF
+      exit 0
+      ;;
+  esac
+fi
+
 cat <<EOF
 
 Next steps:
@@ -137,5 +252,6 @@ Next steps:
 
   2. $BIN_NAME --config config.yaml
 
-Upgrade later by re-running this installer (it overwrites the binary in place).
+Upgrade later by re-running this installer (it overwrites the binary in place;
+if a cpa-claude.service exists and is running, it will be auto-restarted).
 EOF
