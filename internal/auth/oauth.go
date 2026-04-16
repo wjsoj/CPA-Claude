@@ -253,19 +253,38 @@ type refreshResponse struct {
 	} `json:"account"`
 }
 
-// EnsureFresh refreshes the access token if it's within `leeway` of expiry.
-// Safe for concurrent callers — deduplicates refresh attempts per auth.
-func (a *Auth) EnsureFresh(ctx context.Context, leeway time.Duration, useUTLS bool) error {
+// needsRefresh reports whether the OAuth token is missing or within `leeway`
+// of expiry. Returns false if there is no refresh token to use.
+func (a *Auth) needsRefresh(leeway time.Duration) bool {
 	a.mu.RLock()
-	needs := !a.ExpiresAt.IsZero() && time.Until(a.ExpiresAt) < leeway && a.RefreshToken != ""
-	a.mu.RUnlock()
-	if !needs {
-		return nil
+	defer a.mu.RUnlock()
+	if a.RefreshToken == "" {
+		return false
 	}
-	return a.refresh(ctx, useUTLS)
+	if a.ExpiresAt.IsZero() {
+		return true
+	}
+	return time.Until(a.ExpiresAt) < leeway
 }
 
-func (a *Auth) refresh(ctx context.Context, useUTLS bool) error {
+// EnsureFresh refreshes the access token if it's within `leeway` of expiry.
+// Concurrent callers are deduplicated via a per-auth refresh mutex so the
+// rotating refresh_token is never burned by parallel exchanges.
+func (a *Auth) EnsureFresh(ctx context.Context, leeway time.Duration, useUTLS bool) error {
+	if !a.needsRefresh(leeway) {
+		return nil
+	}
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	// Double-check: another goroutine may have refreshed while we waited.
+	if !a.needsRefresh(leeway) {
+		return nil
+	}
+	return a.doRefreshLocked(ctx, useUTLS)
+}
+
+// doRefreshLocked performs the HTTP exchange. Caller must hold a.refreshMu.
+func (a *Auth) doRefreshLocked(ctx context.Context, useUTLS bool) error {
 	a.mu.RLock()
 	refresh := a.RefreshToken
 	a.mu.RUnlock()
@@ -289,15 +308,34 @@ func (a *Auth) refresh(ctx context.Context, useUTLS bool) error {
 	client := ClientFor(a.ProxyURL, useUTLS)
 	resp, err := client.Do(req)
 	if err != nil {
+		a.MarkFailure(fmt.Sprintf("refresh transport: %v", err))
 		return fmt.Errorf("oauth refresh %s: %w", a.ID, err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("oauth refresh %s: http %d: %s", a.ID, resp.StatusCode, string(data))
+		bodyStr := string(data)
+		var errResp struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		_ = json.Unmarshal(data, &errResp)
+		switch {
+		case resp.StatusCode == http.StatusBadRequest && errResp.Error == "invalid_grant":
+			// Refresh token revoked / not found / already used. Terminal —
+			// requires manual re-login. Mark hard so the picker stops handing
+			// this auth out and the admin panel surfaces it.
+			a.MarkHardFailure(fmt.Sprintf("refresh_token revoked (invalid_grant): %s", errResp.ErrorDescription))
+		case resp.StatusCode == http.StatusUnauthorized:
+			a.MarkHardFailure(fmt.Sprintf("refresh unauthorized (http 401): %s", bodyStr))
+		default:
+			a.MarkFailure(fmt.Sprintf("refresh http %d", resp.StatusCode))
+		}
+		return fmt.Errorf("oauth refresh %s: http %d: %s", a.ID, resp.StatusCode, bodyStr)
 	}
 	var tr refreshResponse
 	if err := json.Unmarshal(data, &tr); err != nil {
+		a.MarkFailure(fmt.Sprintf("refresh parse: %v", err))
 		return fmt.Errorf("oauth refresh %s: parse: %w", a.ID, err)
 	}
 	a.mu.Lock()
@@ -312,6 +350,9 @@ func (a *Auth) refresh(ctx context.Context, useUTLS bool) error {
 		a.Email = tr.Account.EmailAddress
 	}
 	a.mu.Unlock()
+	// Successful refresh implicitly clears any prior transient failure state
+	// — the credential is demonstrably alive again.
+	a.MarkSuccess()
 	if err := saveAuth(a); err != nil {
 		log.Warnf("auth: persist refreshed token %s: %v", a.ID, err)
 	} else {

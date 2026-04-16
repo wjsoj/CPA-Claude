@@ -19,7 +19,8 @@ const (
 // For OAuth: AccessToken/RefreshToken/ExpiresAt are managed by the refresher.
 // For APIKey: only AccessToken (the literal key) is used.
 type Auth struct {
-	mu sync.RWMutex
+	mu        sync.RWMutex
+	refreshMu sync.Mutex // serializes OAuth refresh calls; prevents concurrent burns of a rotating refresh_token
 
 	ID    string // stable identifier (OAuth: file basename; APIKey: "apikey:<label-or-prefix>")
 	Kind  Kind

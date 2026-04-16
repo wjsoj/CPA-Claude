@@ -110,6 +110,14 @@ func main() {
 		time.Duration(cfg.ActiveWindowMinutes)*time.Minute,
 		cfg.UseUTLS, cfg.DefaultProxyURL)
 
+	// Background OAuth refresher: keeps access tokens fresh even when the
+	// credential sees no traffic, so a long quiet period can't leave a token
+	// expired. Single-goroutine — combined with the per-auth refresh mutex
+	// this also prevents the rotating refresh_token from being burned by
+	// concurrent exchanges.
+	refresherCtx, refresherCancel := context.WithCancel(context.Background())
+	go pool.RunRefresher(refresherCtx, time.Minute, 10*time.Minute)
+
 	tokensPath := filepath.Join(filepath.Dir(cfg.StateFile), "tokens.json")
 	tokens, err := clienttoken.Open(tokensPath, cfg.AccessTokens)
 	if err != nil {
@@ -129,6 +137,7 @@ func main() {
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 		<-sigCh
 		log.Info("shutting down...")
+		refresherCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = s.Shutdown(ctx)

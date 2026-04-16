@@ -115,12 +115,21 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string, excludeIDs ...st
 				// only once because activeCountLocked scans distinct sessions.
 				s.lastSeen = now
 				p.mu.Unlock()
-				_ = a.EnsureFresh(ctx, 5*time.Minute, p.useUTLS)
-				return a
+				if err := a.EnsureFresh(ctx, 5*time.Minute, p.useUTLS); err != nil {
+					log.Warnf("auth: ensure-fresh sticky %s failed, releasing: %v", a.ID, err)
+					excluded[a.ID] = true
+					p.mu.Lock()
+					s.authID = ""
+					// fall through to the pick loop below
+				} else {
+					return a
+				}
 			}
 		}
-		// Previous OAuth is unhealthy/gone; reassign.
-		s.authID = ""
+		if s.authID != "" {
+			// Previous OAuth is unhealthy/gone; reassign.
+			s.authID = ""
+		}
 	} else if excluded[s.authID] {
 		// Sticky pick was just tried and failed — release it so the next
 		// pickOAuthLocked is free to pick anything else.
@@ -128,13 +137,25 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string, excludeIDs ...st
 	}
 
 	// Try OAuth allocation: pick the OAuth with the fewest active sessions
-	// that still has spare capacity. Tie-break by ID for determinism.
-	if chosen := p.pickOAuthLocked(now, excluded); chosen != nil {
+	// that still has spare capacity. If EnsureFresh fails for the picked
+	// candidate, exclude it and retry — never hand out a credential whose
+	// access_token we couldn't keep alive.
+	for {
+		chosen := p.pickOAuthLocked(now, excluded)
+		if chosen == nil {
+			break
+		}
 		s.authID = chosen.ID
 		s.kind = KindOAuth
 		s.lastSeen = now
 		p.mu.Unlock()
-		_ = chosen.EnsureFresh(ctx, 5*time.Minute, p.useUTLS)
+		if err := chosen.EnsureFresh(ctx, 5*time.Minute, p.useUTLS); err != nil {
+			log.Warnf("auth: ensure-fresh %s failed, excluding: %v", chosen.ID, err)
+			excluded[chosen.ID] = true
+			p.mu.Lock()
+			s.authID = ""
+			continue
+		}
 		return chosen
 	}
 
@@ -370,6 +391,51 @@ func (p *Pool) RemoveAuth(id string) *Auth {
 	}
 	p.mu.Unlock()
 	return p.RemoveOAuth(id)
+}
+
+// RefreshExpiring proactively refreshes any OAuth credential whose access
+// token will expire within `leeway`. Skips disabled and hard-failed creds —
+// those need manual intervention. Errors are logged, not returned: this is a
+// best-effort background pass.
+func (p *Pool) RefreshExpiring(ctx context.Context, leeway time.Duration) {
+	p.mu.Lock()
+	targets := make([]*Auth, 0, len(p.oauths))
+	for _, a := range p.oauths {
+		if a.Disabled || a.IsHardFailed() {
+			continue
+		}
+		targets = append(targets, a)
+	}
+	p.mu.Unlock()
+	for _, a := range targets {
+		if err := a.EnsureFresh(ctx, leeway, p.useUTLS); err != nil {
+			log.Warnf("auth: background refresh %s: %v", a.ID, err)
+		}
+	}
+}
+
+// RunRefresher launches a ticker that periodically calls RefreshExpiring.
+// Returns when ctx is cancelled. Intended to run in its own goroutine.
+func (p *Pool) RunRefresher(ctx context.Context, interval, leeway time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	if leeway <= 0 {
+		leeway = 10 * time.Minute
+	}
+	// Kick once immediately so a fresh start doesn't wait `interval` before
+	// noticing tokens that are already past leeway.
+	p.RefreshExpiring(ctx, leeway)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.RefreshExpiring(ctx, leeway)
+		}
+	}
 }
 
 // ReportUpstreamError inspects an upstream HTTP error status and marks the
