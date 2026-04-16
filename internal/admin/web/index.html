@@ -74,6 +74,23 @@
     // same shape. Lives on the client so the Add-token modal can pre-fill
     // without hitting the network and avoids a path conflict with
     // PATCH /tokens/:token.
+    // Copy text to clipboard. navigator.clipboard requires a secure context
+    // (HTTPS or localhost); when accessed over plain HTTP on a LAN IP it
+    // simply doesn't exist. Fall back to the legacy execCommand approach.
+    async function copyToClipboard(text) {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        try { await navigator.clipboard.writeText(text); return; } catch {}
+      }
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+
     function generateSkToken() {
       const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
       const n = 48;
@@ -758,12 +775,10 @@
 
       const copyUrl = async () => {
         try {
-          await navigator.clipboard.writeText(sess.auth_url);
+          await copyToClipboard(sess.auth_url);
           setCopied(true);
           setTimeout(() => setCopied(false), 1500);
-        } catch {
-          // fallback: select the input so user can copy manually
-        }
+        } catch {}
       };
 
       const finish = async () => {
@@ -998,7 +1013,7 @@
 
       const copy = async () => {
         try {
-          await navigator.clipboard.writeText(created || token);
+          await copyToClipboard(created || token);
           setCopied(true);
           setTimeout(() => setCopied(false), 2000);
         } catch {}

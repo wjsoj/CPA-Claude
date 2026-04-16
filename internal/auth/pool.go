@@ -443,9 +443,9 @@ func (p *Pool) RunRefresher(ctx context.Context, interval, leeway time.Duration)
 // on the next attempt). Every retryable status results in a cooldown; the
 // cooldown length is tuned to the specific failure mode:
 //
-//	429  → Retry-After (if given) or 1h
-//	403  → Retry-After (if given) or 30m  (could be quota or auth-forbidden)
-//	401  → 15m                             (token revoked/invalid; admin may
+//	429  → Retry-After (if given) or 10m
+//	403  → Retry-After (if given) or 5m   (could be quota or auth-forbidden)
+//	401  → 5m                              (token revoked/invalid; admin may
 //	                                        need to re-login, but don't hard-
 //	                                        disable on a single transient hit)
 //	529  → 30s                             (Anthropic overloaded)
@@ -467,14 +467,14 @@ func (p *Pool) ReportUpstreamError(a *Auth, status int, resetAt time.Time) {
 	}
 	switch {
 	case status == 429:
-		setCooldown(time.Hour)
+		setCooldown(10 * time.Minute)
 	case status == 403:
-		setCooldown(30 * time.Minute)
+		setCooldown(5 * time.Minute)
 	case status == 401:
 		// Don't honor Retry-After for auth failures — it's typically a rate
 		// limit hint unrelated to the bad credential.
 		resetAt = time.Time{}
-		setCooldown(15 * time.Minute)
+		setCooldown(5 * time.Minute)
 	case status == 529:
 		resetAt = time.Time{}
 		setCooldown(30 * time.Second)
