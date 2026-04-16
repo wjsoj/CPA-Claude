@@ -811,12 +811,13 @@ func sanitizeFilename(s string) string {
 // every row is returned verbatim — used by the "copy to clipboard" button
 // in the Add-token modal right after creation.
 type tokenView struct {
-	Token      string     `json:"token"`
-	Masked     string     `json:"masked"`
-	Name       string     `json:"name"`
-	WeeklyUSD  float64    `json:"weekly_usd"`
-	CreatedAt  *time.Time `json:"created_at,omitempty"`
-	FromConfig bool       `json:"from_config"`
+	Token         string     `json:"token"`
+	Masked        string     `json:"masked"`
+	Name          string     `json:"name"`
+	WeeklyUSD     float64    `json:"weekly_usd"`
+	MaxConcurrent int        `json:"max_concurrent,omitempty"`
+	CreatedAt     *time.Time `json:"created_at,omitempty"`
+	FromConfig    bool       `json:"from_config"`
 	// Live usage for the current ISO week, convenient for the panel row.
 	WeeklyUsedUSD float64 `json:"weekly_used_usd"`
 }
@@ -830,6 +831,7 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 			Masked:        maskToken(t.Token),
 			Name:          t.Name,
 			WeeklyUSD:     t.WeeklyUSD,
+			MaxConcurrent: t.MaxConcurrent,
 			FromConfig:    t.FromConfig,
 			WeeklyUsedUSD: h.usage.WeeklyCostUSD(t.Token),
 		}
@@ -846,10 +848,11 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 }
 
 type createTokenBody struct {
-	Token     string  `json:"token"`
-	Name      string  `json:"name"`
-	WeeklyUSD float64 `json:"weekly_usd"`
-	Generate  bool    `json:"generate"` // if true and Token == "", mint a fresh sk-...
+	Token         string  `json:"token"`
+	Name          string  `json:"name"`
+	WeeklyUSD     float64 `json:"weekly_usd"`
+	MaxConcurrent int     `json:"max_concurrent,omitempty"`
+	Generate      bool    `json:"generate"` // if true and Token == "", mint a fresh sk-...
 }
 
 func (h *Handler) handleCreateToken(c *gin.Context) {
@@ -872,9 +875,10 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 		tok = v
 	}
 	entry := clienttoken.Token{
-		Token:     tok,
-		Name:      body.Name,
-		WeeklyUSD: body.WeeklyUSD,
+		Token:         tok,
+		Name:          body.Name,
+		WeeklyUSD:     body.WeeklyUSD,
+		MaxConcurrent: body.MaxConcurrent,
 	}
 	if err := h.tokens.Add(entry); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -889,8 +893,9 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 }
 
 type patchTokenBody struct {
-	Name      *string  `json:"name"`
-	WeeklyUSD *float64 `json:"weekly_usd"`
+	Name          *string  `json:"name"`
+	WeeklyUSD     *float64 `json:"weekly_usd"`
+	MaxConcurrent *int     `json:"max_concurrent"`
 }
 
 func (h *Handler) handlePatchToken(c *gin.Context) {
@@ -900,7 +905,7 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.tokens.Update(tok, body.Name, body.WeeklyUSD); err != nil {
+	if err := h.tokens.Update(tok, body.Name, body.WeeklyUSD, body.MaxConcurrent); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

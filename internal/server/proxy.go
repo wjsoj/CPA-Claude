@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -71,11 +72,8 @@ func (s *Server) forward(c *gin.Context, path string) {
 		model = "unknown"
 	}
 
-	// Weekly-budget pre-check. If this client has a configured budget and
-	// their current-week spend already met or exceeded it, reject with 429.
-	// A request in flight may slightly overshoot (by one request's cost);
-	// that's the acceptable trade-off for not knowing output tokens upfront.
-	if _, weeklyLimit, ok := s.tokens.Lookup(clientToken); ok && weeklyLimit > 0 {
+	// Weekly-budget pre-check.
+	if _, weeklyLimit, _, ok := s.tokens.Lookup(clientToken); ok && weeklyLimit > 0 {
 		spent := s.usage.WeeklyCostUSD(clientToken)
 		if spent >= weeklyLimit {
 			c.Header("Retry-After", "604800")
@@ -94,6 +92,34 @@ func (s *Server) forward(c *gin.Context, path string) {
 				Status:      429,
 				DurationMs:  time.Since(start).Milliseconds(),
 				Error:       "weekly budget exceeded",
+			})
+			return
+		}
+	}
+
+	// Concurrency limit per client token.
+	maxConc := s.clientMaxConcurrent(clientToken)
+	if maxConc > 0 {
+		v, _ := s.inflight.LoadOrStore(clientToken, new(int32))
+		counter := v.(*int32)
+		cur := atomic.AddInt32(counter, 1)
+		defer atomic.AddInt32(counter, -1)
+		if cur > int32(maxConc) {
+			c.Header("Retry-After", "5")
+			c.AbortWithStatusJSON(429, gin.H{
+				"error":         "too many concurrent requests",
+				"max_concurrent": maxConc,
+				"in_flight":     int(cur),
+			})
+			s.emitLog(requestlog.Record{
+				Client:      clientName,
+				ClientToken: maskClientToken(clientToken),
+				Model:       model,
+				Stream:      peek.Stream,
+				Path:        path,
+				Status:      429,
+				DurationMs:  time.Since(start).Milliseconds(),
+				Error:       "concurrent limit exceeded",
 			})
 			return
 		}
@@ -234,6 +260,10 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 			Attempts:    attempts,
 			Error:       fmt.Sprintf("upstream %d", resp.StatusCode),
 		})
+		// Break sticky session so the next request from this client can
+		// be assigned to a different (hopefully healthy) credential.
+		s.pool.Unstick(clientToken)
+
 		writeResponseHeaders(c, resp)
 		c.Writer.Write(errBody)
 		return false, true

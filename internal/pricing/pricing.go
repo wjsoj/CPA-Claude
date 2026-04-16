@@ -152,6 +152,12 @@ var builtIn = map[string]ModelPrice{
 		CacheReadPer1M:   0.50,
 		CacheCreatePer1M: 6.25,
 	},
+	"claude-opus-4-7": {
+		InputPer1M:       5.00,
+		OutputPer1M:      25.00,
+		CacheReadPer1M:   0.50,
+		CacheCreatePer1M: 6.25,
+	},
 	"claude-sonnet-4-6": {
 		InputPer1M:       3.00,
 		OutputPer1M:      15.00,

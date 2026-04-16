@@ -32,20 +32,22 @@ import (
 
 // Token is one client access token.
 type Token struct {
-	Token     string    `json:"token"`
-	Name      string    `json:"name"`
-	WeeklyUSD float64   `json:"weekly_usd,omitempty"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
+	Token         string    `json:"token"`
+	Name          string    `json:"name"`
+	WeeklyUSD     float64   `json:"weekly_usd,omitempty"`
+	MaxConcurrent int       `json:"max_concurrent,omitempty"` // 0 = use global default
+	CreatedAt     time.Time `json:"created_at,omitempty"`
 }
 
 // View is the API representation returned to the admin panel. It adds
 // FromConfig so the UI can lock read-only rows.
 type View struct {
-	Token      string    `json:"token"`
-	Name       string    `json:"name"`
-	WeeklyUSD  float64   `json:"weekly_usd"`
-	CreatedAt  time.Time `json:"created_at,omitempty"`
-	FromConfig bool      `json:"from_config"`
+	Token         string    `json:"token"`
+	Name          string    `json:"name"`
+	WeeklyUSD     float64   `json:"weekly_usd"`
+	MaxConcurrent int       `json:"max_concurrent,omitempty"`
+	CreatedAt     time.Time `json:"created_at,omitempty"`
+	FromConfig    bool      `json:"from_config"`
 }
 
 type Store struct {
@@ -67,9 +69,10 @@ func Open(path string, cfgTokens []config.AccessToken) (*Store, error) {
 			continue
 		}
 		s.cfgs = append(s.cfgs, Token{
-			Token:     t,
-			Name:      strings.TrimSpace(at.Name),
-			WeeklyUSD: at.WeeklyUSD,
+			Token:         t,
+			Name:          strings.TrimSpace(at.Name),
+			WeeklyUSD:     at.WeeklyUSD,
+			MaxConcurrent: at.MaxConcurrent,
 		})
 	}
 
@@ -108,27 +111,29 @@ func (s *Store) effectiveCfg(t Token) Token {
 	if o, ok := s.overrides[t.Token]; ok {
 		t.Name = o.Name
 		t.WeeklyUSD = o.WeeklyUSD
+		t.MaxConcurrent = o.MaxConcurrent
 	}
 	return t
 }
 
 // Lookup reports whether tok is a known client token. If so, it returns the
-// human-readable name and the weekly USD budget (0 = no limit).
-func (s *Store) Lookup(tok string) (name string, weekly float64, ok bool) {
+// human-readable name, the weekly USD budget (0 = no limit), and the
+// per-token max concurrent requests (0 = use global default).
+func (s *Store) Lookup(tok string) (name string, weekly float64, maxConc int, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, t := range s.runtime {
 		if t.Token == tok {
-			return t.Name, t.WeeklyUSD, true
+			return t.Name, t.WeeklyUSD, t.MaxConcurrent, true
 		}
 	}
 	for _, t := range s.cfgs {
 		if t.Token == tok {
 			e := s.effectiveCfg(t)
-			return e.Name, e.WeeklyUSD, true
+			return e.Name, e.WeeklyUSD, e.MaxConcurrent, true
 		}
 	}
-	return "", 0, false
+	return "", 0, 0, false
 }
 
 // Empty reports whether the proxy should run in open mode (no tokens
@@ -149,13 +154,13 @@ func (s *Store) List() []View {
 		e := s.effectiveCfg(t)
 		out = append(out, View{
 			Token: e.Token, Name: e.Name, WeeklyUSD: e.WeeklyUSD,
-			CreatedAt: e.CreatedAt, FromConfig: true,
+			MaxConcurrent: e.MaxConcurrent, CreatedAt: e.CreatedAt, FromConfig: true,
 		})
 	}
 	for _, t := range s.runtime {
 		out = append(out, View{
 			Token: t.Token, Name: t.Name, WeeklyUSD: t.WeeklyUSD,
-			CreatedAt: t.CreatedAt, FromConfig: false,
+			MaxConcurrent: t.MaxConcurrent, CreatedAt: t.CreatedAt, FromConfig: false,
 		})
 	}
 	return out
@@ -192,7 +197,7 @@ func (s *Store) Add(t Token) error {
 }
 
 // Update patches an existing runtime token. nil fields mean "no change".
-func (s *Store) Update(token string, name *string, weekly *float64) error {
+func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.cfgs {
@@ -208,8 +213,16 @@ func (s *Store) Update(token string, name *string, weekly *float64) error {
 				}
 				cur.WeeklyUSD = w
 			}
+			if maxConc != nil {
+				mc := *maxConc
+				if mc < 0 {
+					mc = 0
+				}
+				cur.MaxConcurrent = mc
+			}
 			s.overrides[token] = Token{
 				Token: token, Name: cur.Name, WeeklyUSD: cur.WeeklyUSD,
+				MaxConcurrent: cur.MaxConcurrent,
 			}
 			return s.saveLocked()
 		}
@@ -225,6 +238,13 @@ func (s *Store) Update(token string, name *string, weekly *float64) error {
 					w = 0
 				}
 				s.runtime[i].WeeklyUSD = w
+			}
+			if maxConc != nil {
+				mc := *maxConc
+				if mc < 0 {
+					mc = 0
+				}
+				s.runtime[i].MaxConcurrent = mc
 			}
 			return s.saveLocked()
 		}

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -195,6 +196,18 @@ func (p *Pool) Release(clientToken string) {
 	}
 }
 
+// Unstick clears the sticky credential binding for a client session so the
+// next Acquire picks a fresh credential. Call this when the current credential
+// returned an upstream error — otherwise the client keeps hitting the same
+// failing auth until the session expires.
+func (p *Pool) Unstick(clientToken string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s, ok := p.sessions[clientToken]; ok {
+		s.authID = ""
+	}
+}
+
 func (p *Pool) findOAuthLocked(id string) *Auth {
 	for _, a := range p.oauths {
 		if a.ID == id {
@@ -217,14 +230,14 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 	return true
 }
 
-// pickOAuthLocked returns the OAuth with lowest active-session count that
-// still has capacity and isn't on the exclude list, or nil if none available.
+// pickOAuthLocked returns the OAuth with the most free slots that still has
+// capacity and isn't on the exclude list, or nil if none available.
+// Unlimited credentials (cap=0) are treated as having MaxInt spare slots.
 // excluded may be nil.
 func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool) *Auth {
 	type cand struct {
-		a      *Auth
-		active int
-		cap    int
+		a     *Auth
+		spare int // cap - active; MaxInt for unlimited
 	}
 	var cands []cand
 	for _, a := range p.oauths {
@@ -239,14 +252,18 @@ func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool) *Auth {
 		if capN > 0 && active >= capN {
 			continue
 		}
-		cands = append(cands, cand{a: a, active: active, cap: capN})
+		spare := math.MaxInt
+		if capN > 0 {
+			spare = capN - active
+		}
+		cands = append(cands, cand{a: a, spare: spare})
 	}
 	if len(cands) == 0 {
 		return nil
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
-		if cands[i].active != cands[j].active {
-			return cands[i].active < cands[j].active
+		if cands[i].spare != cands[j].spare {
+			return cands[i].spare > cands[j].spare // most spare first
 		}
 		return cands[i].a.ID < cands[j].a.ID
 	})

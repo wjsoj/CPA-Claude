@@ -67,6 +67,10 @@ type Config struct {
 	// requests-YYYY-MM-DD.jsonl). Empty = disabled.
 	LogDir string `yaml:"log_dir,omitempty"`
 
+	// Default maximum concurrent in-flight requests per client token.
+	// 0 = unlimited. Per-token overrides take precedence.
+	ClientMaxConcurrent int `yaml:"client_max_concurrent"`
+
 	// Days to retain rotated request logs. 0 = disable GC (keep forever).
 	LogRetentionDays int `yaml:"log_retention_days,omitempty"`
 
@@ -79,9 +83,10 @@ type Config struct {
 // bare string (only the token) or a mapping with token/name/weekly_usd.
 // Week boundary for weekly_usd is ISO week (Mon 00:00 UTC); 0 = unlimited.
 type AccessToken struct {
-	Token     string  `yaml:"token"`
-	Name      string  `yaml:"name,omitempty"`
-	WeeklyUSD float64 `yaml:"weekly_usd,omitempty"`
+	Token          string  `yaml:"token"`
+	Name           string  `yaml:"name,omitempty"`
+	WeeklyUSD      float64 `yaml:"weekly_usd,omitempty"`
+	MaxConcurrent  int     `yaml:"max_concurrent,omitempty"` // 0 = use global default
 }
 
 // UnmarshalYAML accepts scalar (string) or map form for backward compat.
@@ -91,9 +96,10 @@ func (a *AccessToken) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	}
 	var shape struct {
-		Token     string  `yaml:"token"`
-		Name      string  `yaml:"name"`
-		WeeklyUSD float64 `yaml:"weekly_usd"`
+		Token         string  `yaml:"token"`
+		Name          string  `yaml:"name"`
+		WeeklyUSD     float64 `yaml:"weekly_usd"`
+		MaxConcurrent int     `yaml:"max_concurrent"`
 	}
 	if err := node.Decode(&shape); err != nil {
 		return err
@@ -101,6 +107,7 @@ func (a *AccessToken) UnmarshalYAML(node *yaml.Node) error {
 	a.Token = shape.Token
 	a.Name = shape.Name
 	a.WeeklyUSD = shape.WeeklyUSD
+	a.MaxConcurrent = shape.MaxConcurrent
 	return nil
 }
 
@@ -128,7 +135,10 @@ func applyDefaults(c *Config, path string) {
 		c.LogLevel = "info"
 	}
 	if c.ActiveWindowMinutes == 0 {
-		c.ActiveWindowMinutes = 10
+		c.ActiveWindowMinutes = 5
+	}
+	if c.ClientMaxConcurrent == 0 {
+		c.ClientMaxConcurrent = 3
 	}
 	if c.AnthropicBaseURL == "" {
 		c.AnthropicBaseURL = "https://api.anthropic.com"

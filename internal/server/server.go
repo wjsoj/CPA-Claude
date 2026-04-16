@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,13 +21,14 @@ import (
 )
 
 type Server struct {
-	cfg     *config.Config
-	pool    *auth.Pool
-	usage   *usage.Store
-	pricing *pricing.Catalog
-	tokens  *clienttoken.Store
-	reqLog  *requestlog.Writer
-	http    *http.Server
+	cfg       *config.Config
+	pool      *auth.Pool
+	usage     *usage.Store
+	pricing   *pricing.Catalog
+	tokens    *clienttoken.Store
+	reqLog    *requestlog.Writer
+	http      *http.Server
+	inflight  sync.Map // client token → *int32 (atomic in-flight count)
 }
 
 func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *requestlog.Writer, tokens *clienttoken.Store) *Server {
@@ -108,7 +110,7 @@ func (s *Server) clientAuth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 			return
 		}
-		name, _, ok := s.tokens.Lookup(tok)
+		name, _, _, ok := s.tokens.Lookup(tok)
 		if !ok {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
@@ -174,4 +176,13 @@ func (s *Server) handleStatus(c *gin.Context) {
 		"auths":                 rows,
 		"usage":                 s.usage.Snapshot(),
 	})
+}
+
+// clientMaxConcurrent returns the effective max concurrent requests for this
+// client. Per-token override wins; otherwise the global default applies.
+func (s *Server) clientMaxConcurrent(clientToken string) int {
+	if _, _, maxConc, ok := s.tokens.Lookup(clientToken); ok && maxConc > 0 {
+		return maxConc
+	}
+	return s.cfg.ClientMaxConcurrent
 }
