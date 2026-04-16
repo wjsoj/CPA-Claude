@@ -30,6 +30,29 @@ PREFIX="${CPA_PREFIX:-/usr/local}"
 BIN_DIR="${CPA_BIN_DIR:-}"
 MIRROR="${CPA_MIRROR:-}"
 
+# ---- auto-detect China network ----
+# If neither --mirror nor CPA_MIRROR is set, probe connectivity to decide
+# whether to use a GitHub mirror. Quick parallel test: try reaching
+# github.com vs a known Chinese site within 3 seconds.
+auto_detect_mirror() {
+  # Skip if user already set a mirror via flag or env.
+  [ -n "$MIRROR" ] && return
+  # Quick connectivity test: if github.com responds within 3s, no mirror needed.
+  if curl -fsS --connect-timeout 3 --max-time 3 -o /dev/null "https://github.com" 2>/dev/null; then
+    return
+  fi
+  # github.com unreachable — likely behind GFW. Pick a mirror.
+  local mirrors=("https://gh-proxy.com/" "https://ghfast.top/")
+  for m in "${mirrors[@]}"; do
+    if curl -fsS --connect-timeout 3 --max-time 3 -o /dev/null "${m}https://github.com" 2>/dev/null; then
+      MIRROR="$m"
+      warn "github.com unreachable, auto-selected mirror: $MIRROR"
+      return
+    fi
+  done
+  warn "github.com unreachable and no mirror responded; proceeding anyway"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -45,6 +68,8 @@ while [ $# -gt 0 ]; do
 done
 
 [ -z "$BIN_DIR" ] && BIN_DIR="${PREFIX%/}/bin"
+
+auto_detect_mirror
 
 # Normalize mirror: ensure trailing slash, strip nothing else. Example:
 #   https://gh-proxy.com/        → https://gh-proxy.com/https://github.com/...
