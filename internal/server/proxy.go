@@ -195,13 +195,49 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		return true, false
 	}
 
-	// Retryable status codes: 429 (quota), 401/403 (auth bad / oauth needs fallback), 529 (overloaded).
-	if resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 529 {
+	// Retryable status codes — fall back to a different credential.
+	//  • 429 / 401 / 403 / 529: report upstream error (may set cooldown).
+	//  • 5xx (502/503/504/…): transient gateway errors — retry with the same
+	//    or different credential but do NOT set a cooldown because these are
+	//    typically caused by the upstream gateway, not by the credential itself.
+	// Helper: log a retried-away error so it's visible in the admin panel.
+	logRetry := func(errMsg string) {
+		authKind := "oauth"
+		if a.Kind == auth.KindAPIKey {
+			authKind = "apikey"
+		}
+		s.emitLog(requestlog.Record{
+			Client:      clientName,
+			ClientToken: maskClientToken(clientToken),
+			AuthID:      a.ID,
+			AuthLabel:   a.Label,
+			AuthKind:    authKind,
+			Model:       model,
+			Status:      resp.StatusCode,
+			DurationMs:  time.Since(start).Milliseconds(),
+			Stream:      stream,
+			Path:        path,
+			Attempts:    attempts,
+			Error:       errMsg,
+		})
+	}
+	switch {
+	case resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 529:
 		resetAt := parseRetryAfter(resp.Header)
 		s.pool.ReportUpstreamError(a, resp.StatusCode, resetAt)
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		errMsg := fmt.Sprintf("upstream %d (retrying)", resp.StatusCode)
 		log.Warnf("proxy: %s returned %d — will fall back. body=%s", a.ID, resp.StatusCode, truncate(errBody, 500))
+		logRetry(errMsg)
+		return true, false
+	case resp.StatusCode >= 500:
+		a.MarkFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
+		errBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		errMsg := fmt.Sprintf("upstream %d (retrying)", resp.StatusCode)
+		log.Warnf("proxy: %s returned %d (gateway/server error) — will retry. body=%s", a.ID, resp.StatusCode, truncate(errBody, 500))
+		logRetry(errMsg)
 		return true, false
 	}
 

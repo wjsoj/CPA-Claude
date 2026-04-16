@@ -440,16 +440,15 @@ func (p *Pool) RunRefresher(ctx context.Context, interval, leeway time.Duration)
 
 // ReportUpstreamError inspects an upstream HTTP error status and marks the
 // credential as temporarily unavailable (so Acquire picks a different auth
-// on the next attempt). Every retryable status results in a cooldown; the
-// cooldown length is tuned to the specific failure mode:
+// on the next attempt). Only hard quota / auth errors set a cooldown; transient
+// gateway errors are recorded without cooldown so the credential remains
+// available for immediate retry:
 //
-//	429  → Retry-After (if given) or 10m
-//	403  → Retry-After (if given) or 5m   (could be quota or auth-forbidden)
-//	401  → 5m                              (token revoked/invalid; admin may
-//	                                        need to re-login, but don't hard-
-//	                                        disable on a single transient hit)
-//	529  → 30s                             (Anthropic overloaded)
-//	5xx  → MarkFailure only (no cooldown; transient)
+//	429  → Retry-After (if given) or 30s   (rate limit — usually transient)
+//	403  → Retry-After (if given) or 1m    (could be quota or auth-forbidden)
+//	401  → 1m                              (token revoked/invalid)
+//	529  → MarkFailure only (no cooldown; Anthropic overloaded, transient)
+//	5xx  → MarkFailure only (no cooldown; transient gateway error)
 //
 // The admin panel's "Clear quota" button lets you drop the flag early.
 func (p *Pool) ReportUpstreamError(a *Auth, status int, resetAt time.Time) {
@@ -467,17 +466,23 @@ func (p *Pool) ReportUpstreamError(a *Auth, status int, resetAt time.Time) {
 	}
 	switch {
 	case status == 429:
-		setCooldown(10 * time.Minute)
+		// Most 429s from Anthropic are transient rate limits (RPM/TPM),
+		// NOT true quota exhaustion. A 10-minute freeze is far too
+		// aggressive — it takes the credential offline long after the
+		// rate window has reset. Use a short default; if the upstream
+		// sends a meaningful Retry-After we'll honour it instead.
+		setCooldown(30 * time.Second)
 	case status == 403:
-		setCooldown(5 * time.Minute)
+		setCooldown(1 * time.Minute)
 	case status == 401:
 		// Don't honor Retry-After for auth failures — it's typically a rate
 		// limit hint unrelated to the bad credential.
 		resetAt = time.Time{}
-		setCooldown(5 * time.Minute)
+		setCooldown(1 * time.Minute)
 	case status == 529:
-		resetAt = time.Time{}
-		setCooldown(30 * time.Second)
+		// Anthropic overloaded — transient, no cooldown needed; just mark
+		// the failure so the admin panel can see it.
+		a.MarkFailure(fmt.Sprintf("upstream %d (overloaded)", status))
 	case status >= 500:
 		a.MarkFailure(fmt.Sprintf("upstream %d", status))
 	}
