@@ -1,0 +1,29 @@
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - unused
+    - unconvert
+    - unparam
+    - misspell
+    - nilerr
+    - bodyclose
+    - durationcheck
+    - revive
+    - gocritic
+    - errorlint
+    - gosec
+    - prealloc
+
+issues:
+  exclude-dirs:
+    - vendor
+  exclude-rules:
+    # Allow unchecked errors on deferred Close / Flush — standard Go idiom.
+    - linters: [errcheck]
+      source: "defer "

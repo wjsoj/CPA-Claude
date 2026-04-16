@@ -135,18 +135,18 @@ func extractClientToken(r *http.Request) string {
 
 func (s *Server) handleStatus(c *gin.Context) {
 	type row struct {
-		ID              string    `json:"id"`
-		Kind            string    `json:"kind"`
-		Label           string    `json:"label"`
-		Email           string    `json:"email,omitempty"`
-		ProxyURL        string    `json:"proxy_url,omitempty"`
-		MaxConcurrent   int       `json:"max_concurrent"`
-		ActiveClients   int       `json:"active_clients"`
-		ClientTokens    []string  `json:"client_tokens,omitempty"`
-		Disabled        bool      `json:"disabled,omitempty"`
-		QuotaExceeded   bool      `json:"quota_exceeded,omitempty"`
-		QuotaResetAt    time.Time `json:"quota_reset_at,omitempty"`
-		ExpiresAt       time.Time `json:"expires_at,omitempty"`
+		ID            string    `json:"id"`
+		Kind          string    `json:"kind"`
+		Label         string    `json:"label"`
+		Email         string    `json:"email,omitempty"`
+		ProxyURL      string    `json:"proxy_url,omitempty"`
+		MaxConcurrent int       `json:"max_concurrent"`
+		ActiveClients int       `json:"active_clients"`
+		ClientTokens  []string  `json:"client_tokens,omitempty"`
+		Disabled      bool      `json:"disabled,omitempty"`
+		QuotaExceeded bool      `json:"quota_exceeded,omitempty"`
+		QuotaResetAt  time.Time `json:"quota_reset_at,omitempty"`
+		ExpiresAt     time.Time `json:"expires_at,omitempty"`
 	}
 	var rows []row
 	for _, st := range s.pool.Status() {
