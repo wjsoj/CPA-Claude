@@ -69,6 +69,10 @@ done
 
 [ -z "$BIN_DIR" ] && BIN_DIR="${PREFIX%/}/bin"
 
+msg()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!!!\033[0m %s\n' "$*" >&2; }
+err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
 auto_detect_mirror
 
 # Normalize mirror: ensure trailing slash, strip nothing else. Example:
@@ -86,10 +90,6 @@ gh_url() {
     printf '%s' "$1"
   fi
 }
-
-msg()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m!!!\033[0m %s\n' "$*" >&2; }
-err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 need() { command -v "$1" >/dev/null 2>&1 || err "missing dependency: $1"; }
 need curl
