@@ -252,14 +252,24 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 
 	// Upstream error — log, do lightweight credential bookkeeping, and
 	// faithfully forward the original response to the client as-is.
-	if resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 529 || resp.StatusCode >= 500 {
+	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 
+		// Account-ban detection: Anthropic returns "organization has been
+		// disabled" / "account has been disabled" on terminal bans, usually
+		// with 401/403 but occasionally 400. These should hard-disable the
+		// credential (manual clear required), not just cooldown.
+		banned := isAccountBanBody(errBody)
+
 		// Credential bookkeeping: mark the auth so the pool can make
 		// smarter scheduling decisions, but never hide the error from
-		// the client.
+		// the client. Generic 4xx (400/404/413/422/...) are client-request
+		// faults — credential is fine, so no MarkFailure.
 		switch {
+		case banned:
+			a.MarkHardFailure(fmt.Sprintf("account banned (upstream %d)", resp.StatusCode))
+			log.Warnf("auth: %s hard-disabled — account ban detected (status %d)", a.ID, resp.StatusCode)
 		case resp.StatusCode == 429 && bytes.Contains(errBody, []byte("Extra usage is required")):
 			// Request-level rejection (long context), not a credential
 			// problem — no cooldown.
@@ -303,12 +313,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 
 	var counts usage.Counts
 	counts.Requests = 1
-	if resp.StatusCode >= 400 {
-		counts.Errors = 1
-		a.MarkFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
-	} else {
-		a.MarkSuccess()
-	}
+	a.MarkSuccess()
 
 	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		streamSSE(c, resp, &counts)
@@ -553,6 +558,29 @@ func parseRetryAfter(h http.Header) time.Time {
 		return t
 	}
 	return time.Time{}
+}
+
+// isAccountBanBody reports whether the upstream error body looks like a
+// terminal account/organization ban from Anthropic. Match is case-insensitive
+// and deliberately narrow to avoid firing on routine rate-limit / usage-limit
+// copy (e.g. "your organization's usage limit").
+func isAccountBanBody(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	lower := bytes.ToLower(b)
+	markers := [][]byte{
+		[]byte("organization has been disabled"),
+		[]byte("account has been disabled"),
+		[]byte("account is disabled"),
+		[]byte("organization is disabled"),
+	}
+	for _, m := range markers {
+		if bytes.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(b []byte, n int) string {
