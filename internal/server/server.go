@@ -156,6 +156,10 @@ func (s *Server) handleStatus(c *gin.Context) {
 		if st.Auth.Kind == auth.KindAPIKey {
 			kind = "apikey"
 		}
+		masked := make([]string, 0, len(st.ClientTokens))
+		for _, t := range st.ClientTokens {
+			masked = append(masked, auth.MaskToken(t))
+		}
 		rows = append(rows, row{
 			ID:            st.Auth.ID,
 			Kind:          kind,
@@ -164,7 +168,7 @@ func (s *Server) handleStatus(c *gin.Context) {
 			ProxyURL:      st.Auth.ProxyURL,
 			MaxConcurrent: st.Auth.MaxConcurrent,
 			ActiveClients: st.ActiveClients,
-			ClientTokens:  st.ClientTokens,
+			ClientTokens:  masked,
 			Disabled:      st.Auth.Disabled,
 			QuotaExceeded: !st.Auth.QuotaExceededAt.IsZero(),
 			QuotaResetAt:  st.Auth.QuotaResetAt,

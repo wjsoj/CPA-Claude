@@ -271,6 +271,8 @@ func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool) *Auth {
 }
 
 // Status returns a snapshot of all auths and their current active counts.
+// ClientTokens holds the raw client tokens currently holding a slot; callers
+// decide whether to mask or resolve them to display names.
 type Status struct {
 	Auth          AuthInfo
 	ActiveClients int
@@ -289,7 +291,7 @@ func (p *Pool) Status() []Status {
 		for _, s := range p.sessions {
 			if s.authID == a.ID {
 				active++
-				tokens = append(tokens, maskToken(s.clientToken))
+				tokens = append(tokens, s.clientToken)
 			}
 		}
 		out = append(out, Status{Auth: a.Snapshot(), ActiveClients: active, ClientTokens: tokens})
@@ -300,7 +302,7 @@ func (p *Pool) Status() []Status {
 		for _, s := range p.sessions {
 			if s.authID == a.ID {
 				active++
-				tokens = append(tokens, maskToken(s.clientToken))
+				tokens = append(tokens, s.clientToken)
 			}
 		}
 		out = append(out, Status{Auth: a.Snapshot(), ActiveClients: active, ClientTokens: tokens})
@@ -308,7 +310,9 @@ func (p *Pool) Status() []Status {
 	return out
 }
 
-func maskToken(t string) string {
+// MaskToken returns a display-safe form of a client token. Exposed so admin /
+// status consumers can render without leaking the full secret.
+func MaskToken(t string) string {
 	if len(t) <= 8 {
 		return "***"
 	}

@@ -254,7 +254,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			BaseURL:       st.Auth.BaseURL,
 			MaxConcurrent: st.Auth.MaxConcurrent,
 			ActiveClients: st.ActiveClients,
-			ClientTokens:  st.ClientTokens,
+			ClientTokens:  h.resolveClientTokenLabels(st.ClientTokens),
 			Disabled:      st.Auth.Disabled,
 			QuotaExceeded: !st.Auth.QuotaExceededAt.IsZero(),
 			QuotaResetAt:  quotaReset,
@@ -362,6 +362,43 @@ func maskToken(t string) string {
 		return "***"
 	}
 	return t[:6] + "…" + t[len(t)-4:]
+}
+
+// resolveClientTokenLabels turns raw client tokens into display strings for
+// the admin panel. Registered tokens are shown by human name; unknown ones
+// (open-mode IPs, stale entries) fall back to a masked form. Duplicates are
+// collapsed with an "×N" suffix so N concurrent requests from the same client
+// render as one tooltip entry.
+func (h *Handler) resolveClientTokenLabels(tokens []string) []string {
+	if len(tokens) == 0 {
+		return nil
+	}
+	order := make([]string, 0, len(tokens))
+	counts := make(map[string]int, len(tokens))
+	for _, t := range tokens {
+		label := ""
+		if h.tokens != nil {
+			if name, _, _, ok := h.tokens.Lookup(t); ok && strings.TrimSpace(name) != "" {
+				label = name
+			}
+		}
+		if label == "" {
+			label = maskToken(t)
+		}
+		if _, ok := counts[label]; !ok {
+			order = append(order, label)
+		}
+		counts[label]++
+	}
+	out := make([]string, 0, len(order))
+	for _, label := range order {
+		if counts[label] > 1 {
+			out = append(out, fmt.Sprintf("%s ×%d", label, counts[label]))
+		} else {
+			out = append(out, label)
+		}
+	}
+	return out
 }
 
 type patchAuthBody struct {

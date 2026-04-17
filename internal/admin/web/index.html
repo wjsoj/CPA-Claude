@@ -928,9 +928,9 @@
           `}
 
           <dl class="px-5 py-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
-            <div>
+            <div class="relative group">
               <dt class="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Slots</dt>
-              <dd class="mt-1 mono">
+              <dd class=${"mt-1 mono " + (a.active_clients > 0 && a.client_tokens && a.client_tokens.length > 0 ? "cursor-help" : "")}>
                 <div>${slot}</div>
                 ${a.max_concurrent > 0 && html`
                   <div class="mt-1 h-1 w-full max-w-[120px] bg-slate-100 dark:bg-slate-700 rounded overflow-hidden">
@@ -938,6 +938,14 @@
                   </div>
                 `}
               </dd>
+              ${a.active_clients > 0 && a.client_tokens && a.client_tokens.length > 0 && html`
+                <div class="pointer-events-none absolute left-0 top-full mt-2 z-20 min-w-[180px] max-w-[260px] opacity-0 translate-y-1 group-hover:opacity-100 group-hover:translate-y-0 transition duration-150 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 shadow-lg px-3 py-2 text-xs">
+                  <div class="text-slate-500 dark:text-slate-400 uppercase tracking-wide text-[10px] mb-1">Active clients</div>
+                  <ul class="space-y-0.5">
+                    ${a.client_tokens.map(t => html`<li class="truncate text-slate-700 dark:text-slate-200">${t}</li>`)}
+                  </ul>
+                </div>
+              `}
             </div>
             <div>
               <dt class="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Token exp</dt>
