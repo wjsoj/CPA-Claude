@@ -184,7 +184,13 @@ type authRow struct {
 	Healthy       bool          `json:"healthy"`
 	HardFailure   bool          `json:"hard_failure"`
 	FailureReason string        `json:"failure_reason,omitempty"`
-	Usage         *usageSummary `json:"usage,omitempty"`
+	// Most recent client-initiated cancellation. Informational only —
+	// doesn't affect Healthy or trigger any cooldown. Used by the panel to
+	// show a low-tone "client canceled" hint distinct from upstream
+	// failures.
+	LastClientCancel   *time.Time    `json:"last_client_cancel,omitempty"`
+	ClientCancelReason string        `json:"client_cancel_reason,omitempty"`
+	Usage              *usageSummary `json:"usage,omitempty"`
 }
 
 type usageSummary struct {
@@ -229,8 +235,15 @@ func (h *Handler) handleSummary(c *gin.Context) {
 		live := h.pool.FindByID(st.Auth.ID)
 		var healthy, hardFail bool
 		var failReason string
+		var cancelAt *time.Time
+		var cancelReason string
 		if live != nil {
 			healthy, hardFail, failReason, _ = live.HealthSnapshot()
+			if at, reason := live.ClientCancelSnapshot(); !at.IsZero() {
+				t := at
+				cancelAt = &t
+				cancelReason = reason
+			}
 		}
 		rows = append(rows, authRow{
 			ID:            st.Auth.ID,
@@ -247,10 +260,12 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			QuotaResetAt:  quotaReset,
 			ExpiresAt:     expAt,
 			FileBacked:    strings.TrimSpace(st.Auth.FilePath) != "",
-			Healthy:       healthy,
-			HardFailure:   hardFail,
-			FailureReason: failReason,
-			Usage:         u,
+			Healthy:            healthy,
+			HardFailure:        hardFail,
+			FailureReason:      failReason,
+			LastClientCancel:   cancelAt,
+			ClientCancelReason: cancelReason,
+			Usage:              u,
 		})
 	}
 	// Clients (per-access-token spending).

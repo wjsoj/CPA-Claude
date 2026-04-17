@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -216,6 +217,34 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	client := auth.ClientFor(a.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(upReq)
 	if err != nil {
+		// Client went away (ctrl-C, closed connection, etc.) — not a
+		// credential fault. Record a non-fatal hint for the admin panel,
+		// skip retrying onto other credentials (they would all hit the
+		// same dead context and get falsely blamed), and don't bother
+		// writing a response body to the vanished client.
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			a.MarkClientCancel(err.Error())
+			log.Infof("proxy: client canceled via %s: %v", a.ID, err)
+			authKind := "oauth"
+			if a.Kind == auth.KindAPIKey {
+				authKind = "apikey"
+			}
+			s.emitLog(requestlog.Record{
+				Client:      clientName,
+				ClientToken: maskClientToken(clientToken),
+				AuthID:      a.ID,
+				AuthLabel:   a.Label,
+				AuthKind:    authKind,
+				Model:       model,
+				Stream:      stream,
+				Path:        path,
+				Status:      499, // nginx convention: client closed request
+				DurationMs:  time.Since(start).Milliseconds(),
+				Attempts:    attempts,
+				Error:       "client canceled",
+			})
+			return false, true
+		}
 		a.MarkFailure(err.Error())
 		log.Warnf("proxy: upstream error via %s: %v", a.ID, err)
 		return true, false

@@ -50,6 +50,12 @@ type Auth struct {
 	ConsecutiveFailures int       // reset on success; drives auto hard-fail
 	HardFailureAt       time.Time // sticky unhealthy; cleared only by ClearFailure
 	HardFailureReason   string
+
+	// Client-initiated cancellations (ctrl-C, connection close). Tracked
+	// for admin visibility only — does NOT affect IsHealthy / cooldown /
+	// consecutive-failure counters, since the credential itself is fine.
+	LastClientCancel       time.Time
+	LastClientCancelReason string
 }
 
 // healthGrace is how long after an isolated failure we still treat the
@@ -128,6 +134,28 @@ func (a *Auth) MarkFailure(reason string) {
 		a.HardFailureReason = fmt.Sprintf("%d consecutive failures: %s", a.ConsecutiveFailures, reason)
 	}
 	a.mu.Unlock()
+}
+
+// MarkClientCancel records that a request through this credential was
+// aborted by the client (context canceled before upstream responded). This
+// is surfaced to the admin panel as a non-fatal hint but never touches
+// health state — the credential itself did nothing wrong.
+func (a *Auth) MarkClientCancel(reason string) {
+	if len(reason) > 200 {
+		reason = reason[:200] + "..."
+	}
+	a.mu.Lock()
+	a.LastClientCancel = time.Now()
+	a.LastClientCancelReason = reason
+	a.mu.Unlock()
+}
+
+// ClientCancelSnapshot returns the most recent client-cancel timestamp and
+// reason, if any. Zero time means none recorded.
+func (a *Auth) ClientCancelSnapshot() (time.Time, string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.LastClientCancel, a.LastClientCancelReason
 }
 
 // MarkHardFailure flags the credential as sticky-unhealthy. The admin panel

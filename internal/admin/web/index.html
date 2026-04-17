@@ -920,6 +920,12 @@
               <span class=${"mono text-xs truncate ml-3 " + (a.hard_failure ? "text-rose-700 dark:text-rose-400" : "text-amber-700 dark:text-amber-400")} title=${a.failure_reason}>${a.failure_reason}</span>
             </div>
           `}
+          ${a.last_client_cancel && (Date.now() - new Date(a.last_client_cancel).getTime() < 3600 * 1000) && html`
+            <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 flex items-center justify-between gap-3 text-sm">
+              <span class="font-medium text-slate-700 dark:text-slate-300">Client canceled</span>
+              <span class="mono text-xs truncate ml-3 text-slate-600 dark:text-slate-400" title=${a.client_cancel_reason}>${fmtDate(a.last_client_cancel)}${a.client_cancel_reason ? " · " + a.client_cancel_reason : ""}</span>
+            </div>
+          `}
 
           <dl class="px-5 py-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
             <div>
