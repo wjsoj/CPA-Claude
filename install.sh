@@ -58,16 +58,20 @@ run_privileged() {
 }
 
 # Auto-detect China network: if github.com is unreachable, try known mirrors.
+# Probes use a real raw.githubusercontent.com path (this very script) because
+# proxies like gh-proxy.com only serve specific paths (raw/releases) and
+# return 404 for a bare https://github.com — which would falsely fail the test.
 auto_detect_mirror() {
   [ -n "$MIRROR" ] && return
-  if curl -fsS --connect-timeout 3 --max-time 3 -o /dev/null \
-       "https://github.com" 2>/dev/null; then
+  local probe="https://raw.githubusercontent.com/${REPO}/main/install.sh"
+  if curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null \
+       "$probe" 2>/dev/null; then
     return
   fi
   local mirrors=("https://gh-proxy.com/" "https://ghfast.top/")
   for m in "${mirrors[@]}"; do
-    if curl -fsS --connect-timeout 3 --max-time 3 -o /dev/null \
-         "${m}https://github.com" 2>/dev/null; then
+    if curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null \
+         "${m}${probe}" 2>/dev/null; then
       MIRROR="$m"
       warn "github.com unreachable, auto-selected mirror: $MIRROR"
       return
