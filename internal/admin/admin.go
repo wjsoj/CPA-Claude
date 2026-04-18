@@ -315,7 +315,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	}
 	// Rows for every configured or runtime-added access token.
 	for _, t := range h.tokens.List() {
-		addRow(t.Token, t.Name, t.Group, t.WeeklyUSD, t.FromConfig, !t.FromConfig)
+		addRow(t.Token, t.Name, t.Group, t.WeeklyUSD, false, true)
 	}
 	// Rows for every client we've actually seen that isn't already listed
 	// (e.g. open-mode requests keyed by IP).
@@ -913,7 +913,6 @@ type tokenView struct {
 	MaxConcurrent int        `json:"max_concurrent,omitempty"`
 	Group         string     `json:"group,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
-	FromConfig    bool       `json:"from_config"`
 	// Live usage for the current ISO week, convenient for the panel row.
 	WeeklyUsedUSD float64 `json:"weekly_used_usd"`
 }
@@ -929,7 +928,6 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 			WeeklyUSD:     t.WeeklyUSD,
 			MaxConcurrent: t.MaxConcurrent,
 			Group:         t.Group,
-			FromConfig:    t.FromConfig,
 			WeeklyUsedUSD: h.usage.WeeklyCostUSD(t.Token),
 		}
 		if !t.CreatedAt.IsZero() {

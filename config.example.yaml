@@ -41,28 +41,10 @@ admin_token: "change-me-long-random-string"
 # with "/" and not end with "/". Default: /mgmt-console.
 # admin_path: /mgmt-console
 
-# Tokens that clients must present in Authorization: Bearer. Empty = open.
-# Each unique token counts as one "client session" and occupies one OAuth
-# slot while active.
-#
-# Each entry can be either a bare string or a mapping with:
-#   token       — the client token (required)
-#   name        — human-readable label for logs and the admin panel
-#   weekly_usd  — weekly spend cap in USD; 0 or omitted = unlimited.
-#                 Week boundary is ISO week (Mon 00:00 UTC).
-#   group       — credential-group scope. Empty or "public" = shared pool.
-#                 A named group (e.g. "alice", "research") binds this client
-#                 to credentials tagged with the same group; if every
-#                 group-scoped credential is saturated or unhealthy, traffic
-#                 falls back to the public pool. Tag credentials by adding
-#                 "group": "<name>" to their JSON file under auth_dir, or via
-#                 the admin panel's group field on each credential.
-access_tokens:
-  - token: "sk-client-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    name:  "alice-laptop"
-    weekly_usd: 10.0
-    group: "alice"                              # uses credentials tagged group: alice first
-  - "sk-client-yyyyyyyyyyyyyyyyyyyyyyyyyyyy"    # bare form also works (no name/budget, public)
+# Client access tokens are managed exclusively via the admin panel and
+# persisted in tokens.json (next to state_file). The legacy access_tokens
+# block is no longer used; if it's still present at startup, entries are
+# migrated into tokens.json and stripped from this file automatically.
 
 # Pricing table. Built-in defaults already cover:
 #   claude-haiku-4-5-20251001, claude-haiku-4-5

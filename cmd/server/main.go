@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
 
 	"path/filepath"
 
@@ -126,12 +128,19 @@ func main() {
 	go pool.RunRefresher(refresherCtx, time.Minute, 10*time.Minute)
 
 	tokensPath := filepath.Join(filepath.Dir(cfg.StateFile), "tokens.json")
-	tokens, err := clienttoken.Open(tokensPath, cfg.AccessTokens)
+	tokens, migrated, err := clienttoken.Open(tokensPath, cfg.AccessTokens)
 	if err != nil {
 		log.Fatalf("open client token store: %v", err)
 	}
-	log.Infof("client tokens: %d total (%d from config, %d from %s)",
-		len(tokens.List()), countFromConfig(tokens), len(tokens.List())-countFromConfig(tokens), tokensPath)
+	if migrated {
+		log.Infof("migrated legacy access_tokens from config.yaml into %s", tokensPath)
+		if err := stripAccessTokensFromConfig(*configPath); err != nil {
+			log.Warnf("could not rewrite %s to remove legacy access_tokens (migration still persisted in %s): %v", *configPath, tokensPath, err)
+		} else {
+			log.Infof("removed access_tokens block from %s (backup at %s.bak)", *configPath, *configPath)
+		}
+	}
+	log.Infof("client tokens: %d loaded from %s", len(tokens.List()), tokensPath)
 
 	s := server.New(cfg, pool, store, reqLog, tokens)
 
@@ -160,12 +169,58 @@ func main() {
 	<-shutdownDone
 }
 
-func countFromConfig(ts *clienttoken.Store) int {
-	n := 0
-	for _, v := range ts.List() {
-		if v.FromConfig {
-			n++
-		}
+// stripAccessTokensFromConfig rewrites configPath, removing the
+// top-level access_tokens key while preserving every other key,
+// comment, and the overall document layout. A .bak copy of the
+// original is left next to it.
+func stripAccessTokensFromConfig(configPath string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
 	}
-	return n
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	doc := root.Content[0]
+	newContent := make([]*yaml.Node, 0, len(doc.Content))
+	removed := false
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		key := doc.Content[i]
+		if key.Value == "access_tokens" {
+			removed = true
+			continue
+		}
+		newContent = append(newContent, doc.Content[i], doc.Content[i+1])
+	}
+	if !removed {
+		return nil
+	}
+	doc.Content = newContent
+
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(configPath+".bak", data, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("write backup: %w", err)
+	}
+
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	tmp := configPath + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), info.Mode().Perm()); err != nil {
+		return err
+	}
+	return os.Rename(tmp, configPath)
 }
