@@ -40,9 +40,14 @@ err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || err "missing dependency: $1"; }
 
 # Wrap a github.com / raw.githubusercontent.com URL with the mirror prefix.
+# We strip the leading "https://" before concatenating because mirrors like
+# gh-proxy.com only reliably accept the schemeless form
+#   https://gh-proxy.com/github.com/<owner>/<repo>/...
+# The double-scheme form (gh-proxy.com/https://github.com/...) sometimes
+# works for tiny raw files but routinely fails for release binaries.
 gh_url() {
   if [ -n "$MIRROR" ]; then
-    printf '%s%s' "$MIRROR" "$1"
+    printf '%s%s' "$MIRROR" "${1#https://}"
   else
     printf '%s' "$1"
   fi
@@ -96,7 +101,9 @@ download_with_fallback() {
   candidates+=("") # direct github.com as last resort
   local first=1
   for m in "${candidates[@]}"; do
-    local target="${m}${url}"
+    # Mirrors want the schemeless form (see gh_url). Direct fetch (m=="")
+    # uses the URL as-is.
+    local target="${m}${url#https://}"
     [ -z "$m" ] && target="$url"
     if [ $first -eq 1 ]; then
       first=0
