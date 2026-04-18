@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 )
 
@@ -36,6 +37,7 @@ type Token struct {
 	Name          string    `json:"name"`
 	WeeklyUSD     float64   `json:"weekly_usd,omitempty"`
 	MaxConcurrent int       `json:"max_concurrent,omitempty"` // 0 = use global default
+	Group         string    `json:"group,omitempty"`          // credential group scope; empty = public
 	CreatedAt     time.Time `json:"created_at,omitempty"`
 }
 
@@ -46,6 +48,7 @@ type View struct {
 	Name          string    `json:"name"`
 	WeeklyUSD     float64   `json:"weekly_usd"`
 	MaxConcurrent int       `json:"max_concurrent,omitempty"`
+	Group         string    `json:"group,omitempty"`
 	CreatedAt     time.Time `json:"created_at,omitempty"`
 	FromConfig    bool      `json:"from_config"`
 }
@@ -73,6 +76,7 @@ func Open(path string, cfgTokens []config.AccessToken) (*Store, error) {
 			Name:          strings.TrimSpace(at.Name),
 			WeeklyUSD:     at.WeeklyUSD,
 			MaxConcurrent: at.MaxConcurrent,
+			Group:         auth.NormalizeGroup(at.Group),
 		})
 	}
 
@@ -112,28 +116,30 @@ func (s *Store) effectiveCfg(t Token) Token {
 		t.Name = o.Name
 		t.WeeklyUSD = o.WeeklyUSD
 		t.MaxConcurrent = o.MaxConcurrent
+		t.Group = o.Group
 	}
 	return t
 }
 
 // Lookup reports whether tok is a known client token. If so, it returns the
-// human-readable name, the weekly USD budget (0 = no limit), and the
-// per-token max concurrent requests (0 = use global default).
-func (s *Store) Lookup(tok string) (name string, weekly float64, maxConc int, ok bool) {
+// human-readable name, the weekly USD budget (0 = no limit), the per-token
+// max concurrent requests (0 = use global default), and the credential
+// group the token is bound to (empty = public).
+func (s *Store) Lookup(tok string) (name string, weekly float64, maxConc int, group string, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, t := range s.runtime {
 		if t.Token == tok {
-			return t.Name, t.WeeklyUSD, t.MaxConcurrent, true
+			return t.Name, t.WeeklyUSD, t.MaxConcurrent, t.Group, true
 		}
 	}
 	for _, t := range s.cfgs {
 		if t.Token == tok {
 			e := s.effectiveCfg(t)
-			return e.Name, e.WeeklyUSD, e.MaxConcurrent, true
+			return e.Name, e.WeeklyUSD, e.MaxConcurrent, e.Group, true
 		}
 	}
-	return "", 0, 0, false
+	return "", 0, 0, "", false
 }
 
 // Empty reports whether the proxy should run in open mode (no tokens
@@ -154,13 +160,13 @@ func (s *Store) List() []View {
 		e := s.effectiveCfg(t)
 		out = append(out, View{
 			Token: e.Token, Name: e.Name, WeeklyUSD: e.WeeklyUSD,
-			MaxConcurrent: e.MaxConcurrent, CreatedAt: e.CreatedAt, FromConfig: true,
+			MaxConcurrent: e.MaxConcurrent, Group: e.Group, CreatedAt: e.CreatedAt, FromConfig: true,
 		})
 	}
 	for _, t := range s.runtime {
 		out = append(out, View{
 			Token: t.Token, Name: t.Name, WeeklyUSD: t.WeeklyUSD,
-			MaxConcurrent: t.MaxConcurrent, CreatedAt: t.CreatedAt, FromConfig: false,
+			MaxConcurrent: t.MaxConcurrent, Group: t.Group, CreatedAt: t.CreatedAt, FromConfig: false,
 		})
 	}
 	return out
@@ -177,6 +183,7 @@ func (s *Store) Add(t Token) error {
 		t.WeeklyUSD = 0
 	}
 	t.Name = strings.TrimSpace(t.Name)
+	t.Group = auth.NormalizeGroup(t.Group)
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now()
 	}
@@ -197,7 +204,7 @@ func (s *Store) Add(t Token) error {
 }
 
 // Update patches an existing runtime token. nil fields mean "no change".
-func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int) error {
+func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int, group *string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.cfgs {
@@ -220,9 +227,12 @@ func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int
 				}
 				cur.MaxConcurrent = mc
 			}
+			if group != nil {
+				cur.Group = auth.NormalizeGroup(*group)
+			}
 			s.overrides[token] = Token{
 				Token: token, Name: cur.Name, WeeklyUSD: cur.WeeklyUSD,
-				MaxConcurrent: cur.MaxConcurrent,
+				MaxConcurrent: cur.MaxConcurrent, Group: cur.Group,
 			}
 			return s.saveLocked()
 		}
@@ -245,6 +255,9 @@ func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int
 					mc = 0
 				}
 				s.runtime[i].MaxConcurrent = mc
+			}
+			if group != nil {
+				s.runtime[i].Group = auth.NormalizeGroup(*group)
 			}
 			return s.saveLocked()
 		}

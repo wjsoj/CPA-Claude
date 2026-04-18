@@ -84,17 +84,36 @@ func (p *Pool) activeCountLocked(authID string, now time.Time) int {
 }
 
 // Acquire picks an Auth for this client token and stamps the session.
-// Returns the chosen Auth. If no OAuth has capacity, falls back to API key
-// (if configured). Returns nil if no credential is available.
+// clientGroup scopes credential selection: group-matching credentials are
+// preferred, falling back to public ("") credentials when the group's
+// credentials are exhausted. clientGroup == "" means public-only.
 //
 // excludeIDs lets a retrying caller skip credentials it has already tried in
 // the current request, so a transient connection error on one credential
 // doesn't keep selecting the same one (the sticky-session logic would
 // otherwise pin the client to the failing auth until its session times out).
-func (p *Pool) Acquire(ctx context.Context, clientToken string, excludeIDs ...string) *Auth {
+func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup string, excludeIDs ...string) *Auth {
+	clientGroup = NormalizeGroup(clientGroup)
 	excluded := make(map[string]bool, len(excludeIDs))
 	for _, id := range excludeIDs {
 		excluded[id] = true
+	}
+
+	// Allowed groups in preference order: the client's own group first, then
+	// public as a fallback. If the client is already public we only try once.
+	var tiers []string
+	if clientGroup != "" {
+		tiers = []string{clientGroup, ""}
+	} else {
+		tiers = []string{""}
+	}
+	allowed := func(authGroup string) bool {
+		for _, g := range tiers {
+			if authGroup == g {
+				return true
+			}
+		}
+		return false
 	}
 
 	p.mu.Lock()
@@ -108,10 +127,16 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string, excludeIDs ...st
 	}
 
 	// If session has a sticky OAuth assignment, it's still healthy, has
-	// capacity for us, AND isn't on the exclude list, reuse it.
+	// capacity for us, AND isn't on the exclude list, reuse it — but only
+	// when the sticky credential still matches an allowed group AND, when
+	// the client is group-scoped and currently sticky on public, no
+	// group-scoped OAuth is available to upgrade to. Without that upgrade
+	// check a group client stays pinned to public for the whole active
+	// window even if its own credentials regain capacity.
 	if s.authID != "" && s.kind == KindOAuth && !excluded[s.authID] {
-		if a := p.findOAuthLocked(s.authID); a != nil {
-			if p.oauthUsableLocked(a, now) {
+		if a := p.findOAuthLocked(s.authID); a != nil && allowed(a.Group) && p.oauthUsableLocked(a, now) {
+			upgrade := clientGroup != "" && a.Group == "" && p.pickOAuthLocked(now, excluded, clientGroup) != nil
+			if !upgrade {
 				// Reusing an assignment we already hold a slot for: counts us
 				// only once because activeCountLocked scans distinct sessions.
 				s.lastSeen = now
@@ -125,10 +150,11 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string, excludeIDs ...st
 				} else {
 					return a
 				}
+			} else {
+				s.authID = ""
 			}
-		}
-		if s.authID != "" {
-			// Previous OAuth is unhealthy/gone; reassign.
+		} else if s.authID != "" {
+			// Previous OAuth is unhealthy/gone/group-disallowed; reassign.
 			s.authID = ""
 		}
 	} else if excluded[s.authID] {
@@ -137,49 +163,51 @@ func (p *Pool) Acquire(ctx context.Context, clientToken string, excludeIDs ...st
 		s.authID = ""
 	}
 
-	// Try OAuth allocation: pick the OAuth with the fewest active sessions
-	// that still has spare capacity. If EnsureFresh fails for the picked
-	// candidate, exclude it and retry — never hand out a credential whose
-	// access_token we couldn't keep alive.
-	for {
-		chosen := p.pickOAuthLocked(now, excluded)
-		if chosen == nil {
-			break
+	// OAuth allocation, then API-key fallback. Each tier iterates: within a
+	// tier we try OAuth first (slot-based scheduling), then any API key in
+	// that tier. If the tier is empty or saturated, fall through to the
+	// next tier (public).
+	for _, tier := range tiers {
+		for {
+			chosen := p.pickOAuthLocked(now, excluded, tier)
+			if chosen == nil {
+				break
+			}
+			s.authID = chosen.ID
+			s.kind = KindOAuth
+			s.lastSeen = now
+			p.mu.Unlock()
+			if err := chosen.EnsureFresh(ctx, 5*time.Minute, p.useUTLS); err != nil {
+				log.Warnf("auth: ensure-fresh %s failed, excluding: %v", chosen.ID, err)
+				excluded[chosen.ID] = true
+				p.mu.Lock()
+				s.authID = ""
+				continue
+			}
+			return chosen
 		}
-		s.authID = chosen.ID
-		s.kind = KindOAuth
-		s.lastSeen = now
-		p.mu.Unlock()
-		if err := chosen.EnsureFresh(ctx, 5*time.Minute, p.useUTLS); err != nil {
-			log.Warnf("auth: ensure-fresh %s failed, excluding: %v", chosen.ID, err)
-			excluded[chosen.ID] = true
-			p.mu.Lock()
-			s.authID = ""
-			continue
+		for _, k := range p.apikeys {
+			if k.Group != tier {
+				continue
+			}
+			if excluded[k.ID] {
+				continue
+			}
+			if k.Disabled {
+				continue
+			}
+			if k.IsHardFailed() {
+				continue
+			}
+			if k.IsQuotaExceeded(now) {
+				continue
+			}
+			s.authID = k.ID
+			s.kind = KindAPIKey
+			s.lastSeen = now
+			p.mu.Unlock()
+			return k
 		}
-		return chosen
-	}
-
-	// Fallback: API key, round-robin-ish (pick first usable; apikeys have no
-	// per-credential concurrency, so order doesn't matter for correctness).
-	for _, k := range p.apikeys {
-		if excluded[k.ID] {
-			continue
-		}
-		if k.Disabled {
-			continue
-		}
-		if k.IsHardFailed() {
-			continue
-		}
-		if k.IsQuotaExceeded(now) {
-			continue
-		}
-		s.authID = k.ID
-		s.kind = KindAPIKey
-		s.lastSeen = now
-		p.mu.Unlock()
-		return k
 	}
 
 	p.mu.Unlock()
@@ -230,17 +258,21 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 	return true
 }
 
-// pickOAuthLocked returns the OAuth with the most free slots that still has
-// capacity and isn't on the exclude list, or nil if none available.
-// Unlimited credentials (cap=0) are treated as having MaxInt spare slots.
-// excluded may be nil.
-func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool) *Auth {
+// pickOAuthLocked returns the OAuth in the requested group with the most
+// free slots that still has capacity and isn't on the exclude list, or nil
+// if none available. Unlimited credentials (cap=0) are treated as having
+// MaxInt spare slots. excluded may be nil. group is an exact match; "" is
+// the public tier.
+func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group string) *Auth {
 	type cand struct {
 		a     *Auth
 		spare int // cap - active; MaxInt for unlimited
 	}
 	var cands []cand
 	for _, a := range p.oauths {
+		if a.Group != group {
+			continue
+		}
 		if excluded[a.ID] {
 			continue
 		}

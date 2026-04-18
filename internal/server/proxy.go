@@ -74,7 +74,8 @@ func (s *Server) forward(c *gin.Context, path string) {
 	}
 
 	// Weekly-budget pre-check.
-	if _, weeklyLimit, _, ok := s.tokens.Lookup(clientToken); ok && weeklyLimit > 0 {
+	_, weeklyLimit, _, clientGroup, tokOK := s.tokens.Lookup(clientToken)
+	if tokOK && weeklyLimit > 0 {
 		spent := s.usage.WeeklyCostUSD(clientToken)
 		if spent >= weeklyLimit {
 			c.Header("Retry-After", "604800")
@@ -136,7 +137,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 		for id := range tried {
 			excludeIDs = append(excludeIDs, id)
 		}
-		a := s.pool.Acquire(c.Request.Context(), clientToken, excludeIDs...)
+		a := s.pool.Acquire(c.Request.Context(), clientToken, clientGroup, excludeIDs...)
 		if a == nil {
 			msg := "no upstream credentials available"
 			if len(tried) > 0 {

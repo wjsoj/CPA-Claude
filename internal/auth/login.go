@@ -189,6 +189,7 @@ func FinishLogin(
 	sessionID, code, state, authDir string,
 	maxConcurrent int,
 	useUTLS bool,
+	group string,
 ) (*Auth, error) {
 	sess := globalLoginStore.take(sessionID)
 	if sess == nil {
@@ -260,6 +261,9 @@ func FinishLogin(
 	}
 	if sess.ProxyURL != "" {
 		raw["proxy_url"] = sess.ProxyURL
+	}
+	if g := NormalizeGroup(group); g != "" {
+		raw["group"] = g
 	}
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {

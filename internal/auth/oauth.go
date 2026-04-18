@@ -67,6 +67,7 @@ func parseFile(path string, data []byte) (*Auth, error) {
 	}
 	disabled, _ := raw["disabled"].(bool)
 	proxyURL, _ := raw["proxy_url"].(string)
+	group, _ := raw["group"].(string)
 	maxConc := 0
 	if v, ok := raw["max_concurrent"].(float64); ok {
 		maxConc = int(v)
@@ -96,6 +97,7 @@ func parseFile(path string, data []byte) (*Auth, error) {
 		MaxConcurrent: maxConc,
 		FilePath:      path,
 		Disabled:      disabled,
+		Group:         NormalizeGroup(group),
 	}
 	return a, nil
 }
@@ -120,6 +122,7 @@ func parseAPIKeyFile(path string, raw map[string]any) (*Auth, error) {
 	disabled, _ := raw["disabled"].(bool)
 	proxyURL, _ := raw["proxy_url"].(string)
 	baseURL, _ := raw["base_url"].(string)
+	group, _ := raw["group"].(string)
 	return &Auth{
 		ID:          filepath.Base(path),
 		Kind:        KindAPIKey,
@@ -129,6 +132,7 @@ func parseAPIKeyFile(path string, raw map[string]any) (*Auth, error) {
 		BaseURL:     baseURL,
 		FilePath:    path,
 		Disabled:    disabled,
+		Group:       NormalizeGroup(group),
 	}, nil
 }
 
@@ -224,6 +228,11 @@ func saveAuth(a *Auth) error {
 	}
 	if a.Label != "" {
 		raw["label"] = a.Label
+	}
+	if a.Group != "" {
+		raw["group"] = a.Group
+	} else {
+		delete(raw, "group")
 	}
 	a.mu.RUnlock()
 	out, err := json.MarshalIndent(raw, "", "  ")

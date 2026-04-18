@@ -110,7 +110,7 @@ func (s *Server) clientAuth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 			return
 		}
-		name, _, _, ok := s.tokens.Lookup(tok)
+		name, _, _, _, ok := s.tokens.Lookup(tok)
 		if !ok {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
@@ -185,7 +185,7 @@ func (s *Server) handleStatus(c *gin.Context) {
 // clientMaxConcurrent returns the effective max concurrent requests for this
 // client. Per-token override wins; otherwise the global default applies.
 func (s *Server) clientMaxConcurrent(clientToken string) int {
-	if _, _, maxConc, ok := s.tokens.Lookup(clientToken); ok && maxConc > 0 {
+	if _, _, maxConc, _, ok := s.tokens.Lookup(clientToken); ok && maxConc > 0 {
 		return maxConc
 	}
 	return s.cfg.ClientMaxConcurrent

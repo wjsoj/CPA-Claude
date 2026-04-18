@@ -172,6 +172,7 @@ type authRow struct {
 	Email         string        `json:"email,omitempty"`
 	ProxyURL      string        `json:"proxy_url"`
 	BaseURL       string        `json:"base_url,omitempty"`
+	Group         string        `json:"group,omitempty"`
 	MaxConcurrent int           `json:"max_concurrent"`
 	ActiveClients int           `json:"active_clients"`
 	ClientTokens  []string      `json:"client_tokens"`
@@ -252,6 +253,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			Email:         st.Auth.Email,
 			ProxyURL:      st.Auth.ProxyURL,
 			BaseURL:       st.Auth.BaseURL,
+			Group:         st.Auth.Group,
 			MaxConcurrent: st.Auth.MaxConcurrent,
 			ActiveClients: st.ActiveClients,
 			ClientTokens:  h.resolveClientTokenLabels(st.ClientTokens),
@@ -273,7 +275,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	currentWeek := h.usage.CurrentWeekKey()
 	clientRows := make([]clientRow, 0)
 	seen := make(map[string]bool)
-	addRow := func(token, label string, weeklyLimit float64, fromConfig, managed bool) {
+	addRow := func(token, label, group string, weeklyLimit float64, fromConfig, managed bool) {
 		seen[token] = true
 		pc, hasData := clientSnap[token]
 		weekly := 0.0
@@ -299,6 +301,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			Blocked:     weeklyLimit > 0 && weekly >= weeklyLimit,
 			FromConfig:  fromConfig,
 			Managed:     managed,
+			Group:       group,
 			Total:       total,
 			Weekly:      weeks,
 			LastUsed:    last,
@@ -310,13 +313,13 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	}
 	// Rows for every configured or runtime-added access token.
 	for _, t := range h.tokens.List() {
-		addRow(t.Token, t.Name, t.WeeklyUSD, t.FromConfig, !t.FromConfig)
+		addRow(t.Token, t.Name, t.Group, t.WeeklyUSD, t.FromConfig, !t.FromConfig)
 	}
 	// Rows for every client we've actually seen that isn't already listed
 	// (e.g. open-mode requests keyed by IP).
 	for tok, pc := range clientSnap {
 		if !seen[tok] {
-			addRow(tok, pc.Label, 0, false, false)
+			addRow(tok, pc.Label, "", 0, false, false)
 		}
 	}
 
@@ -352,6 +355,7 @@ type clientRow struct {
 	Blocked     bool              `json:"blocked"`
 	FromConfig  bool              `json:"from_config,omitempty"`
 	Managed     bool              `json:"managed,omitempty"` // true = panel can edit/delete
+	Group       string            `json:"group,omitempty"`
 	Total       usage.ClientCost  `json:"total"`
 	Weekly      []usage.WeekEntry `json:"weekly,omitempty"`
 	LastUsed    *time.Time        `json:"last_used,omitempty"`
@@ -378,7 +382,7 @@ func (h *Handler) resolveClientTokenLabels(tokens []string) []string {
 	for _, t := range tokens {
 		label := ""
 		if h.tokens != nil {
-			if name, _, _, ok := h.tokens.Lookup(t); ok && strings.TrimSpace(name) != "" {
+			if name, _, _, _, ok := h.tokens.Lookup(t); ok && strings.TrimSpace(name) != "" {
 				label = name
 			}
 		}
@@ -407,6 +411,7 @@ type patchAuthBody struct {
 	ProxyURL      *string `json:"proxy_url"`
 	BaseURL       *string `json:"base_url"`
 	Label         *string `json:"label"`
+	Group         *string `json:"group"`
 }
 
 func (h *Handler) handlePatchAuth(c *gin.Context) {
@@ -444,6 +449,9 @@ func (h *Handler) handlePatchAuth(c *gin.Context) {
 		if label != "" {
 			a.Label = label
 		}
+	}
+	if body.Group != nil {
+		a.SetGroup(*body.Group)
 	}
 	if err := a.Persist(); err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "persist failed: " + err.Error()})
@@ -513,6 +521,7 @@ type uploadBody struct {
 	MaxConcurrent int             `json:"max_concurrent"`
 	ProxyURL      string          `json:"proxy_url"`
 	Disabled      bool            `json:"disabled"`
+	Group         string          `json:"group"`
 }
 
 func (h *Handler) handleUpload(c *gin.Context) {
@@ -545,6 +554,9 @@ func (h *Handler) handleUpload(c *gin.Context) {
 	}
 	if body.Disabled {
 		merged["disabled"] = true
+	}
+	if g := auth.NormalizeGroup(body.Group); g != "" {
+		merged["group"] = g
 	}
 
 	// Derive target filename.
@@ -610,6 +622,7 @@ type oauthFinishBody struct {
 	Code          string `json:"code"`
 	State         string `json:"state"`
 	MaxConcurrent int    `json:"max_concurrent"`
+	Group         string `json:"group"`
 }
 
 func (h *Handler) handleOAuthFinish(c *gin.Context) {
@@ -637,7 +650,7 @@ func (h *Handler) handleOAuthFinish(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
-	a, err := auth.FinishLogin(ctx, body.SessionID, code, state, h.cfg.AuthDir, body.MaxConcurrent, h.cfg.UseUTLS)
+	a, err := auth.FinishLogin(ctx, body.SessionID, code, state, h.cfg.AuthDir, body.MaxConcurrent, h.cfg.UseUTLS, body.Group)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -654,6 +667,7 @@ type createAPIKeyBody struct {
 	ProxyURL string `json:"proxy_url"`
 	BaseURL  string `json:"base_url"`
 	Filename string `json:"filename"`
+	Group    string `json:"group"`
 }
 
 func (h *Handler) handleCreateAPIKey(c *gin.Context) {
@@ -696,6 +710,9 @@ func (h *Handler) handleCreateAPIKey(c *gin.Context) {
 	}
 	if strings.TrimSpace(body.BaseURL) != "" {
 		raw["base_url"] = strings.TrimRight(strings.TrimSpace(body.BaseURL), "/")
+	}
+	if g := auth.NormalizeGroup(body.Group); g != "" {
+		raw["group"] = g
 	}
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
@@ -868,6 +885,7 @@ type tokenView struct {
 	Name          string     `json:"name"`
 	WeeklyUSD     float64    `json:"weekly_usd"`
 	MaxConcurrent int        `json:"max_concurrent,omitempty"`
+	Group         string     `json:"group,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
 	FromConfig    bool       `json:"from_config"`
 	// Live usage for the current ISO week, convenient for the panel row.
@@ -884,6 +902,7 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 			Name:          t.Name,
 			WeeklyUSD:     t.WeeklyUSD,
 			MaxConcurrent: t.MaxConcurrent,
+			Group:         t.Group,
 			FromConfig:    t.FromConfig,
 			WeeklyUsedUSD: h.usage.WeeklyCostUSD(t.Token),
 		}
@@ -904,6 +923,7 @@ type createTokenBody struct {
 	Name          string  `json:"name"`
 	WeeklyUSD     float64 `json:"weekly_usd"`
 	MaxConcurrent int     `json:"max_concurrent,omitempty"`
+	Group         string  `json:"group,omitempty"`
 	Generate      bool    `json:"generate"` // if true and Token == "", mint a fresh sk-...
 }
 
@@ -931,6 +951,7 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 		Name:          body.Name,
 		WeeklyUSD:     body.WeeklyUSD,
 		MaxConcurrent: body.MaxConcurrent,
+		Group:         body.Group,
 	}
 	if err := h.tokens.Add(entry); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -948,6 +969,7 @@ type patchTokenBody struct {
 	Name          *string  `json:"name"`
 	WeeklyUSD     *float64 `json:"weekly_usd"`
 	MaxConcurrent *int     `json:"max_concurrent"`
+	Group         *string  `json:"group"`
 }
 
 func (h *Handler) handlePatchToken(c *gin.Context) {
@@ -957,7 +979,7 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.tokens.Update(tok, body.Name, body.WeeklyUSD, body.MaxConcurrent); err != nil {
+	if err := h.tokens.Update(tok, body.Name, body.WeeklyUSD, body.MaxConcurrent, body.Group); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

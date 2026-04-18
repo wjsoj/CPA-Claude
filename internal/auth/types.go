@@ -2,9 +2,24 @@ package auth
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
+
+// NormalizeGroup canonicalizes a group identifier. Empty string and the
+// literal "public" (case-insensitive) both mean the public/default pool.
+// All other values are trimmed and preserved case-sensitively.
+func NormalizeGroup(s string) string {
+	g := strings.TrimSpace(s)
+	if g == "" {
+		return ""
+	}
+	if strings.EqualFold(g, "public") {
+		return ""
+	}
+	return g
+}
 
 // Kind distinguishes OAuth credentials (concurrency-limited) from API keys
 // (unlimited; used as fallback).
@@ -36,6 +51,12 @@ type Auth struct {
 	ProxyURL      string // per-credential upstream proxy (empty = direct/use default)
 	BaseURL       string // per-credential upstream base URL override (API-key only; empty = config.AnthropicBaseURL)
 	MaxConcurrent int    // OAuth: max client sessions; 0 = unlimited. APIKey: ignored.
+
+	// Group gates which client tokens may be served by this credential.
+	// Empty string = public pool (usable by anyone). Any other value means
+	// the credential is restricted to client tokens whose Group matches, with
+	// public acting as a fallback when the group's credentials are exhausted.
+	Group string
 
 	// Source file for OAuth (empty for APIKey)
 	FilePath string
@@ -84,6 +105,7 @@ func (a *Auth) Snapshot() AuthInfo {
 		QuotaResetAt:    a.QuotaResetAt,
 		FilePath:        a.FilePath,
 		BaseURL:         a.BaseURL,
+		Group:           a.Group,
 	}
 }
 
@@ -100,6 +122,7 @@ type AuthInfo struct {
 	QuotaResetAt    time.Time
 	FilePath        string
 	BaseURL         string
+	Group           string
 }
 
 // IsQuotaExceeded reports true if Anthropic has signalled this auth is out of
@@ -310,4 +333,19 @@ func (a *Auth) SetBaseURL(u string) {
 	a.mu.Lock()
 	a.BaseURL = u
 	a.mu.Unlock()
+}
+
+// SetGroup updates the credential's group. Empty string or "public" (case-
+// insensitive) means the public pool.
+func (a *Auth) SetGroup(g string) {
+	a.mu.Lock()
+	a.Group = NormalizeGroup(g)
+	a.mu.Unlock()
+}
+
+// GroupName returns the credential's group under the lock.
+func (a *Auth) GroupName() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Group
 }
