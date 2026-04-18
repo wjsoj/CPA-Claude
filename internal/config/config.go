@@ -11,9 +11,15 @@ import (
 )
 
 type APIKey struct {
-	Key      string `yaml:"key"`
-	ProxyURL string `yaml:"proxy_url,omitempty"`
-	Label    string `yaml:"label,omitempty"`
+	Key      string            `yaml:"key"`
+	ProxyURL string            `yaml:"proxy_url,omitempty"`
+	Label    string            `yaml:"label,omitempty"`
+	BaseURL  string            `yaml:"base_url,omitempty"`
+	Group    string            `yaml:"group,omitempty"`
+	// ModelMap routes/rewrites client-facing model names to upstream model
+	// names. See auth.Auth.ModelMap. Non-empty map turns this key into a
+	// model-restricted credential. Empty = wildcard.
+	ModelMap map[string]string `yaml:"model_map,omitempty"`
 }
 
 type Config struct {

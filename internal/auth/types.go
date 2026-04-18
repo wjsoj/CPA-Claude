@@ -58,6 +58,17 @@ type Auth struct {
 	// public acting as a fallback when the group's credentials are exhausted.
 	Group string
 
+	// ModelMap (API-key only) maps client-facing model names to upstream
+	// model names. When non-nil and non-empty:
+	//   - this credential will only be picked for requests whose model
+	//     appears as a key in the map (acts as a routing filter)
+	//   - the request body's "model" field is rewritten to the mapped value
+	//     before being sent upstream (the empty string means "accept this
+	//     model name but don't rewrite")
+	// Nil/empty map = wildcard (no filtering, no rewriting). OAuth credentials
+	// ignore this field.
+	ModelMap map[string]string
+
 	// Source file for OAuth (empty for APIKey)
 	FilePath string
 
@@ -92,6 +103,13 @@ const hardFailureThreshold = 5
 func (a *Auth) Snapshot() AuthInfo {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	var mm map[string]string
+	if len(a.ModelMap) > 0 {
+		mm = make(map[string]string, len(a.ModelMap))
+		for k, v := range a.ModelMap {
+			mm[k] = v
+		}
+	}
 	return AuthInfo{
 		ID:              a.ID,
 		Kind:            a.Kind,
@@ -106,6 +124,7 @@ func (a *Auth) Snapshot() AuthInfo {
 		FilePath:        a.FilePath,
 		BaseURL:         a.BaseURL,
 		Group:           a.Group,
+		ModelMap:        mm,
 	}
 }
 
@@ -123,6 +142,7 @@ type AuthInfo struct {
 	FilePath        string
 	BaseURL         string
 	Group           string
+	ModelMap        map[string]string
 }
 
 // IsQuotaExceeded reports true if Anthropic has signalled this auth is out of
@@ -348,4 +368,61 @@ func (a *Auth) GroupName() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.Group
+}
+
+// SetModelMap replaces the credential's client→upstream model map. Empty/nil
+// map clears it (credential becomes wildcard again). API-key only — calling
+// on an OAuth credential stores the value but it is ignored at routing time.
+func (a *Auth) SetModelMap(m map[string]string) {
+	cleaned := make(map[string]string, len(m))
+	for k, v := range m {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		cleaned[k] = strings.TrimSpace(v)
+	}
+	a.mu.Lock()
+	if len(cleaned) == 0 {
+		a.ModelMap = nil
+	} else {
+		a.ModelMap = cleaned
+	}
+	a.mu.Unlock()
+}
+
+// ResolveUpstreamModel returns the upstream model name to send for a given
+// client-facing model. ok=false means this credential does not accept the
+// model (caller should skip it during routing). When ok=true, upstream is
+// the model name to put in the request body — empty string means "send the
+// client's model name unchanged".
+//
+// Wildcard credentials (nil/empty ModelMap) always return (clientModel, true).
+func (a *Auth) ResolveUpstreamModel(clientModel string) (upstream string, ok bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if len(a.ModelMap) == 0 {
+		return clientModel, true
+	}
+	mapped, exists := a.ModelMap[clientModel]
+	if !exists {
+		return "", false
+	}
+	if mapped == "" {
+		return clientModel, true
+	}
+	return mapped, true
+}
+
+// AcceptsModel reports whether this credential is eligible to serve a request
+// for the given client-facing model. Used by the pool selector. Wildcard
+// (empty ModelMap) accepts everything.
+func (a *Auth) AcceptsModel(clientModel string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if len(a.ModelMap) == 0 {
+		return true
+	}
+	_, ok := a.ModelMap[clientModel]
+	return ok
 }

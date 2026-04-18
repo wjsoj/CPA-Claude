@@ -164,6 +164,36 @@
       return html`<span class="badge ${palette[color] || palette.slate}">${children}</span>`;
     }
 
+    // Serialize/parse a {clientModel: upstreamModel} map to/from a one-entry-
+     // per-line textarea. Format: `client = upstream`. An entry with an empty
+     // value (e.g. `client =`) means "accept this client model but don't
+     // rewrite the name". Blank lines and lines starting with # are ignored.
+    function modelMapToText(m) {
+      if (!m) return "";
+      return Object.keys(m).sort().map((k) => `${k} = ${m[k] || ""}`).join("\n");
+    }
+    function textToModelMap(text) {
+      const out = {};
+      const errors = [];
+      (text || "").split(/\r?\n/).forEach((rawLine, i) => {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#")) return;
+        const eq = line.indexOf("=");
+        if (eq < 0) {
+          errors.push(`line ${i + 1}: missing '='`);
+          return;
+        }
+        const k = line.slice(0, eq).trim();
+        const v = line.slice(eq + 1).trim();
+        if (!k) {
+          errors.push(`line ${i + 1}: empty client model name`);
+          return;
+        }
+        out[k] = v;
+      });
+      return { map: out, errors };
+    }
+
     function EditModal({ auth, onClose, onSaved }) {
       const [disabled, setDisabled] = useState(auth.disabled);
       const [maxC, setMaxC] = useState(auth.max_concurrent || 0);
@@ -171,6 +201,7 @@
       const [baseURL, setBaseURL] = useState(auth.base_url || "");
       const [label, setLabel] = useState(auth.label || "");
       const [group, setGroup] = useState(auth.group || "");
+      const [modelMapText, setModelMapText] = useState(modelMapToText(auth.model_map));
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState("");
       const isApiKey = auth.kind === "apikey";
@@ -179,7 +210,14 @@
         try {
           const body = { disabled, proxy_url: proxy, label, group };
           if (!isApiKey) body.max_concurrent = Number(maxC);
-          if (isApiKey) body.base_url = baseURL;
+          if (isApiKey) {
+            body.base_url = baseURL;
+            const parsed = textToModelMap(modelMapText);
+            if (parsed.errors.length > 0) {
+              throw new Error("model map: " + parsed.errors.join("; "));
+            }
+            body.model_map = parsed.map;
+          }
           await api(`/admin/api/auths/${encodeURIComponent(auth.id)}`, {
             method: "PATCH",
             body: JSON.stringify(body),
@@ -212,6 +250,11 @@
                 <span class="text-base text-slate-600 dark:text-slate-300">Base URL</span>
                 <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="https://api.your-relay-vendor.com (default: api.anthropic.com)" value=${baseURL} onInput=${(e)=>setBaseURL(e.target.value)} />
                 <span class="text-sm text-slate-400 dark:text-slate-500">Per-key upstream override; leave blank for Anthropic.</span>
+              </label>
+              <label class="block">
+                <span class="text-base text-slate-600 dark:text-slate-300">Model map (optional)</span>
+                <textarea class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono text-sm h-32 bg-white dark:bg-slate-900" placeholder="claude-opus-4-6 = [0.16]稳定喵/claude-opus-4-6&#10;claude-sonnet-4-6 = [0.1]高质量喵/claude-sonnet-4-6&#10;claude-haiku-4-5 =" value=${modelMapText} onInput=${(e)=>setModelMapText(e.target.value)}></textarea>
+                <span class="text-sm text-slate-400 dark:text-slate-500">One <span class="mono">client_model = upstream_model</span> per line. When non-empty, this key only serves listed client models, and the request body's <span class="mono">model</span> field is rewritten to the upstream value before forwarding. Leave the right side blank to accept the model without rewriting.</span>
               </label>
             `}
             <label class="block">
@@ -320,14 +363,23 @@
       const [proxy, setProxy] = useState("");
       const [baseURL, setBaseURL] = useState("");
       const [group, setGroup] = useState("");
+      const [modelMapText, setModelMapText] = useState("");
       const [err, setErr] = useState("");
       const [busy, setBusy] = useState(false);
       const save = async () => {
         setBusy(true); setErr("");
         try {
+          const parsed = textToModelMap(modelMapText);
+          if (parsed.errors.length > 0) {
+            throw new Error("model map: " + parsed.errors.join("; "));
+          }
           await api("/admin/api/apikeys", {
             method: "POST",
-            body: JSON.stringify({ api_key: apiKey.trim(), label: label.trim(), proxy_url: proxy.trim(), base_url: baseURL.trim(), group: group.trim() }),
+            body: JSON.stringify({
+              api_key: apiKey.trim(), label: label.trim(),
+              proxy_url: proxy.trim(), base_url: baseURL.trim(),
+              group: group.trim(), model_map: parsed.map,
+            }),
           });
           onSaved();
         } catch (x) { setErr(x.message); }
@@ -361,6 +413,11 @@
             <label class="block">
               <span class="text-base text-slate-600 dark:text-slate-300">Group (optional)</span>
               <input list="groups-datalist" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" placeholder="public" value=${group} onInput=${(e)=>setGroup(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="text-base text-slate-600 dark:text-slate-300">Model map (optional)</span>
+              <textarea class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono text-sm h-32 bg-white dark:bg-slate-900" placeholder="claude-opus-4-6 = [0.16]稳定喵/claude-opus-4-6&#10;claude-sonnet-4-6 = [0.1]高质量喵/claude-sonnet-4-6&#10;claude-haiku-4-5 =" value=${modelMapText} onInput=${(e)=>setModelMapText(e.target.value)}></textarea>
+              <span class="text-sm text-slate-400 dark:text-slate-500">One <span class="mono">client_model = upstream_model</span> per line. When non-empty, this key only serves listed client models, and the request body's <span class="mono">model</span> is rewritten before forwarding. Leave the right side blank to accept the model without rewriting.</span>
             </label>
             ${err && html`<div class="text-base text-red-600 dark:text-red-400">${err}</div>`}
             <div class="flex justify-end gap-2 pt-2">
@@ -1025,6 +1082,19 @@
               <div class="col-span-2">
                 <dt class="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Base URL</dt>
                 <dd class="mt-1 mono text-xs break-all">${a.base_url}</dd>
+              </div>
+            `}
+            ${a.model_map && Object.keys(a.model_map).length > 0 && html`
+              <div class="col-span-2">
+                <dt class="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Model map (${Object.keys(a.model_map).length})</dt>
+                <dd class="mt-1 space-y-0.5">
+                  ${Object.keys(a.model_map).sort().map((k) => html`
+                    <div class="mono text-xs break-all text-slate-700 dark:text-slate-300">
+                      <span>${k}</span>
+                      ${a.model_map[k] ? html` <span class="text-slate-400 dark:text-slate-500">→</span> <span>${a.model_map[k]}</span>` : html` <span class="text-slate-400 dark:text-slate-500 italic">(no rewrite)</span>`}
+                    </div>
+                  `)}
+                </dd>
               </div>
             `}
           </dl>

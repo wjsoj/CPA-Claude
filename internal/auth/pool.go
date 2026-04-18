@@ -107,7 +107,7 @@ func (p *Pool) activeCountLocked(authID string, now time.Time) int {
 // the current request, so a transient connection error on one credential
 // doesn't keep selecting the same one (the sticky-session logic would
 // otherwise pin the client to the failing auth until its session times out).
-func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup string, excludeIDs ...string) *Auth {
+func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup, clientModel string, excludeIDs ...string) *Auth {
 	clientGroup = NormalizeGroup(clientGroup)
 	excluded := make(map[string]bool, len(excludeIDs))
 	for _, id := range excludeIDs {
@@ -215,6 +215,11 @@ func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup string, exc
 				continue
 			}
 			if k.IsQuotaExceeded(now) {
+				continue
+			}
+			// Per-key model routing: a key with a non-empty ModelMap only
+			// serves models listed in it. Empty map = wildcard.
+			if !k.AcceptsModel(clientModel) {
 				continue
 			}
 			s.authID = k.ID

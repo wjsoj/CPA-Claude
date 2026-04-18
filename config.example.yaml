@@ -89,3 +89,17 @@ api_keys:
   - key: "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     label: "primary"
     proxy_url: ""
+
+  # Third-party relay vendor with quirky model names. base_url overrides the
+  # upstream host; model_map both routes (this key only handles the listed
+  # client model names) and rewrites the request body's "model" field before
+  # forwarding. Empty value = accept the model name without rewriting.
+  # Same fields are editable per-key from the admin panel.
+  # - key: "sk-relayvendor-xxx"
+  #   label: "relay-A"
+  #   base_url: "https://az.zlapi.pro"
+  #   group: ""                # public; or e.g. "premium"
+  #   model_map:
+  #     claude-opus-4-6:    "[0.16]稳定喵/claude-opus-4-6"
+  #     claude-sonnet-4-6:  "[0.1]高质量喵/claude-sonnet-4-6"
+  #     claude-haiku-4-5:   "[aws按量]cf逆/claude-haiku-4-5-20251001"

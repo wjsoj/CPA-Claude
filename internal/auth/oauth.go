@@ -123,6 +123,7 @@ func parseAPIKeyFile(path string, raw map[string]any) (*Auth, error) {
 	proxyURL, _ := raw["proxy_url"].(string)
 	baseURL, _ := raw["base_url"].(string)
 	group, _ := raw["group"].(string)
+	modelMap := parseModelMap(raw["model_map"])
 	return &Auth{
 		ID:          filepath.Base(path),
 		Kind:        KindAPIKey,
@@ -133,7 +134,31 @@ func parseAPIKeyFile(path string, raw map[string]any) (*Auth, error) {
 		FilePath:    path,
 		Disabled:    disabled,
 		Group:       NormalizeGroup(group),
+		ModelMap:    modelMap,
 	}, nil
+}
+
+// parseModelMap normalizes the model_map entry from a parsed JSON object into
+// a Go map[string]string. Accepts a JSON object {"a":"b"} (canonical form).
+// Returns nil when the input is missing/empty/wrong shape.
+func parseModelMap(v any) map[string]string {
+	m, ok := v.(map[string]any)
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, raw := range m {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		s, _ := raw.(string)
+		out[k] = strings.TrimSpace(s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // LoadAuthDir reads every *.json under dir and splits the parsed auths into
@@ -203,6 +228,15 @@ func saveAuth(a *Auth) error {
 			raw["base_url"] = a.BaseURL
 		} else {
 			delete(raw, "base_url")
+		}
+		if len(a.ModelMap) > 0 {
+			mm := make(map[string]any, len(a.ModelMap))
+			for k, v := range a.ModelMap {
+				mm[k] = v
+			}
+			raw["model_map"] = mm
+		} else {
+			delete(raw, "model_map")
 		}
 		// Clear OAuth-only keys if the file was converted.
 		delete(raw, "refresh_token")

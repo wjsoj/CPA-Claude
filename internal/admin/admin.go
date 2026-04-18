@@ -189,9 +189,10 @@ type authRow struct {
 	// doesn't affect Healthy or trigger any cooldown. Used by the panel to
 	// show a low-tone "client canceled" hint distinct from upstream
 	// failures.
-	LastClientCancel   *time.Time    `json:"last_client_cancel,omitempty"`
-	ClientCancelReason string        `json:"client_cancel_reason,omitempty"`
-	Usage              *usageSummary `json:"usage,omitempty"`
+	LastClientCancel   *time.Time        `json:"last_client_cancel,omitempty"`
+	ClientCancelReason string            `json:"client_cancel_reason,omitempty"`
+	ModelMap           map[string]string `json:"model_map,omitempty"`
+	Usage              *usageSummary     `json:"usage,omitempty"`
 }
 
 type usageSummary struct {
@@ -267,6 +268,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			FailureReason:      failReason,
 			LastClientCancel:   cancelAt,
 			ClientCancelReason: cancelReason,
+			ModelMap:           st.Auth.ModelMap,
 			Usage:              u,
 		})
 	}
@@ -406,12 +408,13 @@ func (h *Handler) resolveClientTokenLabels(tokens []string) []string {
 }
 
 type patchAuthBody struct {
-	Disabled      *bool   `json:"disabled"`
-	MaxConcurrent *int    `json:"max_concurrent"`
-	ProxyURL      *string `json:"proxy_url"`
-	BaseURL       *string `json:"base_url"`
-	Label         *string `json:"label"`
-	Group         *string `json:"group"`
+	Disabled      *bool              `json:"disabled"`
+	MaxConcurrent *int               `json:"max_concurrent"`
+	ProxyURL      *string            `json:"proxy_url"`
+	BaseURL       *string            `json:"base_url"`
+	Label         *string            `json:"label"`
+	Group         *string            `json:"group"`
+	ModelMap      *map[string]string `json:"model_map"`
 }
 
 func (h *Handler) handlePatchAuth(c *gin.Context) {
@@ -452,6 +455,15 @@ func (h *Handler) handlePatchAuth(c *gin.Context) {
 	}
 	if body.Group != nil {
 		a.SetGroup(*body.Group)
+	}
+	if body.ModelMap != nil {
+		// Only meaningful for API-key credentials; for OAuth it's stored but
+		// ignored at routing time. Reject explicitly to avoid silent confusion.
+		if a.Kind != auth.KindAPIKey {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "model_map is only supported on API-key credentials"})
+			return
+		}
+		a.SetModelMap(*body.ModelMap)
 	}
 	if err := a.Persist(); err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "persist failed: " + err.Error()})
@@ -662,12 +674,13 @@ func (h *Handler) handleOAuthFinish(c *gin.Context) {
 // ---- API key CRUD ----
 
 type createAPIKeyBody struct {
-	APIKey   string `json:"api_key"`
-	Label    string `json:"label"`
-	ProxyURL string `json:"proxy_url"`
-	BaseURL  string `json:"base_url"`
-	Filename string `json:"filename"`
-	Group    string `json:"group"`
+	APIKey   string            `json:"api_key"`
+	Label    string            `json:"label"`
+	ProxyURL string            `json:"proxy_url"`
+	BaseURL  string            `json:"base_url"`
+	Filename string            `json:"filename"`
+	Group    string            `json:"group"`
+	ModelMap map[string]string `json:"model_map"`
 }
 
 func (h *Handler) handleCreateAPIKey(c *gin.Context) {
@@ -713,6 +726,19 @@ func (h *Handler) handleCreateAPIKey(c *gin.Context) {
 	}
 	if g := auth.NormalizeGroup(body.Group); g != "" {
 		raw["group"] = g
+	}
+	if len(body.ModelMap) > 0 {
+		mm := make(map[string]any, len(body.ModelMap))
+		for k, v := range body.ModelMap {
+			k = strings.TrimSpace(k)
+			if k == "" {
+				continue
+			}
+			mm[k] = strings.TrimSpace(v)
+		}
+		if len(mm) > 0 {
+			raw["model_map"] = mm
+		}
 	}
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {

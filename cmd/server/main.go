@@ -79,6 +79,9 @@ func main() {
 			Label:       label,
 			AccessToken: k.Key,
 			ProxyURL:    proxy,
+			BaseURL:     k.BaseURL,
+			Group:       auth.NormalizeGroup(k.Group),
+			ModelMap:    k.ModelMap,
 		})
 	}
 	log.Infof("loaded %d API key(s)", len(apikeys))

@@ -137,7 +137,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 		for id := range tried {
 			excludeIDs = append(excludeIDs, id)
 		}
-		a := s.pool.Acquire(c.Request.Context(), clientToken, clientGroup, excludeIDs...)
+		a := s.pool.Acquire(c.Request.Context(), clientToken, clientGroup, model, excludeIDs...)
 		if a == nil {
 			msg := "no upstream credentials available"
 			if len(tried) > 0 {
@@ -202,8 +202,22 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	url := baseURL + path + "?beta=true"
 	isAnthropicBase := strings.HasPrefix(strings.ToLower(baseURL), "https://api.anthropic.com")
 
+	// Per-credential model rewrite (API-key only, e.g. third-party relays
+	// that require a vendor-prefixed model name like "[0.1]a/claude-sonnet-4-6").
+	// Routing already filtered to credentials that accept this model; here we
+	// just substitute the body's "model" field if the map says so. The
+	// client-facing model string used for usage/pricing stays unchanged.
+	upstreamBody := body
+	if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
+		if rewritten, err := rewriteModelField(body, upstreamModel); err == nil {
+			upstreamBody = rewritten
+		} else {
+			log.Warnf("proxy: model rewrite (%s -> %s) failed via %s: %v", model, upstreamModel, a.ID, err)
+		}
+	}
+
 	ctx := c.Request.Context()
-	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(upstreamBody))
 	if err != nil {
 		c.AbortWithStatusJSON(500, gin.H{"error": err.Error()})
 		return false, true
@@ -589,6 +603,27 @@ func truncate(b []byte, n int) string {
 		return string(b)
 	}
 	return string(b[:n]) + "...(truncated)"
+}
+
+// rewriteModelField returns a copy of the JSON request body with its top-level
+// "model" string set to upstream. Used when an API-key credential has a
+// model_map entry that rewrites the client's model name to a vendor-specific
+// one (e.g. "claude-opus-4-6" -> "[0.16]稳定喵/claude-opus-4-6"). Falls back
+// to leaving the body alone if the JSON can't be parsed as an object.
+func rewriteModelField(body []byte, upstream string) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return body, nil
+	}
+	mb, err := json.Marshal(upstream)
+	if err != nil {
+		return nil, err
+	}
+	obj["model"] = mb
+	return json.Marshal(obj)
 }
 
 // unused — kept to avoid import churn if future error types are added.
