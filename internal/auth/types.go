@@ -100,9 +100,30 @@ const healthGrace = 2 * time.Minute
 // reset from the admin panel.
 const hardFailureThreshold = 5
 
+// clearExpiredQuotaLocked auto-clears the quota cooldown fields once their
+// reset time has passed, so stale "quota exceeded" state never lingers in
+// admin/UI/routing after the credential has actually recovered. Caller MUST
+// hold a.mu write lock. Keeps behavior identical to IsQuotaExceeded's expiry
+// rules: known reset → clear when reached; unknown reset → clear after 1h.
+func (a *Auth) clearExpiredQuotaLocked(now time.Time) {
+	if a.QuotaExceededAt.IsZero() {
+		return
+	}
+	if a.QuotaResetAt.IsZero() {
+		if now.Before(a.QuotaExceededAt.Add(time.Hour)) {
+			return
+		}
+	} else if now.Before(a.QuotaResetAt) {
+		return
+	}
+	a.QuotaExceededAt = time.Time{}
+	a.QuotaResetAt = time.Time{}
+}
+
 func (a *Auth) Snapshot() AuthInfo {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.clearExpiredQuotaLocked(time.Now())
 	var mm map[string]string
 	if len(a.ModelMap) > 0 {
 		mm = make(map[string]string, len(a.ModelMap))
@@ -147,17 +168,13 @@ type AuthInfo struct {
 
 // IsQuotaExceeded reports true if Anthropic has signalled this auth is out of
 // quota and we should skip it until QuotaResetAt (or until manually cleared).
+// As a side effect, auto-clears the cooldown fields once their reset time has
+// passed so callers don't see stale state.
 func (a *Auth) IsQuotaExceeded(now time.Time) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.QuotaExceededAt.IsZero() {
-		return false
-	}
-	if a.QuotaResetAt.IsZero() {
-		// No known reset; keep skipping for 1 hour.
-		return now.Before(a.QuotaExceededAt.Add(time.Hour))
-	}
-	return now.Before(a.QuotaResetAt)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.clearExpiredQuotaLocked(now)
+	return !a.QuotaExceededAt.IsZero()
 }
 
 func (a *Auth) MarkQuotaExceeded(resetAt time.Time) {
@@ -240,8 +257,9 @@ func (a *Auth) ClearFailure() {
 // been no failure recorded at all. A credential that has never been used is
 // considered healthy.
 func (a *Auth) IsHealthy() bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.clearExpiredQuotaLocked(time.Now())
 	if a.Disabled {
 		return false
 	}
@@ -249,10 +267,7 @@ func (a *Auth) IsHealthy() bool {
 		return false
 	}
 	if !a.QuotaExceededAt.IsZero() {
-		// Still in cooldown? Treat as unhealthy.
-		if a.QuotaResetAt.IsZero() || time.Now().Before(a.QuotaResetAt) {
-			return false
-		}
+		return false
 	}
 	if a.LastFailure.IsZero() {
 		return true
@@ -269,10 +284,13 @@ func (a *Auth) IsHealthy() bool {
 }
 
 // HealthSnapshot returns a copy of the fields the admin panel needs to
-// render health state, taken under the read lock.
+// render health state. Auto-clears expired quota state as a side effect so
+// the panel never shows a "quota exceeded" badge after the cooldown has
+// elapsed.
 func (a *Auth) HealthSnapshot() (healthy, hardFailure bool, reason string, consecutive int) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.clearExpiredQuotaLocked(time.Now())
 	hardFailure = !a.HardFailureAt.IsZero()
 	consecutive = a.ConsecutiveFailures
 	switch {
@@ -288,7 +306,7 @@ func (a *Auth) HealthSnapshot() (healthy, hardFailure bool, reason string, conse
 		healthy = false
 	case hardFailure:
 		healthy = false
-	case !a.QuotaExceededAt.IsZero() && (a.QuotaResetAt.IsZero() || time.Now().Before(a.QuotaResetAt)):
+	case !a.QuotaExceededAt.IsZero():
 		healthy = false
 	case a.LastFailure.IsZero(), a.LastSuccess.After(a.LastFailure):
 		healthy = true
