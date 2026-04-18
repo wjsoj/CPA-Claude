@@ -57,13 +57,13 @@ run_privileged() {
   fi
 }
 
-# Auto-detect China network: if github.com is unreachable, try known mirrors.
-# Probes use a real raw.githubusercontent.com path (this very script) because
-# proxies like gh-proxy.com only serve specific paths (raw/releases) and
-# return 404 for a bare https://github.com — which would falsely fail the test.
+# Auto-detect China network: probe github.com (the actual release-download
+# host — raw.githubusercontent.com has different reachability) and fall back
+# to a known mirror if direct fails. The probe uses a real repo path because
+# proxies only serve specific paths (raw/releases), not bare github.com root.
 auto_detect_mirror() {
   [ -n "$MIRROR" ] && return
-  local probe="https://raw.githubusercontent.com/${REPO}/main/install.sh"
+  local probe="https://github.com/${REPO}"
   if curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null \
        "$probe" 2>/dev/null; then
     return
@@ -78,6 +78,32 @@ auto_detect_mirror() {
     fi
   done
   warn "github.com unreachable and no mirror responded; proceeding anyway"
+}
+
+# Try direct first; on failure, retry via known mirrors (gh-proxy first).
+# Used for the main release download so a flaky direct connection doesn't
+# kill the install when a working mirror is one retry away.
+download_with_fallback() {
+  local out="$1" url="$2"
+  if auth_curl -fsSL --connect-timeout 15 --max-time 300 \
+       -o "$out" "$url" 2>/dev/null; then
+    return 0
+  fi
+  case "$url" in
+    https://github.com/*|https://raw.githubusercontent.com/*) ;;
+    *) return 1 ;;
+  esac
+  local mirrors=("https://gh-proxy.com/" "https://ghfast.top/")
+  for m in "${mirrors[@]}"; do
+    case "$MIRROR" in "$m") continue ;; esac # already tried as primary
+    warn "direct download failed, retrying via $m"
+    if auth_curl -fsSL --connect-timeout 15 --max-time 300 \
+         -o "$out" "${m}${url}" 2>/dev/null; then
+      MIRROR="$m"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Prompt the user interactively (reads from /dev/tty for curl-pipe compat).
@@ -214,8 +240,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 msg "downloading $URL"
-auth_curl -fsSL --connect-timeout 15 --max-time 300 \
-  -o "$TMP/$ASSET" "$URL" \
+download_with_fallback "$TMP/$ASSET" "$URL" \
   || err "download failed; check tag/asset name, or try --mirror https://gh-proxy.com/"
 
 msg "verifying checksum"
