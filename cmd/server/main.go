@@ -109,6 +109,10 @@ func main() {
 	pool := auth.NewPool(oauths, apikeys,
 		time.Duration(cfg.ActiveWindowMinutes)*time.Minute,
 		cfg.UseUTLS, cfg.DefaultProxyURL)
+	pool.SetUsage24hFunc(func(authID string) int64 {
+		c := store.Sum24h(authID)
+		return c.InputTokens + c.OutputTokens + c.CacheCreateTokens + c.CacheReadTokens
+	})
 
 	// Background OAuth refresher: keeps access tokens fresh even when the
 	// credential sees no traffic, so a long quiet period can't leave a token

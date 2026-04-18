@@ -29,6 +29,12 @@ type Pool struct {
 	activeWindow time.Duration
 	useUTLS      bool
 	defaultProxy string
+	// usage24h, when set, returns the total tokens (in+out+cache) consumed
+	// by the given OAuth auth in the last ~24h. Used as a load-balancing
+	// tiebreaker in pickOAuthLocked when two credentials have equal spare
+	// slots — least-used wins so traffic spreads across credentials instead
+	// of pinning to whichever ID sorts first.
+	usage24h func(authID string) int64
 }
 
 type session struct {
@@ -58,6 +64,15 @@ func NewPool(oauths, apikeys []*Auth, activeWindow time.Duration, useUTLS bool, 
 
 func (p *Pool) UseUTLS() bool               { return p.useUTLS }
 func (p *Pool) ActiveWindow() time.Duration { return p.activeWindow }
+
+// SetUsage24hFunc installs a callback used as the load-balancing tiebreaker
+// when picking an OAuth credential. fn must be safe for concurrent use and
+// should not call back into the pool.
+func (p *Pool) SetUsage24hFunc(fn func(authID string) int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.usage24h = fn
+}
 
 // gcLocked expires stale sessions whose lastSeen is older than activeWindow.
 // Callers must hold p.mu.
@@ -265,8 +280,9 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 // the public tier.
 func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group string) *Auth {
 	type cand struct {
-		a     *Auth
-		spare int // cap - active; MaxInt for unlimited
+		a      *Auth
+		spare  int   // cap - active; MaxInt for unlimited
+		used24 int64 // tokens consumed in the last ~24h (0 if unknown)
 	}
 	var cands []cand
 	for _, a := range p.oauths {
@@ -288,7 +304,11 @@ func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group st
 		if capN > 0 {
 			spare = capN - active
 		}
-		cands = append(cands, cand{a: a, spare: spare})
+		var used int64
+		if p.usage24h != nil {
+			used = p.usage24h(a.ID)
+		}
+		cands = append(cands, cand{a: a, spare: spare, used24: used})
 	}
 	if len(cands) == 0 {
 		return nil
@@ -296,6 +316,9 @@ func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group st
 	sort.SliceStable(cands, func(i, j int) bool {
 		if cands[i].spare != cands[j].spare {
 			return cands[i].spare > cands[j].spare // most spare first
+		}
+		if cands[i].used24 != cands[j].used24 {
+			return cands[i].used24 < cands[j].used24 // least used first
 		}
 		return cands[i].a.ID < cands[j].a.ID
 	})
