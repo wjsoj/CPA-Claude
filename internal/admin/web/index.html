@@ -1230,6 +1230,18 @@
       `;
     }
 
+    function CopyTokenBtn({ token }) {
+      const [copied, setCopied] = useState(false);
+      const onClick = async () => {
+        try {
+          await copyToClipboard(token);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {}
+      };
+      return html`<button onClick=${onClick} class="px-3 py-1 rounded-md border border-slate-300 dark:border-slate-600 text-sm hover:bg-slate-100 dark:hover:bg-slate-700">${copied ? "Copied ✓" : "Copy"}</button>`;
+    }
+
     function EditTokenModal({ row, onClose, onSaved }) {
       const [name, setName] = useState(row.label || "");
       const [weekly, setWeekly] = useState(row.weekly_limit > 0 ? String(row.weekly_limit) : "");
@@ -1496,6 +1508,7 @@
                       <td class="py-3 px-4 text-right">
                         ${cl.full_token ? html`
                           <div class="flex gap-2 justify-end">
+                            <${CopyTokenBtn} token=${cl.full_token} />
                             <button onClick=${() => setEditingToken(cl)} class="px-3 py-1 rounded-md border border-slate-300 dark:border-slate-600 text-sm hover:bg-slate-100 dark:hover:bg-slate-700">Edit</button>
                             ${cl.managed && html`<button onClick=${() => onDeleteToken(cl)} class="px-3 py-1 rounded-md border border-rose-300 dark:border-rose-700/60 text-rose-600 dark:text-rose-400 text-sm hover:bg-rose-50 dark:hover:bg-rose-900/30">Delete</button>`}
                           </div>
