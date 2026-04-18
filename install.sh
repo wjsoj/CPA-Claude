@@ -13,8 +13,10 @@
 #   --version <tag>   Install this exact tag (default: latest release).
 #   --prefix  <dir>   Install prefix; binary goes to <dir>/bin (default: /usr/local).
 #   --bin-dir <dir>   Override binary directory directly.
-#   --mirror  <url>   Prefix for github.com / raw.githubusercontent.com URLs,
-#                     e.g. https://gh-proxy.com/  (useful behind GFW).
+#   --mirror  <url>   Prefix for github.com / raw.githubusercontent.com URLs.
+#                     Defaults to https://gh-proxy.com/ (works worldwide; avoids
+#                     unreliable direct access from China). Pass --mirror direct
+#                     (or CPA_MIRROR=direct) to disable and hit GitHub directly.
 #
 # Environment variables (same as flags, flags win):
 #   CPA_VERSION, CPA_PREFIX, CPA_BIN_DIR, CPA_MIRROR, GITHUB_TOKEN
@@ -57,48 +59,54 @@ run_privileged() {
   fi
 }
 
-# Auto-detect China network: probe github.com (the actual release-download
-# host — raw.githubusercontent.com has different reachability) and fall back
-# to a known mirror if direct fails. The probe uses a real repo path because
-# proxies only serve specific paths (raw/releases), not bare github.com root.
-auto_detect_mirror() {
-  [ -n "$MIRROR" ] && return
-  local probe="https://github.com/${REPO}"
-  if curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null \
-       "$probe" 2>/dev/null; then
-    return
-  fi
-  local mirrors=("https://gh-proxy.com/" "https://ghfast.top/")
-  for m in "${mirrors[@]}"; do
-    if curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null \
-         "${m}${probe}" 2>/dev/null; then
-      MIRROR="$m"
-      warn "github.com unreachable, auto-selected mirror: $MIRROR"
+# Default mirror used unless the caller overrode MIRROR (via --mirror or
+# CPA_MIRROR). gh-proxy.com works from both China and the rest of the world,
+# so it's safe as an unconditional default. To opt out and hit GitHub
+# directly, pass --mirror direct (or CPA_MIRROR=direct).
+readonly DEFAULT_MIRROR="https://gh-proxy.com/"
+
+# apply_default_mirror picks a mirror when the user didn't set one, and
+# converts the sentinel "direct" / "none" into "no mirror".
+apply_default_mirror() {
+  case "$MIRROR" in
+    direct|none|off)
+      MIRROR=""
       return
-    fi
-  done
-  warn "github.com unreachable and no mirror responded; proceeding anyway"
+      ;;
+    "")
+      MIRROR="$DEFAULT_MIRROR"
+      ;;
+  esac
 }
 
-# Try direct first; on failure, retry via known mirrors (gh-proxy first).
-# Used for the main release download so a flaky direct connection doesn't
-# kill the install when a working mirror is one retry away.
+# Try the chosen mirror first; on failure, fall through to the other known
+# mirror, then to a direct GitHub fetch. Used for the main release download
+# so one vendor outage doesn't kill the install.
 download_with_fallback() {
   local out="$1" url="$2"
-  if auth_curl -fsSL --connect-timeout 15 --max-time 300 \
-       -o "$out" "$url" 2>/dev/null; then
-    return 0
+  local candidates=()
+  if [ -n "$MIRROR" ]; then
+    candidates+=("$MIRROR")
   fi
-  case "$url" in
-    https://github.com/*|https://raw.githubusercontent.com/*) ;;
-    *) return 1 ;;
-  esac
-  local mirrors=("https://gh-proxy.com/" "https://ghfast.top/")
-  for m in "${mirrors[@]}"; do
-    case "$MIRROR" in "$m") continue ;; esac # already tried as primary
-    warn "direct download failed, retrying via $m"
+  # Secondary mirrors (skip whichever one is already primary) plus direct.
+  for alt in "https://gh-proxy.com/" "https://ghfast.top/"; do
+    case "$MIRROR" in "$alt") continue ;; esac
+    candidates+=("$alt")
+  done
+  candidates+=("") # direct github.com as last resort
+  local first=1
+  for m in "${candidates[@]}"; do
+    local target="${m}${url}"
+    [ -z "$m" ] && target="$url"
+    if [ $first -eq 1 ]; then
+      first=0
+    else
+      warn "download failed, retrying via ${m:-direct github.com}"
+    fi
     if auth_curl -fsSL --connect-timeout 15 --max-time 300 \
-         -o "$out" "${m}${url}" 2>/dev/null; then
+         -o "$out" "$target" 2>/dev/null; then
+      # Remember the working mirror so subsequent fetches (checksums, example
+      # config) go through the same path.
       MIRROR="$m"
       return 0
     fi
@@ -178,7 +186,7 @@ done
 need curl
 need tar
 
-auto_detect_mirror
+apply_default_mirror
 
 # Normalize mirror: ensure trailing slash.
 if [ -n "$MIRROR" ]; then
