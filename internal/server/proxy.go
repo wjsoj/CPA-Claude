@@ -330,10 +330,23 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	counts.Requests = 1
 	a.MarkSuccess()
 
+	// When this credential rewrote the request's model name (relay vendors
+	// with vendor-prefixed names), rewrite it back in the response so the
+	// client keeps seeing the model it asked for. Claude Code uses the
+	// model field on message_start to correlate conversation turns; a
+	// vendor-prefixed name breaks multi-turn continuation.
+	var rewriteClientModel string
+	if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
+		rewriteClientModel = model
+	}
+
 	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		streamSSE(c, resp, &counts)
+		streamSSE(c, resp, &counts, rewriteClientModel)
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
+		if rewriteClientModel != "" {
+			respBody = rewriteResponseModel(respBody, rewriteClientModel)
+		}
 		c.Writer.Write(respBody)
 		counts.Add(extractUsageFromJSON(respBody))
 	}
@@ -483,25 +496,40 @@ func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream, isAnthropicB
 }
 
 // streamSSE copies SSE events to the client as they arrive and parses
-// message_delta events to accumulate usage.
-func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts) {
+// message_delta events to accumulate usage. When rewriteClientModel is
+// non-empty, each data: JSON has its top-level "model" and nested
+// "message.model" fields rewritten to that value before being forwarded.
+func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, rewriteClientModel string) {
 	flusher, _ := c.Writer.(http.Flusher)
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
 	var curEvent string
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			c.Writer.Write(line)
-			if flusher != nil {
-				flusher.Flush()
-			}
-			// Track event name to parse only data lines that follow.
 			trim := bytes.TrimRight(line, "\r\n")
+			outLine := line
 			if bytes.HasPrefix(trim, []byte("event:")) {
 				curEvent = strings.TrimSpace(string(trim[6:]))
-			} else if bytes.HasPrefix(trim, []byte("data:")) && (curEvent == "message_start" || curEvent == "message_delta") {
+			} else if bytes.HasPrefix(trim, []byte("data:")) {
 				payload := bytes.TrimSpace(trim[5:])
-				counts.Add(extractUsageFromSSE(payload))
+				if rewriteClientModel != "" && len(payload) > 0 && payload[0] == '{' {
+					if rewritten := rewriteResponseModel(payload, rewriteClientModel); rewritten != nil {
+						// Preserve the original line's trailing newline style.
+						tail := line[len(trim):]
+						rebuilt := make([]byte, 0, len("data: ")+len(rewritten)+len(tail))
+						rebuilt = append(rebuilt, []byte("data: ")...)
+						rebuilt = append(rebuilt, rewritten...)
+						rebuilt = append(rebuilt, tail...)
+						outLine = rebuilt
+					}
+				}
+				if curEvent == "message_start" || curEvent == "message_delta" {
+					counts.Add(extractUsageFromSSE(payload))
+				}
+			}
+			c.Writer.Write(outLine)
+			if flusher != nil {
+				flusher.Flush()
 			}
 		}
 		if err != nil {
@@ -624,6 +652,51 @@ func rewriteModelField(body []byte, upstream string) ([]byte, error) {
 	}
 	obj["model"] = mb
 	return json.Marshal(obj)
+}
+
+// rewriteResponseModel substitutes the client-facing model name into the
+// response JSON so the client never sees the relay vendor's prefixed name
+// (e.g. "[0.16]稳定喵/claude-opus-4-6"). Handles both the non-streaming
+// /v1/messages response (top-level "model") and SSE event payloads
+// (message_start nests "message.model"). Returns the original bytes if
+// parsing fails or no known model path is present.
+func rewriteResponseModel(data []byte, clientModel string) []byte {
+	if len(data) == 0 || clientModel == "" {
+		return data
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return data
+	}
+	changed := false
+	newModel, err := json.Marshal(clientModel)
+	if err != nil {
+		return data
+	}
+	if _, ok := obj["model"]; ok {
+		obj["model"] = newModel
+		changed = true
+	}
+	if raw, ok := obj["message"]; ok && len(raw) > 0 && raw[0] == '{' {
+		var inner map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &inner); err == nil {
+			if _, ok := inner["model"]; ok {
+				inner["model"] = newModel
+				if merged, err := json.Marshal(inner); err == nil {
+					obj["message"] = merged
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return data
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return data
+	}
+	return out
 }
 
 // unused — kept to avoid import churn if future error types are added.
