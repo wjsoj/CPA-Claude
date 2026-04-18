@@ -83,10 +83,13 @@ type Config struct {
 // bare string (only the token) or a mapping with token/name/weekly_usd.
 // Week boundary for weekly_usd is ISO week (Mon 00:00 UTC); 0 = unlimited.
 type AccessToken struct {
-	Token          string  `yaml:"token"`
-	Name           string  `yaml:"name,omitempty"`
-	WeeklyUSD      float64 `yaml:"weekly_usd,omitempty"`
-	MaxConcurrent  int     `yaml:"max_concurrent,omitempty"` // 0 = use global default
+	Token         string  `yaml:"token"`
+	Name          string  `yaml:"name,omitempty"`
+	WeeklyUSD     float64 `yaml:"weekly_usd,omitempty"`
+	MaxConcurrent int     `yaml:"max_concurrent,omitempty"` // 0 = use global default
+	// Group restricts this token to a named credential pool. Empty or
+	// "public" means the public pool (default).
+	Group string `yaml:"group,omitempty"`
 }
 
 // UnmarshalYAML accepts scalar (string) or map form for backward compat.
@@ -100,6 +103,7 @@ func (a *AccessToken) UnmarshalYAML(node *yaml.Node) error {
 		Name          string  `yaml:"name"`
 		WeeklyUSD     float64 `yaml:"weekly_usd"`
 		MaxConcurrent int     `yaml:"max_concurrent"`
+		Group         string  `yaml:"group"`
 	}
 	if err := node.Decode(&shape); err != nil {
 		return err
@@ -108,6 +112,7 @@ func (a *AccessToken) UnmarshalYAML(node *yaml.Node) error {
 	a.Name = shape.Name
 	a.WeeklyUSD = shape.WeeklyUSD
 	a.MaxConcurrent = shape.MaxConcurrent
+	a.Group = shape.Group
 	return nil
 }
 
@@ -158,7 +163,7 @@ func applyDefaults(c *Config, path string) {
 		c.LogDir = filepath.Join(dir, c.LogDir)
 	}
 	if c.LogRetentionDays == 0 {
-		c.LogRetentionDays = 30
+		c.LogRetentionDays = 90
 	}
 	p := strings.TrimSpace(c.AdminPath)
 	if p == "" {

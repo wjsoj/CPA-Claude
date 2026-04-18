@@ -12,10 +12,10 @@ auth_dir: ./auths
 state_file: ./state.json
 
 # Per-request JSONL log (one line per terminal request). Writes to
-# log_dir/requests-YYYY-MM-DD.jsonl, rotated daily, retained 30 days by
+# log_dir/requests-YYYY-MM-DD.jsonl, rotated daily, retained 90 days by
 # default. Omit log_dir to disable.
 log_dir: ./logs
-log_retention_days: 30
+log_retention_days: 90
 
 # Minutes of inactivity after which a client session releases its OAuth slot.
 active_window_minutes: 10
@@ -50,11 +50,19 @@ admin_token: "change-me-long-random-string"
 #   name        — human-readable label for logs and the admin panel
 #   weekly_usd  — weekly spend cap in USD; 0 or omitted = unlimited.
 #                 Week boundary is ISO week (Mon 00:00 UTC).
+#   group       — credential-group scope. Empty or "public" = shared pool.
+#                 A named group (e.g. "alice", "research") binds this client
+#                 to credentials tagged with the same group; if every
+#                 group-scoped credential is saturated or unhealthy, traffic
+#                 falls back to the public pool. Tag credentials by adding
+#                 "group": "<name>" to their JSON file under auth_dir, or via
+#                 the admin panel's group field on each credential.
 access_tokens:
   - token: "sk-client-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     name:  "alice-laptop"
     weekly_usd: 10.0
-  - "sk-client-yyyyyyyyyyyyyyyyyyyyyyyyyyyy"    # bare form also works (no name/budget)
+    group: "alice"                              # uses credentials tagged group: alice first
+  - "sk-client-yyyyyyyyyyyyyyyyyyyyyyyyyyyy"    # bare form also works (no name/budget, public)
 
 # Pricing table. Built-in defaults already cover:
 #   claude-haiku-4-5-20251001, claude-haiku-4-5

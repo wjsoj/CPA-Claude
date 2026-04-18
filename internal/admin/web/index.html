@@ -170,13 +170,14 @@
       const [proxy, setProxy] = useState(auth.proxy_url || "");
       const [baseURL, setBaseURL] = useState(auth.base_url || "");
       const [label, setLabel] = useState(auth.label || "");
+      const [group, setGroup] = useState(auth.group || "");
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState("");
       const isApiKey = auth.kind === "apikey";
       const save = async () => {
         setBusy(true); setErr("");
         try {
-          const body = { disabled, proxy_url: proxy, label };
+          const body = { disabled, proxy_url: proxy, label, group };
           if (!isApiKey) body.max_concurrent = Number(maxC);
           if (isApiKey) body.base_url = baseURL;
           await api(`/admin/api/auths/${encodeURIComponent(auth.id)}`, {
@@ -217,6 +218,11 @@
               <span class="text-base text-slate-600 dark:text-slate-300">Proxy URL</span>
               <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="http://host:port or socks5://host:port" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
             </label>
+            <label class="block">
+              <span class="text-base text-slate-600 dark:text-slate-300">Group</span>
+              <input list="groups-datalist" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" placeholder="public (shared with everyone)" value=${group} onInput=${(e)=>setGroup(e.target.value)} />
+              <span class="text-sm text-slate-400 dark:text-slate-500">Empty or "public" = shared pool. Name a group (e.g. <span class="mono">alice</span>, <span class="mono">research-team</span>) to restrict this credential.</span>
+            </label>
             <label class="flex items-center gap-2">
               <input type="checkbox" checked=${disabled} onChange=${(e)=>setDisabled(e.target.checked)} />
               <span class="text-base">Disabled</span>
@@ -237,6 +243,7 @@
       const [label, setLabel] = useState("");
       const [maxC, setMaxC] = useState(5);
       const [proxy, setProxy] = useState("");
+      const [group, setGroup] = useState("");
       const [err, setErr] = useState("");
       const [busy, setBusy] = useState(false);
       const fileInputRef = useRef(null);
@@ -256,7 +263,7 @@
             method: "POST",
             body: JSON.stringify({
               filename, content: JSON.parse(content),
-              label, max_concurrent: Number(maxC), proxy_url: proxy,
+              label, max_concurrent: Number(maxC), proxy_url: proxy, group,
             }),
           });
           onSaved();
@@ -293,6 +300,10 @@
               <span class="text-base text-slate-600 dark:text-slate-300">Proxy URL (optional)</span>
               <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="http:// or socks5://" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
             </label>
+            <label class="block">
+              <span class="text-base text-slate-600 dark:text-slate-300">Group (optional)</span>
+              <input list="groups-datalist" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" placeholder="public" value=${group} onInput=${(e)=>setGroup(e.target.value)} />
+            </label>
             ${err && html`<div class="text-base text-red-600 dark:text-red-400 whitespace-pre-wrap">${err}</div>`}
             <div class="flex justify-end gap-2 pt-2">
               <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700">Cancel</button>
@@ -308,6 +319,7 @@
       const [label, setLabel] = useState("");
       const [proxy, setProxy] = useState("");
       const [baseURL, setBaseURL] = useState("");
+      const [group, setGroup] = useState("");
       const [err, setErr] = useState("");
       const [busy, setBusy] = useState(false);
       const save = async () => {
@@ -315,7 +327,7 @@
         try {
           await api("/admin/api/apikeys", {
             method: "POST",
-            body: JSON.stringify({ api_key: apiKey.trim(), label: label.trim(), proxy_url: proxy.trim(), base_url: baseURL.trim() }),
+            body: JSON.stringify({ api_key: apiKey.trim(), label: label.trim(), proxy_url: proxy.trim(), base_url: baseURL.trim(), group: group.trim() }),
           });
           onSaved();
         } catch (x) { setErr(x.message); }
@@ -345,6 +357,10 @@
             <label class="block">
               <span class="text-base text-slate-600 dark:text-slate-300">Proxy URL (optional)</span>
               <input class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono bg-white dark:bg-slate-900" placeholder="http:// or socks5://" value=${proxy} onInput=${(e)=>setProxy(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="text-base text-slate-600 dark:text-slate-300">Group (optional)</span>
+              <input list="groups-datalist" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" placeholder="public" value=${group} onInput=${(e)=>setGroup(e.target.value)} />
             </label>
             ${err && html`<div class="text-base text-red-600 dark:text-red-400">${err}</div>`}
             <div class="flex justify-end gap-2 pt-2">
@@ -483,9 +499,42 @@
       `;
     }
 
-    function RequestsExplorer({ refreshTick }) {
-      const today = new Date().toISOString().slice(0, 10);
-      const sevenAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    function RequestsExplorer({ refreshTick, pricing }) {
+      // Mirror Go pricing.Catalog.Lookup: case-insensitive exact match, then
+      // successively shorter hyphen-trimmed prefixes, finally the default.
+      const lookupPrice = (model) => {
+        if (!pricing) return null;
+        const m = (model || "").toLowerCase().trim();
+        const models = pricing.models || {};
+        if (m && models[m]) return models[m];
+        if (m) {
+          for (let i = m.lastIndexOf("-"); i > 0; i = m.lastIndexOf("-", i - 1)) {
+            const p = models[m.slice(0, i)];
+            if (p) return p;
+          }
+        }
+        return pricing.default || null;
+      };
+      const costBreakdown = (r) => {
+        const p = lookupPrice(r.model);
+        if (!p) return null;
+        const fmt = (tok, per1m) => `${fmtInt(tok)} × $${per1m.toFixed(2)}/1M = $${(tok * per1m / 1e6).toFixed(6)}`;
+        const inC = (r.input_tokens || 0) * p.input_per_1m / 1e6;
+        const outC = (r.output_tokens || 0) * p.output_per_1m / 1e6;
+        const crC = (r.cache_read_tokens || 0) * p.cache_read_per_1m / 1e6;
+        const cwC = (r.cache_create_tokens || 0) * p.cache_create_per_1m / 1e6;
+        const lines = [
+          `input  ${fmt(r.input_tokens || 0, p.input_per_1m)}`,
+          `output ${fmt(r.output_tokens || 0, p.output_per_1m)}`,
+          `cacheR ${fmt(r.cache_read_tokens || 0, p.cache_read_per_1m)}`,
+          `cacheW ${fmt(r.cache_create_tokens || 0, p.cache_create_per_1m)}`,
+          `total  $${(inC + outC + crC + cwC).toFixed(6)} (logged $${(r.cost_usd || 0).toFixed(6)})`,
+        ];
+        return lines.join("\n");
+      };
+      const localDate = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const today = localDate(new Date());
+      const sevenAgo = localDate(new Date(Date.now() - 7 * 86400000));
       const [from, setFrom] = useState(sevenAgo);
       const [to, setTo] = useState(today);
       const [client, setClient] = useState("");
@@ -686,6 +735,8 @@
                         <th class="py-2 pr-2">Auth</th>
                         <th class="py-2 pr-2 text-right">In</th>
                         <th class="py-2 pr-2 text-right">Out</th>
+                        <th class="py-2 pr-2 text-right" title="Cache read tokens">Cache R</th>
+                        <th class="py-2 pr-2 text-right" title="Cache write / creation tokens">Cache W</th>
                         <th class="py-2 pr-2 text-right">Cost</th>
                         <th class="py-2 pr-2 text-right">Status</th>
                         <th class="py-2 pr-2 text-right">Dur</th>
@@ -700,7 +751,9 @@
                           <td class="py-1 pr-2 mono text-xs text-slate-500 dark:text-slate-400">${r.auth_label || r.auth_id}</td>
                           <td class="py-1 pr-2 mono text-right">${fmtInt(r.input_tokens)}</td>
                           <td class="py-1 pr-2 mono text-right">${fmtInt(r.output_tokens)}</td>
-                          <td class="py-1 pr-2 mono text-right">${cost(r.cost_usd)}</td>
+                          <td class="py-1 pr-2 mono text-right text-slate-500 dark:text-slate-400">${fmtInt(r.cache_read_tokens)}</td>
+                          <td class="py-1 pr-2 mono text-right text-slate-500 dark:text-slate-400">${fmtInt(r.cache_create_tokens)}</td>
+                          <td class="py-1 pr-2 mono text-right cursor-help" title=${costBreakdown(r) || "pricing unavailable"}>${cost(r.cost_usd)}</td>
                           <td class=${"py-1 pr-2 mono text-right " + (r.status >= 400 ? "text-red-600 dark:text-red-400" : "")}>${r.status}</td>
                           <td class="py-1 pr-2 mono text-right text-slate-500 dark:text-slate-400">${r.duration_ms}ms</td>
                         </tr>
@@ -753,6 +806,7 @@
       const [proxy, setProxy] = useState("");
       const [label, setLabel] = useState("");
       const [maxC, setMaxC] = useState(5);
+      const [group, setGroup] = useState("");
       const [sess, setSess] = useState(null); // {session_id, auth_url}
       const [callback, setCallback] = useState("");
       const [busy, setBusy] = useState(false);
@@ -790,6 +844,7 @@
               session_id: sess.session_id,
               callback: callback.trim(),
               max_concurrent: Number(maxC),
+              group,
             }),
           });
           onSaved();
@@ -821,6 +876,10 @@
                   <input type="number" min="0" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" value=${maxC} onInput=${(e) => setMaxC(e.target.value)} />
                 </label>
               </div>
+              <label class="block">
+                <span class="text-base text-slate-600 dark:text-slate-300">Group (optional)</span>
+                <input list="groups-datalist" class="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900" placeholder="public" value=${group} onInput=${(e) => setGroup(e.target.value)} />
+              </label>
               ${err && html`<div class="text-base text-red-600 dark:text-red-400">${err}</div>`}
               <div class="flex justify-end gap-2 pt-2">
                 <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700">Cancel</button>
@@ -900,6 +959,7 @@
             </div>
             <div class="flex flex-col items-end gap-1 shrink-0">
               <span class=${"inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium " + (a.kind === "apikey" ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300" : "bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200")}>${kindLabel}</span>
+              <span class=${"inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium " + (a.group ? "bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300" : "bg-slate-100 dark:bg-slate-700/60 text-slate-500 dark:text-slate-400")} title="Credential group">${a.group || "public"}</span>
               <span class="text-xs text-slate-500 dark:text-slate-400 capitalize">${status}</span>
             </div>
           </header>
@@ -1018,6 +1078,7 @@
       // about the name/limit. The "Regenerate" button just overwrites it.
       const [token, setToken] = useState(() => generateSkToken());
       const [weekly, setWeekly] = useState("");
+      const [group, setGroup] = useState("");
       const [created, setCreated] = useState(null); // once POSTed, display it large with copy
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState("");
@@ -1036,7 +1097,7 @@
       const save = async () => {
         setBusy(true); setErr("");
         try {
-          const body = { token: token.trim(), name: name.trim() };
+          const body = { token: token.trim(), name: name.trim(), group: group.trim() };
           const w = parseFloat(weekly);
           if (!isNaN(w) && w > 0) body.weekly_usd = w;
           const d = await api("/admin/api/tokens", { method: "POST", body: JSON.stringify(body) });
@@ -1082,6 +1143,11 @@
                   <span class="text-sm font-medium text-slate-700 dark:text-slate-300">Weekly USD limit</span>
                   <input type="number" min="0" step="0.01" class="mt-1.5 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono text-sm bg-white dark:bg-slate-900" placeholder="0 = unlimited" value=${weekly} onInput=${(e) => setWeekly(e.target.value)} />
                 </label>
+                <label class="block">
+                  <span class="text-sm font-medium text-slate-700 dark:text-slate-300">Group</span>
+                  <input list="groups-datalist" type="text" class="mt-1.5 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900 text-base" placeholder="public (shared pool)" value=${group} onInput=${(e) => setGroup(e.target.value)} />
+                  <span class="text-xs text-slate-500 dark:text-slate-400 mt-1 block">Binds this client to a named credential group. Traffic first tries that group's credentials, falling back to public if they're saturated or unhealthy.</span>
+                </label>
                 ${err && html`<div class="text-sm text-rose-600 dark:text-rose-400">${err}</div>`}
                 <div class="flex justify-end gap-3 pt-2">
                   <button onClick=${onClose} class="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 text-base">Cancel</button>
@@ -1097,13 +1163,14 @@
     function EditTokenModal({ row, onClose, onSaved }) {
       const [name, setName] = useState(row.label || "");
       const [weekly, setWeekly] = useState(row.weekly_limit > 0 ? String(row.weekly_limit) : "");
+      const [group, setGroup] = useState(row.group || "");
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState("");
 
       const save = async () => {
         setBusy(true); setErr("");
         try {
-          const body = { name };
+          const body = { name, group };
           const w = parseFloat(weekly);
           body.weekly_usd = !isNaN(w) && w > 0 ? w : 0;
           await api(`/admin/api/tokens/${encodeURIComponent(row.full_token)}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -1129,6 +1196,10 @@
             <label class="block">
               <span class="text-sm font-medium text-slate-700 dark:text-slate-300">Weekly USD limit</span>
               <input type="number" min="0" step="0.01" class="mt-1.5 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 mono text-sm bg-white dark:bg-slate-900" placeholder="0 = unlimited" value=${weekly} onInput=${(e) => setWeekly(e.target.value)} />
+            </label>
+            <label class="block">
+              <span class="text-sm font-medium text-slate-700 dark:text-slate-300">Group</span>
+              <input list="groups-datalist" type="text" class="mt-1.5 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-900 text-base" placeholder="public (shared pool)" value=${group} onInput=${(e) => setGroup(e.target.value)} />
             </label>
             ${err && html`<div class="text-sm text-rose-600 dark:text-rose-400">${err}</div>`}
             <div class="flex justify-end gap-3 pt-2">
@@ -1210,6 +1281,17 @@
 
       const oauths = data ? data.auths.filter((a) => a.kind === "oauth") : [];
       const apikeys = data ? data.auths.filter((a) => a.kind === "apikey") : [];
+      // Distinct group names across credentials and client tokens. Powers the
+      // <datalist> that every group input autocompletes against. "public" is
+      // always offered as a hint even when no one has picked it yet.
+      const knownGroups = (() => {
+        const s = new Set(["public"]);
+        if (data) {
+          for (const a of data.auths) if (a.group) s.add(a.group);
+          for (const c of data.clients) if (c.group) s.add(c.group);
+        }
+        return Array.from(s).sort();
+      })();
       const totalCreds = oauths.length + apikeys.length;
       const healthyCreds = data ? data.auths.filter((a) => a.healthy).length : 0;
       const healthLabel = healthyCreds + " / " + totalCreds + " healthy";
@@ -1247,6 +1329,10 @@
           </header>
 
           ${err && html`<div class="rounded-lg bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 px-4 py-2 text-base">${err}</div>`}
+
+          <datalist id="groups-datalist">
+            ${knownGroups.map((g) => html`<option value=${g}></option>`)}
+          </datalist>
 
           <section class="grid grid-cols-2 md:grid-cols-6 gap-4">
             ${[
@@ -1304,6 +1390,7 @@
                   <tr>
                     <th class="py-3 px-4">Name</th>
                     <th class="py-3 px-4">Token</th>
+                    <th class="py-3 px-4">Group</th>
                     <th class="py-3 px-4">Weekly spend</th>
                     <th class="py-3 px-4">Limit</th>
                     <th class="py-3 px-4">Total</th>
@@ -1319,6 +1406,9 @@
                         ${cl.from_config && html`<div class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">from config.yaml · read-only</div>`}
                       </td>
                       <td class="py-3 px-4 mono text-sm">${cl.token}</td>
+                      <td class="py-3 px-4">
+                        <span class=${"inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium " + (cl.group ? "bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300" : "bg-slate-100 dark:bg-slate-700/60 text-slate-500 dark:text-slate-400")}>${cl.group || "public"}</span>
+                      </td>
                       <td class="py-3 px-4 mono text-sm">
                         <div class=${"font-semibold " + (cl.blocked ? "text-rose-600 dark:text-rose-400" : cl.weekly_limit && cl.weekly_usd / cl.weekly_limit > 0.8 ? "text-amber-600 dark:text-amber-400" : "")}>$${cl.weekly_usd.toFixed(4)}</div>
                         ${cl.weekly_limit > 0 && html`
@@ -1362,7 +1452,7 @@
           `}
 
           ${tab === "requests" && html`
-          <${RequestsExplorer} refreshTick=${refreshTick} />
+          <${RequestsExplorer} refreshTick=${refreshTick} pricing=${data && data.pricing} />
           `}
 
           ${tab === "pricing" && html`
