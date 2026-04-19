@@ -100,9 +100,13 @@ func (h *Handler) Register(r *gin.Engine) {
 	r.GET(base+"/app/*filepath", func(c *gin.Context) {
 		p := strings.TrimPrefix(c.Param("filepath"), "/")
 		if p == "" || strings.HasSuffix(p, "/") {
-			p = "index.html"
+			// SPA client-side route → serve shell HTML.
+			serveAsset(c, sub, "index.html")
+			return
 		}
-		serveAsset(c, sub, p)
+		// Real ES-module files live under web/app/. serveAsset falls
+		// back to index.html on miss, which matches SPA routing.
+		serveAsset(c, sub, "app/"+p)
 	})
 }
 
