@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "preact/hooks";
-import { html, fmtInt, fmtDate } from "../util.js";
+import { html, fmtInt, fmtDate, isoWeekRange } from "../util.js";
 import { api, setToken } from "../api.js";
 import { AuthCard } from "./auth-card.js";
 import { UpstreamQuota } from "./upstream-quota.js";
@@ -179,7 +179,7 @@ export function Dashboard({ onLogout }) {
 
       <section>
         <div class="flex items-baseline justify-between mb-4 gap-4 flex-wrap">
-          <h2 class="text-2xl font-semibold tracking-tight">Client tokens <span class="text-base font-normal text-slate-500 dark:text-slate-400 ml-2">week ${data && data.current_week ? data.current_week : "…"}</span></h2>
+          <h2 class="text-2xl font-semibold tracking-tight">Client tokens <span class="text-base font-normal text-slate-500 dark:text-slate-400 ml-2">week ${data && data.current_week ? data.current_week : "…"}${data && data.current_week ? html` <span class="text-slate-400 dark:text-slate-500">(${isoWeekRange(data.current_week)} UTC)</span>` : ""}</span></h2>
           <button onClick=${() => setAddingToken(true)} class="px-4 py-2 rounded-lg bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-200 dark:text-slate-900 dark:hover:bg-slate-300 text-base font-medium">+ New token</button>
         </div>
         <div class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
@@ -195,7 +195,7 @@ export function Dashboard({ onLogout }) {
                 <th class="py-3 px-4">Group</th>
                 <th class="py-3 px-4">Weekly spend</th>
                 <th class="py-3 px-4">Limit</th>
-                <th class="py-3 px-4">Total</th>
+                <th class="py-3 px-4 cursor-help" title="Lifetime cumulative spend per client — persisted in usage state, not derived from request logs. Not affected by the billing week reset or log retention.">Total</th>
                 <th class="py-3 px-4">Last used</th>
                 <th class="py-3 px-4 text-right">Actions</th>
               </tr>

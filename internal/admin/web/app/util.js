@@ -42,6 +42,23 @@ export function generateSkToken() {
   return out;
 }
 
+// Parse an ISO-week key ("YYYY-Www") into a "Mon D – Mon D" UTC range.
+export function isoWeekRange(key) {
+  if (!key) return "";
+  const m = /^(\d{4})-W(\d{2})$/.exec(key);
+  if (!m) return "";
+  const year = parseInt(m[1], 10);
+  const week = parseInt(m[2], 10);
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Dow = jan4.getUTCDay() || 7;
+  const start = new Date(jan4);
+  start.setUTCDate(jan4.getUTCDate() - (jan4Dow - 1) + (week - 1) * 7);
+  const end = new Date(start);
+  end.setUTCDate(start.getUTCDate() + 6);
+  const fmt = (d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  return `${fmt(start)} – ${fmt(end)}`;
+}
+
 export const fmtDate = (s) => {
   if (!s) return "—";
   const d = new Date(s);
