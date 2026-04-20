@@ -28,11 +28,12 @@ type Pool struct {
 	activeWindow time.Duration
 	useUTLS      bool
 	defaultProxy string
-	// usage24h, when set, returns the total tokens (in+out+cache) consumed
-	// by the given OAuth auth in the last ~24h. Used as a load-balancing
-	// tiebreaker in pickOAuthLocked when two credentials have equal spare
-	// slots — least-used wins so traffic spreads across credentials instead
-	// of pinning to whichever ID sorts first.
+	// usage24h, when set, returns a cost-weighted token count for the given
+	// OAuth auth over the last ~24h (see usage.Counts.WeightedTotal — input
+	// 1×, cache_create 1.25×, cache_read 0.1×, output 5×). Drives OAuth
+	// selection in pickOAuthLocked: the candidate with the lowest weighted
+	// usage wins, so cache-heavy credentials aren't penalized by the near-
+	// free cache_read stream and the scarce output tokens dominate.
 	usage24h func(authID string) int64
 }
 
@@ -278,18 +279,20 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 }
 
 // pickOAuthLocked returns the OAuth in the requested group with the lowest
-// 24h token consumption that still has a free slot and isn't on the exclude
-// list, or nil if none available. Unlimited credentials (cap=0) always have
-// room. excluded may be nil. group is an exact match; "" is the public tier.
+// cost-weighted 24h token consumption that still has a free slot and isn't
+// on the exclude list, or nil if none available. Unlimited credentials
+// (cap=0) always have room. excluded may be nil. group is an exact match;
+// "" is the public tier.
 //
 // Selection is purely least-used-first (not spare-slot-first): as long as a
 // credential has any free slot, it's a valid candidate, and ties break on
-// 24h token usage. This spreads load toward less-consumed credentials
-// regardless of how many slots they happen to have free.
+// weighted 24h usage (see usage.Counts.WeightedTotal). This spreads load
+// toward credentials doing less real work — cache-heavy clients don't
+// starve a credential out just by racking up near-free cache_read volume.
 func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group string) *Auth {
 	type cand struct {
 		a      *Auth
-		used24 int64 // tokens consumed in the last ~24h (0 if unknown)
+		used24 int64 // weighted tokens consumed in the last ~24h (0 if unknown)
 	}
 	var cands []cand
 	for _, a := range p.oauths {

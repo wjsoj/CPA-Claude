@@ -115,8 +115,7 @@ func main() {
 		time.Duration(cfg.ActiveWindowMinutes)*time.Minute,
 		cfg.UseUTLS, cfg.DefaultProxyURL)
 	pool.SetUsage24hFunc(func(authID string) int64 {
-		c := store.Sum24h(authID)
-		return c.InputTokens + c.OutputTokens + c.CacheCreateTokens + c.CacheReadTokens
+		return store.Sum24h(authID).WeightedTotal()
 	})
 
 	// Background OAuth refresher: keeps access tokens fresh even when the

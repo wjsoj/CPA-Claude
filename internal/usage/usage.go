@@ -39,6 +39,19 @@ func (c *Counts) Add(o Counts) {
 	c.Errors += o.Errors
 }
 
+// WeightedTotal returns a cost-weighted token count used by the OAuth load
+// balancer as its "how busy is this credential" metric. Weights roughly track
+// Anthropic's pricing ratios so that cheap cache reads don't make a
+// cache-heavy credential look overloaded, and output tokens (the scarce
+// resource) dominate. Ratios: input=1, cache_create=1.25, cache_read=0.1,
+// output=5. Multiplied by 100 and returned as int64 so the caller can keep
+// integer comparisons (ties on identical load still break on auth ID).
+func (c Counts) WeightedTotal() int64 {
+	// scale = 100 → input weight becomes 100, cache_read becomes 10, etc.
+	// Keeps everything in int64 without floats in the hot pick path.
+	return c.InputTokens*100 + c.CacheCreateTokens*125 + c.CacheReadTokens*10 + c.OutputTokens*500
+}
+
 // DayEntry pairs a YYYY-MM-DD date with its counters for JSON rendering.
 type DayEntry struct {
 	Date   string `json:"date"`
