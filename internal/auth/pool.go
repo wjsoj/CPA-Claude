@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"sync"
 	"time"
@@ -278,15 +277,18 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 	return true
 }
 
-// pickOAuthLocked returns the OAuth in the requested group with the most
-// free slots that still has capacity and isn't on the exclude list, or nil
-// if none available. Unlimited credentials (cap=0) are treated as having
-// MaxInt spare slots. excluded may be nil. group is an exact match; "" is
-// the public tier.
+// pickOAuthLocked returns the OAuth in the requested group with the lowest
+// 24h token consumption that still has a free slot and isn't on the exclude
+// list, or nil if none available. Unlimited credentials (cap=0) always have
+// room. excluded may be nil. group is an exact match; "" is the public tier.
+//
+// Selection is purely least-used-first (not spare-slot-first): as long as a
+// credential has any free slot, it's a valid candidate, and ties break on
+// 24h token usage. This spreads load toward less-consumed credentials
+// regardless of how many slots they happen to have free.
 func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group string) *Auth {
 	type cand struct {
 		a      *Auth
-		spare  int   // cap - active; MaxInt for unlimited
 		used24 int64 // tokens consumed in the last ~24h (0 if unknown)
 	}
 	var cands []cand
@@ -305,25 +307,18 @@ func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group st
 		if capN > 0 && active >= capN {
 			continue
 		}
-		spare := math.MaxInt
-		if capN > 0 {
-			spare = capN - active
-		}
 		var used int64
 		if p.usage24h != nil {
 			used = p.usage24h(a.ID)
 		}
-		cands = append(cands, cand{a: a, spare: spare, used24: used})
+		cands = append(cands, cand{a: a, used24: used})
 	}
 	if len(cands) == 0 {
 		return nil
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
-		if cands[i].spare != cands[j].spare {
-			return cands[i].spare > cands[j].spare // most spare first
-		}
 		if cands[i].used24 != cands[j].used24 {
-			return cands[i].used24 < cands[j].used24 // least used first
+			return cands[i].used24 < cands[j].used24
 		}
 		return cands[i].a.ID < cands[j].a.ID
 	})
