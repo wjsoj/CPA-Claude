@@ -45,10 +45,14 @@ type DayEntry struct {
 	Counts Counts `json:"counts"`
 }
 
+// PerAuth tracks per-credential usage. Lifetime totals now come from the
+// request log (see admin.handleSummary / requestlog.AggregateByAuth), so
+// this struct only holds what we need on hot paths: Daily buckets for the
+// OAuth load balancer (see Sum24h) and the 14-day UI sparkline, plus
+// LastUsed for the panel's "updated X ago" display.
 type PerAuth struct {
 	AuthID   string            `json:"auth_id"`
 	Label    string            `json:"label,omitempty"`
-	Total    Counts            `json:"total"`
 	LastUsed time.Time         `json:"last_used,omitempty"`
 	Daily    map[string]Counts `json:"daily,omitempty"` // key = "YYYY-MM-DD" (UTC)
 }
@@ -263,7 +267,6 @@ func (s *Store) Record(authID, label string, c Counts) {
 		p.Label = label
 	}
 	now := s.now()
-	p.Total.Add(c)
 	p.LastUsed = now
 	day := now.UTC().Format("2006-01-02")
 	cur := p.Daily[day]

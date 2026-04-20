@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	// used in Anthropic usage proxy below
 
@@ -38,10 +39,50 @@ type Handler struct {
 	usage   *usage.Store
 	pricing *pricing.Catalog
 	tokens  *clienttoken.Store
+
+	// Cache for the full-history log scan backing lifetime totals.
+	// Scanning every rotated file on each summary refresh would be
+	// wasteful; a short TTL keeps the UI snappy without serving data
+	// older than the refresh cadence.
+	lifetimeMu    sync.Mutex
+	lifetimeCache map[string]requestlog.Aggregate
+	lifetimeAt    time.Time
 }
+
+const lifetimeCacheTTL = 15 * time.Second
 
 func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.Catalog, tokens *clienttoken.Store) *Handler {
 	return &Handler{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens}
+}
+
+func (h *Handler) lifetimeByAuth() map[string]requestlog.Aggregate {
+	h.lifetimeMu.Lock()
+	defer h.lifetimeMu.Unlock()
+	if h.lifetimeCache != nil && time.Since(h.lifetimeAt) < lifetimeCacheTTL {
+		return h.lifetimeCache
+	}
+	m, err := requestlog.AggregateByAuth(h.cfg.LogDir, time.Time{}, time.Time{})
+	if err != nil {
+		log.Warnf("admin: lifetime aggregate: %v", err)
+		if h.lifetimeCache != nil {
+			return h.lifetimeCache
+		}
+		return map[string]requestlog.Aggregate{}
+	}
+	h.lifetimeCache = m
+	h.lifetimeAt = time.Now()
+	return m
+}
+
+func aggToCounts(a requestlog.Aggregate) usage.Counts {
+	return usage.Counts{
+		InputTokens:       a.InputTokens,
+		OutputTokens:      a.OutputTokens,
+		CacheCreateTokens: a.CacheCreateTokens,
+		CacheReadTokens:   a.CacheReadTokens,
+		Requests:          a.Count,
+		Errors:            a.Errors,
+	}
 }
 
 // Register attaches the admin SPA and API routes.
@@ -208,6 +249,16 @@ type usageSummary struct {
 
 func (h *Handler) handleSummary(c *gin.Context) {
 	usageMap := h.usage.Snapshot()
+	// Lifetime and rolling-24h totals come from the request log instead of
+	// the in-memory counters: the log is append-only and survives state
+	// rebuilds, so sums over it are the source of truth. The in-memory
+	// Daily buckets still drive per-auth 14-day sparklines.
+	lifetime := h.lifetimeByAuth()
+	last24h, err := requestlog.AggregateByAuth(h.cfg.LogDir, time.Now().Add(-24*time.Hour), time.Time{})
+	if err != nil {
+		log.Warnf("admin: 24h aggregate: %v", err)
+		last24h = map[string]requestlog.Aggregate{}
+	}
 	rows := make([]authRow, 0, 16)
 	for _, st := range h.pool.Status() {
 		kind := "oauth"
@@ -225,17 +276,27 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			expAt = &t
 		}
 		var u *usageSummary
-		if v, ok := usageMap[st.Auth.ID]; ok {
+		// Show a usage row for every auth that has either in-memory daily
+		// history or any log-recorded activity, so lifetime totals keep
+		// rendering even after a state rebuild wipes the in-memory store.
+		v, hasMem := usageMap[st.Auth.ID]
+		lifeAgg, hasLife := lifetime[st.Auth.ID]
+		last24Agg := last24h[st.Auth.ID]
+		if hasMem || hasLife {
 			var lastPtr *time.Time
-			if !v.LastUsed.IsZero() {
+			if hasMem && !v.LastUsed.IsZero() {
 				lu := v.LastUsed
 				lastPtr = &lu
 			}
+			var daily []usage.DayEntry
+			if hasMem {
+				daily = v.DailyOrdered(14)
+			}
 			u = &usageSummary{
-				Total:    v.Total,
-				Sum24h:   h.usage.Sum24h(st.Auth.ID),
+				Total:    aggToCounts(lifeAgg),
+				Sum24h:   aggToCounts(last24Agg),
 				LastUsed: lastPtr,
-				Daily:    v.DailyOrdered(14),
+				Daily:    daily,
 			}
 		}
 		live := h.pool.FindByID(st.Auth.ID)

@@ -58,6 +58,58 @@ type Result struct {
 	Scanned  int64                `json:"scanned"`
 }
 
+// AggregateByAuth scans rotated log files whose day is within [from, to]
+// (inclusive; zero values mean "unbounded"), filters records by exact
+// timestamp, and returns per-AuthID aggregates. Intended for the admin
+// summary to compute accurate lifetime and rolling-window totals directly
+// from the request log, bypassing the in-memory counter (which resets on
+// restart / state rebuild).
+func AggregateByAuth(dir string, from, to time.Time) (map[string]Aggregate, error) {
+	files, err := listLogFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Aggregate)
+	for _, path := range files {
+		day := extractDay(path)
+		if !dayInRange(day, from, to) {
+			continue
+		}
+		fh, err := os.Open(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		sc := bufio.NewScanner(fh)
+		sc.Buffer(make([]byte, 64*1024), 2*1024*1024)
+		for sc.Scan() {
+			var r Record
+			if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+				continue
+			}
+			if !from.IsZero() && r.TS.Before(from) {
+				continue
+			}
+			if !to.IsZero() && r.TS.After(to) {
+				continue
+			}
+			if r.AuthID == "" {
+				continue
+			}
+			agg := out[r.AuthID]
+			agg.add(r)
+			out[r.AuthID] = agg
+		}
+		_ = fh.Close()
+		if err := sc.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // Clients returns the sorted set of distinct client names seen across all
 // rotated log files. Useful to populate a filter dropdown.
 func Clients(dir string) ([]string, error) {
