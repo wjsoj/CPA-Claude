@@ -3,6 +3,7 @@ import { html } from "../util.js";
 import { api, getToken, setToken } from "../api.js";
 import { Login } from "./login.js";
 import { Dashboard } from "./dashboard.js";
+import { NoticeHost } from "./notice.js";
 
 export function App() {
   const [authed, setAuthed] = useState(!!getToken());
@@ -13,7 +14,10 @@ export function App() {
       if (x.status === 401) { setToken(""); setAuthed(false); }
     });
   }, [authed]);
-  return authed
-    ? html`<${Dashboard} onLogout=${() => setAuthed(false)} />`
-    : html`<${Login} onOk=${() => setAuthed(true)} />`;
+  return html`
+    <${NoticeHost} />
+    ${authed
+      ? html`<${Dashboard} onLogout=${() => setAuthed(false)} />`
+      : html`<${Login} onOk=${() => setAuthed(true)} />`}
+  `;
 }

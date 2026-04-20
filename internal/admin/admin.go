@@ -125,8 +125,11 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.GET("/requests/clients", h.handleRequestsClients)
 		api.GET("/tokens", h.handleListTokens)
 		api.POST("/tokens", h.handleCreateToken)
+		api.GET("/orphan-tokens", h.handleListOrphanTokens)
 		api.PATCH("/tokens/:token", h.handlePatchToken)
 		api.DELETE("/tokens/:token", h.handleDeleteToken)
+		api.POST("/tokens/:token/reset", h.handleResetToken)
+		api.POST("/tokens/:token/inherit", h.handleInheritToken)
 	}
 
 	// Static SPA under a dedicated sub-path so no wildcard conflicts with
@@ -1078,6 +1081,95 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 func (h *Handler) handleDeleteToken(c *gin.Context) {
 	tok := c.Param("token")
 	if err := h.tokens.Delete(tok); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// orphanToken is a client token that appears in recorded usage but is
+// not in the clienttoken store (deleted or never registered). Exposed to
+// admins so the Edit dialog can offer a "inherit usage from …" merge.
+type orphanToken struct {
+	Token    string           `json:"token"`
+	Masked   string           `json:"masked"`
+	Label    string           `json:"label,omitempty"`
+	Total    usage.ClientCost `json:"total"`
+	LastUsed *time.Time       `json:"last_used,omitempty"`
+}
+
+func (h *Handler) handleListOrphanTokens(c *gin.Context) {
+	registered := make(map[string]bool)
+	for _, t := range h.tokens.List() {
+		registered[t.Token] = true
+	}
+	out := make([]orphanToken, 0)
+	for tok, pc := range h.usage.SnapshotClients() {
+		if registered[tok] {
+			continue
+		}
+		row := orphanToken{
+			Token:  tok,
+			Masked: maskToken(tok),
+			Label:  pc.Label,
+			Total:  pc.Total,
+		}
+		if !pc.LastUsed.IsZero() {
+			lu := pc.LastUsed
+			row.LastUsed = &lu
+		}
+		out = append(out, row)
+	}
+	c.JSON(http.StatusOK, gin.H{"orphans": out})
+}
+
+func (h *Handler) handleResetToken(c *gin.Context) {
+	tok := c.Param("token")
+	newTok, err := clienttoken.Generate()
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "generate: " + err.Error()})
+		return
+	}
+	if err := h.tokens.Reset(tok, newTok); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Rename usage after the token store commits; if this fails the old
+	// usage history stays under the old key (surfaces as orphan), but the
+	// new token already works — non-fatal.
+	if err := h.usage.RenameClient(tok, newTok); err != nil {
+		log.Warnf("admin: reset usage rename %s→%s: %v", maskToken(tok), maskToken(newTok), err)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "token": newTok})
+}
+
+type inheritTokenBody struct {
+	From string `json:"from"`
+}
+
+func (h *Handler) handleInheritToken(c *gin.Context) {
+	dst := c.Param("token")
+	var body inheritTokenBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	src := strings.TrimSpace(body.From)
+	if src == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "from required"})
+		return
+	}
+	if _, _, _, _, ok := h.tokens.Lookup(dst); !ok {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "destination token not registered"})
+		return
+	}
+	// Refuse merging from a still-registered token: it's either a mistake
+	// or the caller should delete the source explicitly first.
+	if _, _, _, _, ok := h.tokens.Lookup(src); ok {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "source token is still registered; delete it first or pick an orphan"})
+		return
+	}
+	if err := h.usage.MergeClient(src, dst); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

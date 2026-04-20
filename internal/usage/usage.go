@@ -5,6 +5,7 @@ package usage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -420,6 +421,72 @@ func (s *Store) WeeklyCostUSD(token string) float64 {
 	}
 	key := isoWeekKey(s.now())
 	return p.Weekly[key].CostUSD
+}
+
+// MergeClient folds src's per-client usage into dst and removes src.
+// Weekly buckets are summed per key; totals accumulate; LastUsed takes
+// the later of the two. dst.Label is preserved. No-op if src missing;
+// errors if dst doesn't exist.
+func (s *Store) MergeClient(src, dst string) error {
+	if src == "" || dst == "" || src == dst {
+		return fmt.Errorf("src and dst must differ and be non-empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Clients == nil {
+		return fmt.Errorf("no client usage recorded")
+	}
+	srcP, ok := s.state.Clients[src]
+	if !ok {
+		return nil
+	}
+	dstP, ok := s.state.Clients[dst]
+	if !ok {
+		dstP = &PerClient{Token: dst, Weekly: make(map[string]ClientCost)}
+		s.state.Clients[dst] = dstP
+	}
+	if dstP.Weekly == nil {
+		dstP.Weekly = make(map[string]ClientCost)
+	}
+	for wk, cost := range srcP.Weekly {
+		cur := dstP.Weekly[wk]
+		cur.Add(cost)
+		dstP.Weekly[wk] = cur
+	}
+	dstP.Total.Add(srcP.Total)
+	if srcP.LastUsed.After(dstP.LastUsed) {
+		dstP.LastUsed = srcP.LastUsed
+	}
+	delete(s.state.Clients, src)
+	s.trimWeeklyLocked(dstP)
+	s.dirty = true
+	return nil
+}
+
+// RenameClient rekeys src's per-client record under dst. Refuses to
+// clobber an existing dst entry — caller should merge instead. Silent
+// no-op when src has no record yet (reset before first use).
+func (s *Store) RenameClient(src, dst string) error {
+	if src == "" || dst == "" || src == dst {
+		return fmt.Errorf("src and dst must differ and be non-empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Clients == nil {
+		return nil
+	}
+	p, ok := s.state.Clients[src]
+	if !ok {
+		return nil
+	}
+	if _, exists := s.state.Clients[dst]; exists {
+		return fmt.Errorf("destination token already has usage recorded")
+	}
+	p.Token = dst
+	s.state.Clients[dst] = p
+	delete(s.state.Clients, src)
+	s.dirty = true
+	return nil
 }
 
 // SnapshotClients returns a deep copy of the clients map for JSON rendering.

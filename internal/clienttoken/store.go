@@ -257,6 +257,36 @@ func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int
 	return fmt.Errorf("token not found")
 }
 
+// Reset swaps the token string of an existing entry while keeping all
+// other fields (name, weekly limit, group, created_at). Useful for
+// rotating a leaked secret without losing the row's identity. Refuses
+// to clobber another existing token.
+func (s *Store) Reset(oldToken, newToken string) error {
+	newToken = strings.TrimSpace(newToken)
+	if newToken == "" {
+		return fmt.Errorf("new token required")
+	}
+	if oldToken == newToken {
+		return fmt.Errorf("new token must differ from old")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i, t := range s.tokens {
+		if t.Token == oldToken {
+			idx = i
+		}
+		if t.Token == newToken {
+			return fmt.Errorf("new token already exists")
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("token not found")
+	}
+	s.tokens[idx].Token = newToken
+	return s.saveLocked()
+}
+
 // Delete removes a token.
 func (s *Store) Delete(token string) error {
 	s.mu.Lock()

@@ -12,6 +12,7 @@ import { APIKeyModal } from "./modals/apikey.js";
 import { OAuthModal } from "./modals/oauth.js";
 import { AddTokenModal } from "./modals/add-token.js";
 import { EditTokenModal } from "./modals/edit-token.js";
+import { confirmDialog, notify } from "./notice.js";
 
 export function Dashboard({ onLogout }) {
   const [data, setData] = useState(null);
@@ -53,11 +54,17 @@ export function Dashboard({ onLogout }) {
 
   const onDeleteToken = async (cl) => {
     if (!cl.full_token) return;
-    if (!confirm(`Delete token "${cl.label || cl.token}"? This cannot be undone; clients using it will stop working.`)) return;
+    const ok = await confirmDialog({
+      title: "Delete client token",
+      message: `Token "${cl.label || cl.token}" will be removed. Clients using it stop working immediately. This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api(`/admin/api/tokens/${encodeURIComponent(cl.full_token)}`, { method: "DELETE" });
       await refresh();
-    } catch (x) { alert("Delete failed: " + x.message); }
+    } catch (x) { notify({ title: "Delete failed", message: x.message }); }
   };
 
   const onAction = async (a, act) => {
@@ -74,11 +81,17 @@ export function Dashboard({ onLogout }) {
       } else if (act === "clear-failure") {
         await api(`/admin/api/auths/${encodeURIComponent(a.id)}/clear-failure`, { method: "POST" });
       } else if (act === "delete") {
-        if (!confirm(`Delete ${a.label || a.id}? This removes the JSON file.`)) return;
+        const ok = await confirmDialog({
+          title: "Delete credential",
+          message: `${a.label || a.id} will be removed and its JSON file deleted. Any in-flight sessions on it will fail.`,
+          confirmLabel: "Delete",
+          danger: true,
+        });
+        if (!ok) return;
         await api(`/admin/api/auths/${encodeURIComponent(a.id)}`, { method: "DELETE" });
       }
       await refresh();
-    } catch (x) { alert("Action failed: " + x.message); }
+    } catch (x) { notify({ title: "Action failed", message: x.message }); }
   };
 
   const oauths = data ? data.auths.filter((a) => a.kind === "oauth") : [];
