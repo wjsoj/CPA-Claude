@@ -198,9 +198,6 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     const h24 = a.usage?.sum_24h;
     if (h24) totals.in24 += h24.input_tokens || 0;
   }
-  const tokenCount = data?.clients.length || 0;
-  const blockedTokens = data?.clients.filter((c) => c.blocked).length || 0;
-
   return (
     <div className="relative min-h-screen pb-16">
       <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-10 py-6 md:py-9 space-y-8 md:space-y-10">
@@ -286,7 +283,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         {/* METRICS STRIP */}
         <section className="stagger">
           <div className="hud-strip">
-            <div className="hud-strip-grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="hud-strip-grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
             <MetricCell
               label="Credentials"
               value={`${healthyCreds}`}
@@ -296,12 +293,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             />
             <MetricCell label="OAuth" value={fmtInt(oauths.length)} />
             <MetricCell label="API keys" value={fmtInt(apikeys.length)} />
-            <MetricCell
-              label="Tokens"
-              value={fmtInt(tokenCount)}
-              hint={blockedTokens > 0 ? `${blockedTokens} blocked` : undefined}
-            />
-            <MetricCell label="24h in" value={fmtInt(totals.in24)} unit="tok" />
+            <MetricCell label="Σ in" value={fmtInt(totals.in24)} unit="tok" />
             <MetricCell label="Σ out" value={fmtInt(totals.out)} unit="tok" />
             </div>
           </div>
@@ -351,7 +343,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
         {/* TAB PANELS */}
         <div className="stagger pt-2 md:pt-4">
-          {tab === "overview" && <OverviewPanel summary={data} refreshTick={refreshTick} />}
+          {tab === "overview" && <OverviewPanel summary={data} pricing={data?.pricing} refreshTick={refreshTick} />}
           {tab === "credentials" && (
             <CredentialsPanel
               summary={data}

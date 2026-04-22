@@ -14,7 +14,7 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "@/lib/api";
-import type { AuthRow, RequestsResp, Summary } from "@/lib/types";
+import type { AuthRow, Pricing, PricingEntry, RequestsResp, Summary } from "@/lib/types";
 import {
   ChartContainer,
   ChartLegend,
@@ -27,6 +27,7 @@ import { cn, fmtInt } from "@/lib/utils";
 
 interface Props {
   summary: Summary | null;
+  pricing?: Pricing;
   refreshTick: number;
 }
 
@@ -114,8 +115,9 @@ const healthConfig: ChartConfig = {
 
 const fmtDay = (d: string) => d.slice(5).replace("-", "/");
 
-export function OverviewPanel({ summary, refreshTick }: Props) {
+export function OverviewPanel({ summary, pricing, refreshTick }: Props) {
   const [reqData, setReqData] = useState<RequestsResp | null>(null);
+  const [lifetimeData, setLifetimeData] = useState<RequestsResp | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -126,10 +128,12 @@ export function OverviewPanel({ summary, refreshTick }: Props) {
       fromD.setDate(today.getDate() - (DAYS - 1));
       const from = `${fromD.getFullYear()}-${pad(fromD.getMonth() + 1)}-${pad(fromD.getDate())}`;
       const to = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
-      const d = await api<RequestsResp>(
-        `/admin/api/requests?limit=1&from=${from}&to=${to}`,
-      );
+      const [d, all] = await Promise.all([
+        api<RequestsResp>(`/admin/api/requests?limit=1&from=${from}&to=${to}`),
+        api<RequestsResp>(`/admin/api/requests?limit=1`),
+      ]);
       setReqData(d);
+      setLifetimeData(all);
     } catch {
       // ignore
     } finally {
@@ -139,6 +143,54 @@ export function OverviewPanel({ summary, refreshTick }: Props) {
   useEffect(() => {
     load();
   }, [load, refreshTick]);
+
+  const lookupPrice = (model: string): PricingEntry | null => {
+    if (!pricing) return null;
+    const m = (model || "").toLowerCase().trim();
+    const models = pricing.models || {};
+    if (m && models[m]) return models[m];
+    if (m) {
+      for (let i = m.lastIndexOf("-"); i > 0; i = m.lastIndexOf("-", i - 1)) {
+        const p = models[m.slice(0, i)];
+        if (p) return p;
+      }
+    }
+    return pricing.default || null;
+  };
+
+  const cacheStats = (() => {
+    if (!lifetimeData) return null;
+    const s = lifetimeData.summary;
+    const input = s.input_tokens || 0;
+    const cacheRead = s.cache_read_tokens || 0;
+    const cacheCreate = s.cache_create_tokens || 0;
+    const denom = input + cacheRead + cacheCreate;
+    const hitRate = denom > 0 ? cacheRead / denom : 0;
+    const actualCost = s.cost_usd || 0;
+    let noCacheCost = 0;
+    if (pricing) {
+      for (const [name, a] of Object.entries(lifetimeData.by_model)) {
+        const p = lookupPrice(name);
+        if (!p) continue;
+        const ain = a.input_tokens || 0;
+        const acr = a.cache_read_tokens || 0;
+        const acw = a.cache_create_tokens || 0;
+        const aout = a.output_tokens || 0;
+        noCacheCost += ((ain + acr + acw) * p.input_per_1m) / 1e6;
+        noCacheCost += (aout * p.output_per_1m) / 1e6;
+      }
+    }
+    return {
+      hitRate,
+      actualCost,
+      noCacheCost,
+      savings: Math.max(0, noCacheCost - actualCost),
+      input,
+      cacheRead,
+      cacheCreate,
+      hasPricing: !!pricing,
+    };
+  })();
 
   if (!summary) {
     return (
@@ -195,6 +247,56 @@ export function OverviewPanel({ summary, refreshTick }: Props) {
 
   return (
     <div className="space-y-8">
+      {/* Lifetime cache efficiency */}
+      <section>
+        <div className="flex items-baseline justify-between mb-3 gap-4">
+          <div>
+            <div className="eyebrow mb-1.5">All-time cache efficiency</div>
+            <h3 className="font-display text-2xl md:text-3xl tracking-tight">
+              Prompt <span className="text-muted-foreground">caching</span>
+            </h3>
+          </div>
+          <span className="eyebrow tabular opacity-70 hidden sm:inline">
+            since first request
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-5">
+          <CacheCard
+            label="Cache hit rate"
+            value={cacheStats ? (cacheStats.hitRate * 100).toFixed(2) + "%" : busy ? "…" : "—"}
+            ratio={cacheStats?.hitRate ?? 0}
+            foot={
+              cacheStats ? (
+                <span className="mono tabular">
+                  cacheR {fmtInt(cacheStats.cacheRead)} / (input {fmtInt(cacheStats.input)} + cacheR{" "}
+                  {fmtInt(cacheStats.cacheRead)} + cacheW {fmtInt(cacheStats.cacheCreate)})
+                </span>
+              ) : null
+            }
+          />
+          <CacheCard
+            label="Saved by caching"
+            value={
+              cacheStats && cacheStats.hasPricing
+                ? "$" + cacheStats.savings.toFixed(4)
+                : cacheStats && !cacheStats.hasPricing
+                  ? "pricing unavailable"
+                  : busy
+                    ? "…"
+                    : "—"
+            }
+            foot={
+              cacheStats && cacheStats.hasPricing ? (
+                <span className="mono tabular">
+                  no-cache ${cacheStats.noCacheCost.toFixed(4)} − actual $
+                  {cacheStats.actualCost.toFixed(4)}
+                </span>
+              ) : null
+            }
+          />
+        </div>
+      </section>
+
       {/* Token throughput — large feature chart */}
       <section>
         <div className="flex items-baseline justify-between mb-3 gap-4">
@@ -426,6 +528,43 @@ export function OverviewPanel({ summary, refreshTick }: Props) {
             : []}
         />
       </section>
+    </div>
+  );
+}
+
+function CacheCard({
+  label,
+  value,
+  foot,
+  ratio,
+}: {
+  label: string;
+  value: string;
+  foot?: React.ReactNode;
+  ratio?: number;
+}) {
+  const pct = typeof ratio === "number" ? Math.round(Math.max(0, Math.min(1, ratio)) * 100) : null;
+  const bar =
+    pct == null
+      ? "bg-muted-foreground/40"
+      : pct >= 60
+        ? "bg-emerald-500"
+        : pct >= 30
+          ? "bg-amber-500"
+          : "bg-slate-400";
+  return (
+    <div className="bg-card border border-border-strong rounded-md p-5">
+      <div className="eyebrow mb-1.5">{label}</div>
+      <div className="font-display text-3xl md:text-4xl tracking-tight tabular">{value}</div>
+      {pct != null && (
+        <div className="mt-3 h-1.5 w-full bg-muted rounded-full overflow-hidden">
+          <div
+            className={cn("h-full transition-all", bar)}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+      {foot && <div className="mt-2 text-[11px] text-muted-foreground">{foot}</div>}
     </div>
   );
 }

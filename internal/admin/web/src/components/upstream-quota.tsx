@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Gauge, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import type { AuthRow, UpstreamResponse, UpstreamUsage, UsageWindow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
-import { cn, fmtDate } from "@/lib/utils";
+import { cn, fmtCountdown, fmtLocalTime } from "@/lib/utils";
 
-interface PerAuthState {
+interface State {
   loading?: boolean;
   error?: string;
   data?: UpstreamResponse;
@@ -43,164 +44,204 @@ function pctAndColor(raw: number | undefined | null): { pct: number | null; colo
   return { pct, color };
 }
 
-export function UpstreamQuota({ auths }: { auths: AuthRow[] }) {
-  const [state, setState] = useState<Record<string, PerAuthState>>({});
-  const run = async (id: string) => {
-    setState((s) => ({ ...s, [id]: { ...s[id], loading: true, error: "" } }));
-    try {
-      const d = await api<UpstreamResponse>(
-        `/admin/api/auths/${encodeURIComponent(id)}/anthropic-usage`,
-        { method: "POST" },
-      );
-      setState((s) => ({ ...s, [id]: { loading: false, data: d, ts: Date.now() } }));
-    } catch (x: any) {
-      setState((s) => ({ ...s, [id]: { loading: false, error: x.message } }));
-    }
-  };
-
-  const oauths = auths.filter((a) => a.kind === "oauth");
-  if (oauths.length === 0) {
-    return <div className="p-6 text-base text-muted-foreground">No OAuth credentials to query.</div>;
+function renderProfile(profile: UpstreamResponse["profile"] | undefined) {
+  if (!profile || !profile.body) return null;
+  const p = profile.body;
+  let plan = "unknown";
+  if (p.account) {
+    if (p.account.has_claude_max) plan = "Max";
+    else if (p.account.has_claude_pro) plan = "Pro";
+    else if (p.account.has_claude_max === false && p.account.has_claude_pro === false) plan = "Free";
   }
+  const tier = p.organization?.rate_limit_tier;
+  const email = p.account?.email || p.account?.email_address || "";
+  return (
+    <div className="text-xs text-muted-foreground">
+      plan: <span className="text-foreground font-semibold">{plan}</span>
+      {tier && <> · tier {tier}</>}
+      {email && <> · {email}</>}
+    </div>
+  );
+}
 
-  const renderWindows = (usage: UpstreamUsage | undefined) => {
-    if (!usage || !usage.body) return null;
-    const body = usage.body;
-    const rows: [string, UsageWindow][] = WINDOW_KEYS.map(
-      ([k, label]) => [label, body[k]] as [string, UsageWindow | undefined],
-    ).filter(([, v]) => !!v && typeof v === "object" && (v.utilization != null || v.resets_at != null)) as [string, UsageWindow][];
-    const extra = body.extra_usage;
-    if (!rows.length && !extra) {
-      return (
-        <pre className="mono text-xs text-muted-foreground whitespace-pre-wrap">
-          {JSON.stringify(body, null, 2)}
-        </pre>
-      );
-    }
+function renderWindows(usage: UpstreamUsage | undefined, tick: number) {
+  if (!usage || !usage.body) return null;
+  const body = usage.body;
+  const rows: [string, UsageWindow][] = WINDOW_KEYS.map(
+    ([k, label]) => [label, body[k]] as [string, UsageWindow | undefined],
+  ).filter(([, v]) => !!v && typeof v === "object" && (v.utilization != null || v.resets_at != null)) as [
+    string,
+    UsageWindow,
+  ][];
+  const extra = body.extra_usage;
+  if (!rows.length && !extra) {
     return (
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-xs uppercase tracking-wide text-muted-foreground border-b">
-            <th className="py-2 pr-3 text-left font-medium">Window</th>
-            <th className="py-2 text-right font-medium">Used</th>
-            <th className="py-2 pl-2 font-medium">&nbsp;</th>
-            <th className="py-2 pl-3 text-right font-medium">Resets</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(([label, w]) => {
-            const { pct, color } = pctAndColor(w.utilization);
-            return (
-              <tr key={label} className="border-b">
-                <td className="py-2 pr-3">{label}</td>
-                <td className="py-2 mono text-right">{pct != null ? pct + "%" : "—"}</td>
-                <td className="py-2 pl-2 w-40">
-                  {pct != null && (
-                    <div className="h-1.5 bg-muted rounded overflow-hidden">
-                      <div className={cn("h-full", color)} style={{ width: `${Math.min(100, pct)}%` }} />
-                    </div>
-                  )}
-                </td>
-                <td className="py-2 pl-3 text-right">
-                  {w.resets_at ? (
-                    <span className="mono text-sm">{fmtDate(w.resets_at)}</span>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">—</span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-          {extra && extra.is_enabled && (
-            <tr className="border-b">
-              <td className="py-2 pr-3">extra credits</td>
-              <td className="py-2 mono text-right">
-                {(() => {
-                  const { pct } = pctAndColor(extra.utilization);
-                  return pct != null ? pct + "%" : "—";
-                })()}
+      <pre className="mono text-[11px] text-muted-foreground whitespace-pre-wrap">
+        {JSON.stringify(body, null, 2)}
+      </pre>
+    );
+  }
+  return (
+    <table className="w-full text-xs" key={tick}>
+      <thead>
+        <tr className="eyebrow text-muted-foreground border-b">
+          <th className="py-1.5 pr-2 text-left font-medium">Window</th>
+          <th className="py-1.5 text-right font-medium">Used</th>
+          <th className="py-1.5 pl-2 font-medium">&nbsp;</th>
+          <th className="py-1.5 pl-2 text-right font-medium">Resets in</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(([label, w]) => {
+          const { pct, color } = pctAndColor(w.utilization);
+          return (
+            <tr key={label} className="border-b last:border-b-0">
+              <td className="py-1.5 pr-2">{label}</td>
+              <td className="py-1.5 mono text-right tabular">{pct != null ? pct + "%" : "—"}</td>
+              <td className="py-1.5 pl-2 w-24">
+                {pct != null && (
+                  <div className="h-1 bg-muted rounded overflow-hidden">
+                    <div className={cn("h-full", color)} style={{ width: `${Math.min(100, pct)}%` }} />
+                  </div>
+                )}
               </td>
-              <td className="py-2 pl-2 w-40">
-                {(() => {
-                  const { pct, color } = pctAndColor(extra.utilization);
-                  return pct != null ? (
-                    <div className="h-1.5 bg-muted rounded overflow-hidden">
-                      <div className={cn("h-full", color)} style={{ width: `${Math.min(100, pct)}%` }} />
-                    </div>
-                  ) : null;
-                })()}
-              </td>
-              <td className="py-2 pl-3 text-right mono text-xs text-muted-foreground">
-                ${Number(extra.used_credits || 0).toFixed(2)} / $
-                {Number(extra.monthly_limit || 0).toFixed(0)}
+              <td className="py-1.5 pl-2 text-right">
+                {w.resets_at ? (
+                  <span
+                    className="mono tabular"
+                    title={new Date(w.resets_at).toLocaleString()}
+                  >
+                    <span>{fmtCountdown(w.resets_at)}</span>
+                    <span className="text-muted-foreground"> · {fmtLocalTime(w.resets_at)}</span>
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground">—</span>
+                )}
               </td>
             </tr>
-          )}
-        </tbody>
-      </table>
-    );
+          );
+        })}
+        {extra && extra.is_enabled && (
+          <tr>
+            <td className="py-1.5 pr-2">extra credits</td>
+            <td className="py-1.5 mono text-right tabular">
+              {(() => {
+                const { pct } = pctAndColor(extra.utilization);
+                return pct != null ? pct + "%" : "—";
+              })()}
+            </td>
+            <td className="py-1.5 pl-2 w-24">
+              {(() => {
+                const { pct, color } = pctAndColor(extra.utilization);
+                return pct != null ? (
+                  <div className="h-1 bg-muted rounded overflow-hidden">
+                    <div className={cn("h-full", color)} style={{ width: `${Math.min(100, pct)}%` }} />
+                  </div>
+                ) : null;
+              })()}
+            </td>
+            <td className="py-1.5 pl-2 text-right mono text-[11px] text-muted-foreground">
+              ${Number(extra.used_credits || 0).toFixed(2)} / $
+              {Number(extra.monthly_limit || 0).toFixed(0)}
+            </td>
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+}
+
+// Inline panel on an OAuth credential card that fetches upstream Anthropic
+// quota/plan info for that specific credential. Request is proxied through
+// the credential's configured proxy_url (enforced server-side).
+export function CardUpstreamQuota({ auth }: { auth: AuthRow }) {
+  const [open, setOpen] = useState(false);
+  const [st, setSt] = useState<State>({});
+  // Trigger a periodic re-render so the countdown stays fresh once data is shown.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!open || !st.data) return;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [open, st.data]);
+
+  const run = async () => {
+    setSt((s) => ({ ...s, loading: true, error: "" }));
+    try {
+      const d = await api<UpstreamResponse>(
+        `/admin/api/auths/${encodeURIComponent(auth.id)}/anthropic-usage`,
+        { method: "POST" },
+      );
+      setSt({ loading: false, data: d, ts: Date.now() });
+      setOpen(true);
+    } catch (x: any) {
+      setSt({ loading: false, error: x?.message || String(x) });
+      setOpen(true);
+    }
   };
 
-  const renderProfile = (profile: UpstreamResponse["profile"] | undefined) => {
-    if (!profile || !profile.body) return null;
-    const p = profile.body;
-    let plan = "unknown";
-    if (p.account) {
-      if (p.account.has_claude_max) plan = "Max";
-      else if (p.account.has_claude_pro) plan = "Pro";
-      else if (p.account.has_claude_max === false && p.account.has_claude_pro === false) plan = "Free";
+  const onClick = () => {
+    if (!st.data && !st.loading) {
+      void run();
+    } else {
+      setOpen((o) => !o);
     }
-    const tier = p.organization?.rate_limit_tier;
-    const email = p.account?.email || p.account?.email_address || "";
-    return (
-      <div className="text-sm text-muted-foreground">
-        plan: <span className="text-foreground font-semibold">{plan}</span>
-        {tier && ` · tier ${tier}`}
-        {email && ` · ${email}`}
-      </div>
-    );
   };
+
+  const usage = st.data?.usage;
+  const profile = st.data?.profile;
 
   return (
-    <div className="divide-y">
-      {oauths.map((a) => {
-        const st = state[a.id] || {};
-        const usage = st.data?.usage;
-        const profile = st.data?.profile;
-        return (
-          <div key={a.id} className="p-4 space-y-2">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <div>
-                <div className="font-medium">{a.label || a.id}</div>
-                <div className="mono text-xs text-muted-foreground">
-                  {a.id}
-                  {a.proxy_url && ` · via ${a.proxy_url}`}
-                </div>
-              </div>
-              <div className="flex items-center gap-2 flex-wrap">
-                {st.ts && (
-                  <span className="text-xs text-muted-foreground">
-                    fetched {fmtDate(new Date(st.ts).toISOString())}
-                  </span>
-                )}
-                <Button size="sm" variant="outline" disabled={st.loading} onClick={() => run(a.id)}>
-                  {st.loading ? "Fetching…" : st.ts ? "Refetch" : "Check upstream"}
-                </Button>
-              </div>
+    <div className="px-5 py-3 border-t border-border bg-muted/20">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="eyebrow">Upstream quota</div>
+        <div className="flex items-center gap-1.5">
+          {st.ts && (
+            <span className="text-[10px] text-muted-foreground mono">
+              as of {fmtLocalTime(new Date(st.ts).toISOString())}
+            </span>
+          )}
+          {st.data && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2"
+              onClick={(e) => {
+                e.stopPropagation();
+                void run();
+              }}
+              disabled={st.loading}
+              title="Refetch"
+            >
+              <RefreshCw className={cn("h-3 w-3", st.loading && "animate-spin")} />
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7"
+            onClick={onClick}
+            disabled={st.loading}
+          >
+            <Gauge className="h-3 w-3" />
+            {st.loading ? "Fetching…" : st.data ? (open ? "Hide" : "Show") : "Check quota"}
+          </Button>
+        </div>
+      </div>
+      {open && (
+        <div className="mt-2 space-y-2">
+          {st.error && (
+            <div className="text-xs text-destructive mono whitespace-pre-wrap">{st.error}</div>
+          )}
+          {usage && usage.error && (
+            <div className="text-xs text-destructive mono">
+              usage http {usage.status}: {usage.error}
             </div>
-            {st.error && (
-              <div className="text-sm text-destructive mono whitespace-pre-wrap">{st.error}</div>
-            )}
-            {usage && usage.error && (
-              <div className="text-sm text-destructive mono">
-                usage http {usage.status}: {usage.error}
-              </div>
-            )}
-            {renderProfile(profile)}
-            {renderWindows(usage)}
-          </div>
-        );
-      })}
+          )}
+          {renderProfile(profile)}
+          {renderWindows(usage, tick)}
+        </div>
+      )}
     </div>
   );
 }

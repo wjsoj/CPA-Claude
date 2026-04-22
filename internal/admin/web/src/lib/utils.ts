@@ -61,6 +61,42 @@ export function isoWeekRange(key: string | undefined | null): string {
   return `${fmt(start)} – ${fmt(end)}`;
 }
 
+// Precise countdown until an ISO timestamp. "2h 34m", "3d 4h 12m", or
+// "ready now" once it has elapsed. Intended for rate-limit reset timers
+// where the user wants to know how much longer to wait.
+export function fmtCountdown(s: string | Date | null | undefined): string {
+  if (!s) return "—";
+  const d = typeof s === "string" ? new Date(s) : s;
+  if (isNaN(d.getTime())) return "—";
+  const diff = d.getTime() - Date.now();
+  if (diff <= 0) return "ready now";
+  const totalSec = Math.floor(diff / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  const parts: string[] = [];
+  if (days) parts.push(`${days}d`);
+  if (days || hours) parts.push(`${hours}h`);
+  if (days || hours || mins) parts.push(`${mins}m`);
+  if (!days && !hours) parts.push(`${secs}s`);
+  return parts.join(" ");
+}
+
+export function fmtLocalTime(s: string | Date | null | undefined): string {
+  if (!s) return "";
+  const d = typeof s === "string" ? new Date(s) : s;
+  if (isNaN(d.getTime())) return "";
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    year: sameYear ? undefined : "numeric",
+  });
+}
+
 export function fmtDate(s: string | Date | null | undefined): string {
   if (!s) return "—";
   const d = typeof s === "string" ? new Date(s) : s;

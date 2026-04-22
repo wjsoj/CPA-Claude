@@ -1,5 +1,6 @@
 import type { AuthRow } from "@/lib/types";
 import { Sparkline } from "./sparkline";
+import { CardUpstreamQuota } from "./upstream-quota";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn, fmtDate, fmtInt } from "@/lib/utils";
@@ -220,6 +221,8 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
           </div>
         </div>
       )}
+
+      {a.kind === "oauth" && <CardUpstreamQuota auth={a} />}
 
       <footer className="px-5 py-3 flex gap-1.5 flex-wrap">
         {a.kind === "oauth" && (
