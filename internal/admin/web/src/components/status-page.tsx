@@ -340,8 +340,8 @@ export function StatusPage() {
                           <span className="opacity-60"> · {a.group}</span>
                         )}
                       </div>
-                      <div className="font-display text-base truncate" title={a.label}>
-                        {a.label || <span className="text-muted-foreground">(unnamed)</span>}
+                      <div className="font-display text-base truncate" title={a.label ? a.label.split("@")[0] : undefined}>
+                        {a.label ? a.label.split("@")[0] : <span className="text-muted-foreground">(unnamed)</span>}
                       </div>
                     </div>
                     <HealthBadge row={a} />
@@ -488,6 +488,16 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
   }
   const ratio = r.weekly_limit > 0 ? r.weekly_used_usd / r.weekly_limit : 0;
   const daily = r.daily || [];
+  const lastRecent = r.recent && r.recent.length > 0 ? r.recent[0] : undefined;
+  const lastAuthLabel = lastRecent?.auth_label
+    ? lastRecent.auth_label.split("@")[0]
+    : undefined;
+  const lastAuthKind =
+    lastRecent?.auth_kind === "oauth"
+      ? "OAuth"
+      : lastRecent?.auth_kind === "apikey"
+        ? "API key"
+        : undefined;
   return (
     <div
       className={cn(
@@ -504,6 +514,18 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
           <div className="font-display text-lg md:text-xl tracking-tight truncate">
             {r.name || <span className="text-muted-foreground">(unnamed)</span>}
           </div>
+          {lastAuthKind && (
+            <div className="mt-1 text-[11px] mono opacity-70 truncate">
+              last via{" "}
+              <span className="opacity-50">{lastAuthKind}</span>
+              {lastAuthLabel && (
+                <>
+                  {" · "}
+                  <span className="text-foreground">{lastAuthLabel}</span>
+                </>
+              )}
+            </div>
+          )}
         </div>
         {r.blocked ? (
           <Badge variant="destructive" className="gap-1">

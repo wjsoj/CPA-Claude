@@ -176,6 +176,8 @@ type statusRecentEntry struct {
 	Status     int       `json:"status"`
 	DurationMs int64     `json:"duration_ms"`
 	Stream     bool      `json:"stream,omitempty"`
+	AuthLabel  string    `json:"auth_label,omitempty"`
+	AuthKind   string    `json:"auth_kind,omitempty"`
 }
 
 const statusRecentLimit = 60
@@ -270,6 +272,12 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 			buckets[k] = b
 		}
 		cutoff24h := time.Now().Add(-24 * time.Hour)
+		// Display-time remap: the log stores a snapshot of the auth label at
+		// request time. When an auth is renamed, callers expect the UI to show
+		// the current label (the audit trail is keyed by AuthID). Resolve once
+		// per call and rewrite on emit; stale entries whose AuthID has been
+		// deleted fall back to the snapshot value.
+		labelIdx := h.pool.LabelIndex()
 		// No From bound — scan the whole archive. Limit is a safety cap;
 		// real deployments won't hit it.
 		res, err := requestlog.Query(requestlog.Filter{
@@ -301,6 +309,11 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 					d.Requests++
 				}
 				if len(b.recent) < statusRecentLimit {
+					label, kind := rec.AuthLabel, rec.AuthKind
+					if cur, ok := labelIdx[rec.AuthID]; ok {
+						label = cur.Label
+						kind = authKindString(cur.Kind)
+					}
 					b.recent = append(b.recent, statusRecentEntry{
 						TS:         rec.TS,
 						Model:      rec.Model,
@@ -312,6 +325,8 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 						Status:     rec.Status,
 						DurationMs: rec.DurationMs,
 						Stream:     rec.Stream,
+						AuthLabel:  label,
+						AuthKind:   kind,
 					})
 				}
 			}
@@ -413,10 +428,18 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 	// Query already sorts res.Entries newest-first. Filter by masked token,
 	// then paginate. Res.Entries may be truncated to f.Limit (100k) — which
 	// is a guard for absurd archives; real deployments stay well under it.
+	// Auth label/kind are remapped from current pool state so renames show
+	// up in the ledger; snapshots survive as fallback for deleted auths.
+	labelIdx := h.pool.LabelIndex()
 	all := make([]statusRecentEntry, 0, 128)
 	for _, rec := range res.Entries {
 		if rec.ClientToken != masked {
 			continue
+		}
+		label, kind := rec.AuthLabel, rec.AuthKind
+		if cur, ok := labelIdx[rec.AuthID]; ok {
+			label = cur.Label
+			kind = authKindString(cur.Kind)
 		}
 		all = append(all, statusRecentEntry{
 			TS:         rec.TS,
@@ -429,6 +452,8 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 			Status:     rec.Status,
 			DurationMs: rec.DurationMs,
 			Stream:     rec.Stream,
+			AuthLabel:  label,
+			AuthKind:   kind,
 		})
 	}
 	total := len(all)

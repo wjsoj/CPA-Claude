@@ -450,6 +450,16 @@ func maskToken(t string) string {
 	return t[:6] + "…" + t[len(t)-4:]
 }
 
+// authKindString returns the wire-format tag ("oauth" / "apikey") used in the
+// request log and admin API. Matches the string literal the proxy writes at
+// request time so display-remapped entries stay schema-compatible.
+func authKindString(k auth.Kind) string {
+	if k == auth.KindAPIKey {
+		return "apikey"
+	}
+	return "oauth"
+}
+
 // resolveClientTokenLabels turns raw client tokens into display strings for
 // the admin panel. Registered tokens are shown by human name; unknown ones
 // (open-mode IPs, stale entries) fall back to a masked form. Duplicates are
@@ -951,7 +961,46 @@ func (h *Handler) handleRequestsQuery(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.remapDisplayNames(res.Entries)
 	c.JSON(http.StatusOK, res)
+}
+
+// remapDisplayNames rewrites snapshot display fields on log entries to their
+// current values. The log is append-only and stores a point-in-time snapshot
+// of the client name and auth label; when either is renamed, the UI should
+// reflect the new name even for historical rows. Audit correlation stays
+// keyed by stable IDs (ClientToken masked form, AuthID), which the log also
+// carries untouched. If an ID no longer resolves (token / auth deleted), the
+// snapshot is left in place as the last known display value.
+func (h *Handler) remapDisplayNames(entries []requestlog.Record) {
+	if len(entries) == 0 {
+		return
+	}
+	nameByMasked := make(map[string]string)
+	if h.tokens != nil {
+		for _, t := range h.tokens.List() {
+			n := strings.TrimSpace(t.Name)
+			if n == "" {
+				continue
+			}
+			nameByMasked[maskToken(t.Token)] = n
+		}
+	}
+	var labelIdx map[string]auth.AuthLabelInfo
+	if h.pool != nil {
+		labelIdx = h.pool.LabelIndex()
+	}
+	for i := range entries {
+		if cur, ok := nameByMasked[entries[i].ClientToken]; ok {
+			entries[i].Client = cur
+		}
+		if entries[i].AuthID != "" && labelIdx != nil {
+			if cur, ok := labelIdx[entries[i].AuthID]; ok {
+				entries[i].AuthLabel = cur.Label
+				entries[i].AuthKind = authKindString(cur.Kind)
+			}
+		}
+	}
 }
 
 // parseDateBound accepts "YYYY-MM-DD" (start-of-day) or full RFC3339.

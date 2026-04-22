@@ -38,6 +38,8 @@ export interface StatusRecent {
   status: number;
   duration_ms: number;
   stream?: boolean;
+  auth_label?: string;
+  auth_kind?: string;
 }
 
 export interface StatusAgg {

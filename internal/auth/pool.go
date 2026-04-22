@@ -368,6 +368,30 @@ func (p *Pool) Status() []Status {
 	return out
 }
 
+// AuthLabelInfo carries the current display identity for an auth ID.
+// Returned by Pool.LabelIndex so callers can rewrite snapshot labels in
+// append-only records to the current value in a single pass.
+type AuthLabelInfo struct {
+	Label string
+	Kind  Kind
+}
+
+// LabelIndex returns authID → current (Label, Kind) for every live credential.
+// Used to overwrite snapshot labels in request-log entries so renames are
+// reflected in display-facing responses. One lock, one pass.
+func (p *Pool) LabelIndex() map[string]AuthLabelInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]AuthLabelInfo, len(p.oauths)+len(p.apikeys))
+	for _, a := range p.oauths {
+		out[a.ID] = AuthLabelInfo{Label: a.Label, Kind: a.Kind}
+	}
+	for _, a := range p.apikeys {
+		out[a.ID] = AuthLabelInfo{Label: a.Label, Kind: a.Kind}
+	}
+	return out
+}
+
 // MaskToken returns a display-safe form of a client token. Exposed so admin /
 // status consumers can render without leaking the full secret.
 func MaskToken(t string) string {
