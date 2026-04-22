@@ -36,18 +36,6 @@ type Config struct {
 	// Minutes of inactivity after which a client session releases its OAuth slot.
 	ActiveWindowMinutes int `yaml:"active_window_minutes"`
 
-	// Client-facing access tokens. Requests must present one in Authorization: Bearer.
-	// Empty list disables client auth (open proxy).
-	//
-	// YAML accepts either form:
-	//   access_tokens: ["sk-xxx", "sk-yyy"]
-	//   access_tokens:
-	//     - token: "sk-xxx"
-	//       name: "alice"
-	//       weekly_usd: 10.0
-	//     - "sk-yyy"
-	AccessTokens []AccessToken `yaml:"access_tokens"`
-
 	// Token required to access the management panel and APIs.
 	// Empty = panel disabled. Send as X-Admin-Token header (or Authorization: Bearer).
 	AdminToken string `yaml:"admin_token,omitempty"`
@@ -83,43 +71,6 @@ type Config struct {
 	// Pricing overrides (optional). Built-in defaults cover claude-haiku-4-5,
 	// claude-opus-4-6, and claude-sonnet-4-6.
 	Pricing pricing.Config `yaml:"pricing"`
-}
-
-// AccessToken is one entry in the access_tokens list. YAML accepts either a
-// bare string (only the token) or a mapping with token/name/weekly_usd.
-// Week boundary for weekly_usd is ISO week (Mon 00:00 UTC); 0 = unlimited.
-type AccessToken struct {
-	Token         string  `yaml:"token"`
-	Name          string  `yaml:"name,omitempty"`
-	WeeklyUSD     float64 `yaml:"weekly_usd,omitempty"`
-	MaxConcurrent int     `yaml:"max_concurrent,omitempty"` // 0 = use global default
-	// Group restricts this token to a named credential pool. Empty or
-	// "public" means the public pool (default).
-	Group string `yaml:"group,omitempty"`
-}
-
-// UnmarshalYAML accepts scalar (string) or map form for backward compat.
-func (a *AccessToken) UnmarshalYAML(node *yaml.Node) error {
-	if node.Kind == yaml.ScalarNode {
-		a.Token = node.Value
-		return nil
-	}
-	var shape struct {
-		Token         string  `yaml:"token"`
-		Name          string  `yaml:"name"`
-		WeeklyUSD     float64 `yaml:"weekly_usd"`
-		MaxConcurrent int     `yaml:"max_concurrent"`
-		Group         string  `yaml:"group"`
-	}
-	if err := node.Decode(&shape); err != nil {
-		return err
-	}
-	a.Token = shape.Token
-	a.Name = shape.Name
-	a.WeeklyUSD = shape.WeeklyUSD
-	a.MaxConcurrent = shape.MaxConcurrent
-	a.Group = shape.Group
-	return nil
 }
 
 func Load(path string) (*Config, error) {

@@ -3,12 +3,6 @@
 //
 // Tokens live in a single file, tokens.json, sitting next to state.json.
 // The admin panel owns full CRUD.
-//
-// For backward compatibility, Open() accepts any legacy access_tokens
-// parsed from config.yaml and any legacy "overrides" section in an older
-// tokens.json, merges them into the runtime list (runtime wins on
-// conflict), and reports migrated=true so the caller can scrub the
-// legacy config and rewrite tokens.json without the overrides section.
 package clienttoken
 
 import (
@@ -24,7 +18,6 @@ import (
 	"time"
 
 	"github.com/wjsoj/CPA-Claude/internal/auth"
-	"github.com/wjsoj/CPA-Claude/internal/config"
 )
 
 // Token is one client access token.
@@ -53,117 +46,36 @@ type Store struct {
 	path    string
 }
 
-// Open loads tokens.json (if it exists) and merges any legacy tokens that
-// only lived in config.yaml. Returns migrated=true when the on-disk state
-// changed relative to what was read — the caller should then strip the
-// legacy access_tokens block from config.yaml.
-//
-// path may be "" to disable persistence (tokens stay in memory only).
-func Open(path string, cfgTokens []config.AccessToken) (*Store, bool, error) {
+// Open loads tokens.json (if it exists). path may be "" to disable
+// persistence (tokens stay in memory only).
+func Open(path string) (*Store, error) {
 	s := &Store{path: path}
 
-	// Legacy overrides: an older tokens.json could carry {"overrides": [...]}.
-	// They applied on top of config-defined tokens. Re-apply them to the
-	// migrated runtime entries, then drop.
-	var legacyOverrides map[string]Token
-
-	if path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			var file struct {
-				Tokens    []Token `json:"tokens"`
-				Overrides []Token `json:"overrides"`
-			}
-			if err := json.Unmarshal(data, &file); err != nil {
-				return nil, false, fmt.Errorf("parse %s: %w", path, err)
-			}
-			for _, t := range file.Tokens {
-				t.Token = strings.TrimSpace(t.Token)
-				if t.Token == "" {
-					continue
-				}
-				s.tokens = append(s.tokens, t)
-			}
-			if len(file.Overrides) > 0 {
-				legacyOverrides = make(map[string]Token, len(file.Overrides))
-				for _, t := range file.Overrides {
-					t.Token = strings.TrimSpace(t.Token)
-					if t.Token == "" {
-						continue
-					}
-					legacyOverrides[t.Token] = t
-				}
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, false, err
+	if path == "" {
+		return s, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return s, nil
 		}
+		return nil, err
 	}
-
-	// Index existing runtime tokens for dedup against cfgTokens.
-	seen := make(map[string]int, len(s.tokens))
-	for i, t := range s.tokens {
-		seen[t.Token] = i
+	var file struct {
+		Tokens []Token `json:"tokens"`
 	}
-
-	migrated := false
-	now := time.Now()
-	for _, at := range cfgTokens {
-		tok := strings.TrimSpace(at.Token)
-		if tok == "" {
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	for _, t := range file.Tokens {
+		t.Token = strings.TrimSpace(t.Token)
+		if t.Token == "" {
 			continue
 		}
-		// Any access_tokens entry in config.yaml is a migration signal.
-		migrated = true
-		if _, ok := seen[tok]; ok {
-			// Already in tokens.json — runtime wins, skip.
-			continue
-		}
-		t := Token{
-			Token:         tok,
-			Name:          strings.TrimSpace(at.Name),
-			WeeklyUSD:     at.WeeklyUSD,
-			MaxConcurrent: at.MaxConcurrent,
-			Group:         auth.NormalizeGroup(at.Group),
-			CreatedAt:     now,
-		}
-		if o, ok := legacyOverrides[tok]; ok {
-			t.Name = o.Name
-			t.WeeklyUSD = o.WeeklyUSD
-			t.MaxConcurrent = o.MaxConcurrent
-			t.Group = auth.NormalizeGroup(o.Group)
-		}
+		t.Group = auth.NormalizeGroup(t.Group)
 		s.tokens = append(s.tokens, t)
-		seen[tok] = len(s.tokens) - 1
 	}
-
-	if len(legacyOverrides) > 0 {
-		migrated = true
-		// Apply any overrides whose target token already exists in runtime
-		// (covers the edge case where a user migrated by hand but left
-		// overrides behind).
-		for tok, o := range legacyOverrides {
-			if i, ok := seen[tok]; ok {
-				if o.Name != "" {
-					s.tokens[i].Name = o.Name
-				}
-				if o.WeeklyUSD != 0 {
-					s.tokens[i].WeeklyUSD = o.WeeklyUSD
-				}
-				if o.MaxConcurrent != 0 {
-					s.tokens[i].MaxConcurrent = o.MaxConcurrent
-				}
-				if g := auth.NormalizeGroup(o.Group); g != "" {
-					s.tokens[i].Group = g
-				}
-			}
-		}
-	}
-
-	if migrated {
-		if err := s.saveLocked(); err != nil {
-			return nil, false, fmt.Errorf("persist migrated tokens: %w", err)
-		}
-	}
-	return s, migrated, nil
+	return s, nil
 }
 
 // Lookup reports whether tok is a known client token.

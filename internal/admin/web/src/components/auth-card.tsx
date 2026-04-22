@@ -104,7 +104,15 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
         </AlertStrip>
       )}
       {recentCancel && (
-        <AlertStrip tone="muted" icon={<Ban className="h-3.5 w-3.5" />} label="Client canceled">
+        <AlertStrip
+          tone="muted"
+          icon={<Ban className="h-3.5 w-3.5" />}
+          label="Client canceled"
+          title={
+            fmtDate(a.last_client_cancel!) +
+            (a.client_cancel_reason ? " · " + a.client_cancel_reason : "")
+          }
+        >
           {fmtDate(a.last_client_cancel!)}
           {a.client_cancel_reason ? " · " + a.client_cancel_reason : ""}
         </AlertStrip>
@@ -319,13 +327,14 @@ function AlertStrip({
   return (
     <div
       className={cn(
-        "px-5 py-2.5 border-b flex items-center gap-3 text-xs",
+        "px-5 py-2.5 border-b flex items-center gap-3 text-xs cursor-help",
         tones[tone],
       )}
+      title={title}
     >
       <span className="shrink-0">{icon}</span>
       <span className="eyebrow !tracking-wider">{label}</span>
-      <span className="mono truncate text-[11px] opacity-90 ml-auto max-w-[60%] text-right" title={title}>
+      <span className="mono truncate text-[11px] opacity-90 ml-auto max-w-[60%] text-right">
         {children}
       </span>
     </div>

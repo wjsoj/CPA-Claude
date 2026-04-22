@@ -1,57 +1,67 @@
 # CPA-Claude — native Anthropic Claude proxy configuration.
+#
+# Every field below is optional; values shown are the built-in defaults
+# applied when the key is missing. Client access tokens are NOT in this
+# file — manage them from the admin panel (persisted in tokens.json
+# next to state_file).
 
+# Listen address.
 host: "0.0.0.0"
 port: 8317
+
+# trace | debug | info | warn | error
 log_level: info
 
-# Directory containing per-credential OAuth JSON files (one per Claude account).
-# Each file may declare its own proxy URL and max_concurrent.
+# Directory containing per-credential OAuth JSON files (one per Claude
+# account). Each file may declare its own proxy URL and max_concurrent.
+# Relative paths resolve against the config file's directory.
 auth_dir: ./auths
 
-# Persistent usage statistics. Survives restarts.
+# Persistent usage statistics and session state. Survives restarts.
+# tokens.json (client access tokens) is kept next to this file.
 state_file: ./state.json
 
-# Per-request JSONL log (one line per terminal request). Writes to
-# log_dir/requests-YYYY-MM-DD.jsonl, rotated daily, retained 90 days by
-# default. Omit log_dir to disable.
+# Per-request JSONL log. Writes to log_dir/requests-YYYY-MM-DD.jsonl,
+# rotated daily. Leave empty to disable.
 log_dir: ./logs
+
+# Days to retain rotated request logs. 0 = keep forever.
 log_retention_days: 90
 
 # Minutes of inactivity after which a client session releases its OAuth slot.
-active_window_minutes: 10
+active_window_minutes: 5
 
-# Use uTLS (Chrome fingerprint) for all upstream calls. Recommended, since
+# Default maximum concurrent in-flight requests per client token.
+# 0 = unlimited. Per-token overrides (set via admin panel) take precedence.
+client_max_concurrent: 3
+
+# Use uTLS (Chrome fingerprint) for all upstream calls. Recommended —
 # Anthropic edge fingerprint-checks non-browser clients.
 use_utls: true
 
-# Default upstream proxy. Applied to OAuth files that do not specify one.
-# Leave empty for direct connection.
+# Default upstream proxy. Applied to OAuth/API-key entries that do not
+# specify one of their own. Empty = direct connection.
 default_proxy_url: ""
 
 # Override Anthropic base URL (normally leave default).
 anthropic_base_url: "https://api.anthropic.com"
 
 # Admin panel token. If set, the SPA is served under admin_path and
-# protected by this token (X-Admin-Token header). Leave empty to disable
-# the panel.
+# protected by this token (X-Admin-Token header or Authorization: Bearer).
+# Leave empty to disable the panel.
 admin_token: "change-me-long-random-string"
 
 # URL prefix for the management panel. Changing this from the default
 # makes trivial /admin-style dictionary scans miss the panel. Must start
-# with "/" and not end with "/". Default: /mgmt-console.
-# admin_path: /mgmt-console
-
-# Client access tokens are managed exclusively via the admin panel and
-# persisted in tokens.json (next to state_file). The legacy access_tokens
-# block is no longer used; if it's still present at startup, entries are
-# migrated into tokens.json and stripped from this file automatically.
+# with "/" and not end with "/".
+admin_path: /mgmt-console
 
 # Pricing table. Built-in defaults already cover:
 #   claude-haiku-4-5-20251001, claude-haiku-4-5
 #   claude-opus-4-6
 #   claude-sonnet-4-6
-# You only need this block to override or add new models. Unlisted models
-# fall back to `default` (currently Sonnet pricing).
+# Only needed to override or add new models. Unlisted models fall back
+# to `default` (currently Sonnet pricing).
 # pricing:
 #   default:
 #     input_per_1m: 3.00
@@ -66,21 +76,24 @@ admin_token: "change-me-long-random-string"
 #       cache_create_per_1m: 2.5
 
 # API-key fallback pool. Used when every OAuth file is saturated or
-# unavailable. API keys have no concurrency limit.
-api_keys:
-  - key: "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    label: "primary"
-    proxy_url: ""
-
-  # Third-party relay vendor with quirky model names. base_url overrides the
-  # upstream host; model_map both routes (this key only handles the listed
-  # client model names) and rewrites the request body's "model" field before
-  # forwarding. Empty value = accept the model name without rewriting.
-  # Same fields are editable per-key from the admin panel.
+# unavailable. API keys have no concurrency limit. Same fields are
+# editable per-key from the admin panel.
+api_keys: []
+  # - key: "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  #   label: "primary"
+  #   proxy_url: ""
+  #   base_url: ""          # override upstream host (third-party relays)
+  #   group: ""             # public; or e.g. "premium" to scope this key
+  #   model_map: {}         # non-empty turns this key model-restricted
+  #
+  # Third-party relay example with quirky model names. model_map both
+  # routes (this key only handles the listed client model names) and
+  # rewrites the request body's "model" field before forwarding. Empty
+  # value = accept the model name without rewriting.
   # - key: "sk-relayvendor-xxx"
   #   label: "relay-A"
   #   base_url: "https://az.zlapi.pro"
-  #   group: ""                # public; or e.g. "premium"
+  #   group: ""
   #   model_map:
   #     claude-opus-4-6:    "[0.16]稳定喵/claude-opus-4-6"
   #     claude-sonnet-4-6:  "[0.1]高质量喵/claude-sonnet-4-6"
