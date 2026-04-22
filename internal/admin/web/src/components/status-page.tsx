@@ -11,16 +11,26 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  X,
   XCircle,
 } from "lucide-react";
 import {
   loadStatusOverview,
   loadSavedTokens,
+  queryStatusHistory,
   queryStatusTokens,
   saveSavedTokens,
   type StatusOverview,
+  type StatusRecent,
   type StatusTokenResult,
 } from "@/lib/status-api";
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -88,27 +98,27 @@ function Metric({
   accent?: boolean;
 }) {
   return (
-    <div className="relative px-4 py-4 md:px-5 md:py-5 bg-card overflow-hidden group">
-      <div className="eyebrow mb-2.5">{label}</div>
-      <div className="flex items-baseline gap-1.5">
-        <span
-          className={cn(
-            "font-mono text-2xl md:text-[2rem] leading-none font-medium tracking-tight tabular",
-            accent ? "text-primary" : "text-foreground",
-          )}
-        >
-          {value}
-        </span>
-        {unit && (
-          <span className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
-            {unit}
+    <div className={cn("metric-cell", accent && "metric-cell-accent")}>
+      <div className="relative z-10">
+        <div className="eyebrow mb-2.5">{label}</div>
+        <div className="flex items-baseline gap-1.5">
+          <span
+            className={cn(
+              "font-mono text-2xl md:text-[2rem] leading-none font-medium tracking-tight tabular",
+              accent ? "text-primary" : "text-foreground",
+            )}
+          >
+            {value}
           </span>
-        )}
+          {unit && (
+            <span className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
+              {unit}
+            </span>
+          )}
+        </div>
       </div>
-      <div
-        aria-hidden
-        className="absolute right-0 top-0 h-5 w-5 border-t border-r border-border-strong opacity-50 group-hover:border-primary group-hover:opacity-100 transition-all"
-      />
+      <span aria-hidden className="metric-cell-corner" />
+      <span aria-hidden className="metric-cell-spark" />
     </div>
   );
 }
@@ -267,21 +277,23 @@ export function StatusPage() {
 
         {/* OVERVIEW METRICS */}
         <section className="stagger">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 border border-border-strong rounded-md overflow-hidden [&>*]:border-r [&>*]:border-b [&>*]:border-border [&>*]:-mr-px [&>*]:-mb-px">
-            <Metric
-              label="Credentials"
-              value={ov ? ov.counts.healthy : "···"}
-              unit={ov ? `/ ${ov.counts.total}` : undefined}
-              accent
-            />
-            <Metric label="OAuth" value={ov ? fmtInt(ov.counts.oauth) : "···"} />
-            <Metric label="API keys" value={ov ? fmtInt(ov.counts.apikey) : "···"} />
-            <Metric label="Models" value={ov ? fmtInt(ov.counts.models) : "···"} />
-            <Metric label="24h req" value={ov ? fmtInt(ov.window_24h.requests) : "···"} />
-            <Metric
-              label="24h cost"
-              value={ov ? `$${ov.window_24h.cost_usd.toFixed(2)}` : "···"}
-            />
+          <div className="hud-strip">
+            <div className="hud-strip-grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
+              <Metric
+                label="Credentials"
+                value={ov ? ov.counts.healthy : "···"}
+                unit={ov ? `/ ${ov.counts.total}` : undefined}
+                accent
+              />
+              <Metric label="OAuth" value={ov ? fmtInt(ov.counts.oauth) : "···"} />
+              <Metric label="API keys" value={ov ? fmtInt(ov.counts.apikey) : "···"} />
+              <Metric label="Models" value={ov ? fmtInt(ov.counts.models) : "···"} />
+              <Metric label="24h req" value={ov ? fmtInt(ov.window_24h.requests) : "···"} />
+              <Metric
+                label="24h cost"
+                value={ov ? `$${ov.window_24h.cost_usd.toFixed(2)}` : "···"}
+              />
+            </div>
           </div>
         </section>
 
@@ -439,10 +451,12 @@ export function StatusPage() {
 
           {/* RESULT CARDS */}
           {results && results.length > 0 && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-5">
-              {results.map((r) => (
-                <TokenCard key={r.masked} r={r} />
-              ))}
+            <div className="space-y-4 md:space-y-5">
+              {tokens.map((t) => {
+                const r = byMasked.get(mask(t));
+                if (!r) return null;
+                return <TokenCard key={t} r={r} fullToken={t} />;
+              })}
             </div>
           )}
         </section>
@@ -456,7 +470,9 @@ export function StatusPage() {
   );
 }
 
-function TokenCard({ r }: { r: StatusTokenResult }) {
+const LEDGER_PAGE_SIZE = 50;
+
+function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }) {
   if (!r.found) {
     return (
       <div className="bg-card border border-destructive/40 rounded-md p-4 md:p-5">
@@ -471,8 +487,7 @@ function TokenCard({ r }: { r: StatusTokenResult }) {
     );
   }
   const ratio = r.weekly_limit > 0 ? r.weekly_used_usd / r.weekly_limit : 0;
-  const weeks = r.weekly || [];
-  const maxWeek = Math.max(1e-9, ...weeks.map((w) => w.cost.cost_usd));
+  const daily = r.daily || [];
   return (
     <div
       className={cn(
@@ -567,61 +582,65 @@ function TokenCard({ r }: { r: StatusTokenResult }) {
         </div>
       </div>
 
-      {/* Weekly sparkline */}
-      {weeks.length > 0 && (
+      {/* Daily cost line chart */}
+      {daily.length > 0 && daily.some((d) => d.cost_usd > 0) && (
         <div>
-          <div className="eyebrow mb-2 opacity-80">
-            Last {weeks.length} week(s)
+          <div className="flex items-baseline justify-between mb-2 gap-2">
+            <div className="eyebrow opacity-80">
+              Daily spend · last {daily.length}d
+            </div>
+            <span className="eyebrow tabular opacity-60">
+              ${daily.reduce((s, d) => s + d.cost_usd, 0).toFixed(4)} ·{" "}
+              {fmtInt(daily.reduce((s, d) => s + d.requests, 0))} req
+            </span>
           </div>
-          <div className="flex items-end gap-1 h-12">
-            {weeks.map((w) => (
-              <div
-                key={w.week}
-                className="flex-1 bg-primary/70 hover:bg-primary transition-colors rounded-sm min-h-[2px]"
-                style={{
-                  height: `${Math.max(4, Math.round((w.cost.cost_usd / maxWeek) * 100))}%`,
-                }}
-                title={`${w.week} · $${w.cost.cost_usd.toFixed(4)} · ${fmtInt(w.cost.requests)} req`}
+          <ChartContainer
+            config={dailyCostConfig}
+            className="h-[140px] md:h-[170px] aspect-auto w-full"
+          >
+            <LineChart data={daily} margin={{ top: 6, right: 6, left: -14, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis
+                dataKey="date"
+                tickLine={false}
+                axisLine={false}
+                tickMargin={6}
+                tickFormatter={(s: string) => s.slice(5).replace("-", "/")}
+                minTickGap={16}
               />
-            ))}
-          </div>
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                width={44}
+                tickFormatter={(v: number) => (v < 1 ? `$${v.toFixed(2)}` : `$${Math.round(v)}`)}
+              />
+              <ChartTooltip
+                cursor={{ stroke: "var(--border)" }}
+                content={
+                  <ChartTooltipContent
+                    indicator="dot"
+                    labelFormatter={(v) => `Day · ${v}`}
+                    valueFormatter={(v) =>
+                      typeof v === "number" ? `$${v.toFixed(4)}` : String(v)
+                    }
+                  />
+                }
+              />
+              <Line
+                type="monotone"
+                dataKey="cost_usd"
+                stroke="var(--color-cost_usd)"
+                strokeWidth={2.5}
+                dot={{ r: 3, strokeWidth: 0, fill: "var(--color-cost_usd)" }}
+                activeDot={{ r: 6 }}
+              />
+            </LineChart>
+          </ChartContainer>
         </div>
       )}
 
-      {/* Recent requests */}
-      {r.recent && r.recent.length > 0 && (
-        <div>
-          <div className="eyebrow mb-2 opacity-80">
-            Recent · last {r.recent.length}
-          </div>
-          <div className="max-h-56 overflow-y-auto -mr-1 pr-1 space-y-1">
-            {r.recent.map((e, i) => (
-              <div
-                key={i}
-                className="flex items-baseline justify-between gap-2 text-xs mono py-1 border-b border-border/50 last:border-0"
-              >
-                <span className="truncate opacity-70 flex-1" title={e.model}>
-                  {e.model || "—"}
-                </span>
-                <span
-                  className={cn(
-                    "tabular shrink-0",
-                    e.status >= 400 && "text-destructive",
-                  )}
-                >
-                  {e.status}
-                </span>
-                <span className="tabular shrink-0 w-16 text-right">
-                  ${e.cost_usd.toFixed(4)}
-                </span>
-                <span className="tabular shrink-0 opacity-60 w-24 text-right">
-                  {fmtDate(e.ts)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Detailed request ledger with pagination */}
+      <TokenLedger r={r} fullToken={fullToken} />
 
       {r.last_used && !(r.recent && r.recent.length > 0) && (
         <div className="text-xs mono opacity-60">
@@ -631,3 +650,305 @@ function TokenCard({ r }: { r: StatusTokenResult }) {
     </div>
   );
 }
+
+function TokenLedger({ r, fullToken }: { r: StatusTokenResult; fullToken: string }) {
+  // initialEntries = the first page that came back with the overview /query.
+  // As soon as the user pages beyond 0, switch to /history results.
+  const initialEntries = r.recent || [];
+  const initialTotal = r.recent_total || initialEntries.length;
+  const [offset, setOffset] = useState(0);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [filterActive, setFilterActive] = useState(false);
+  const [page, setPage] = useState<{
+    entries: StatusRecent[];
+    total: number;
+    limit: number;
+    loading: boolean;
+    err: string;
+  }>({
+    entries: initialEntries,
+    total: initialTotal,
+    limit: LEDGER_PAGE_SIZE,
+    loading: false,
+    err: "",
+  });
+
+  const fetchPage = useCallback(
+    async (nextOffset: number, f: string, t: string) => {
+      setPage((p) => ({ ...p, loading: true, err: "" }));
+      try {
+        const d = await queryStatusHistory({
+          token: fullToken,
+          offset: nextOffset,
+          limit: LEDGER_PAGE_SIZE,
+          from: f || undefined,
+          to: t || undefined,
+        });
+        setPage({
+          entries: d.entries,
+          total: d.total,
+          limit: d.limit || LEDGER_PAGE_SIZE,
+          loading: false,
+          err: "",
+        });
+      } catch (e: any) {
+        setPage((p) => ({ ...p, loading: false, err: e.message || String(e) }));
+      }
+    },
+    [fullToken],
+  );
+
+  // Initial page came free from /query; subsequent navigation calls /history.
+  const goto = (nextOffset: number) => {
+    setOffset(nextOffset);
+    if (nextOffset === 0 && !filterActive) {
+      setPage({
+        entries: initialEntries,
+        total: initialTotal,
+        limit: LEDGER_PAGE_SIZE,
+        loading: false,
+        err: "",
+      });
+    } else {
+      fetchPage(nextOffset, from, to);
+    }
+  };
+
+  const applyFilter = () => {
+    setFilterActive(Boolean(from || to));
+    setOffset(0);
+    fetchPage(0, from, to);
+  };
+  const clearFilter = () => {
+    setFrom("");
+    setTo("");
+    setFilterActive(false);
+    setOffset(0);
+    setPage({
+      entries: initialEntries,
+      total: initialTotal,
+      limit: LEDGER_PAGE_SIZE,
+      loading: false,
+      err: "",
+    });
+  };
+
+  const entries = page.entries;
+  const total = page.total;
+  const limit = page.limit;
+  const pageIdx = Math.floor(offset / limit);
+  const pageCount = Math.max(1, Math.ceil(total / limit));
+  const firstVisible = total === 0 ? 0 : offset + 1;
+  const lastVisible = Math.min(offset + entries.length, total);
+
+  if (!entries.length && !filterActive && total === 0) {
+    return (
+      <div className="text-xs mono opacity-60 border border-dashed border-border rounded-sm py-4 text-center">
+        no requests yet
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-end justify-between gap-2 mb-2">
+        <div className="flex items-baseline gap-3">
+          <div className="eyebrow opacity-80">Request ledger</div>
+          <span className="eyebrow tabular opacity-60">
+            {firstVisible}–{lastVisible} / {fmtInt(total)} · newest first · UTC
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <Input
+            type="date"
+            value={from}
+            onChange={(e) => setFrom(e.currentTarget.value)}
+            className="h-7 w-[140px] text-[11px] mono"
+            title="From (UTC, inclusive)"
+          />
+          <span className="mono opacity-60">→</span>
+          <Input
+            type="date"
+            value={to}
+            onChange={(e) => setTo(e.currentTarget.value)}
+            className="h-7 w-[140px] text-[11px] mono"
+            title="To (UTC, inclusive)"
+          />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 px-2.5 text-[11px] gap-1"
+            onClick={applyFilter}
+            disabled={page.loading}
+          >
+            {page.loading ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+            Apply
+          </Button>
+          {(filterActive || from || to) && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 px-2 text-[11px]"
+              onClick={clearFilter}
+            >
+              <X className="h-3 w-3" />
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {page.err && (
+        <div className="mb-2 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive mono">
+          {page.err}
+        </div>
+      )}
+
+      <div className="border border-border rounded-sm overflow-hidden">
+        <div className={cn("max-h-[520px] overflow-y-auto overflow-x-auto", page.loading && "opacity-60")}>
+          <table className="w-full text-xs mono">
+            <thead className="bg-muted/40 border-b border-border sticky top-0 z-10">
+              <tr className="eyebrow text-right">
+                <th className="py-2 px-3 font-[inherit] text-left">Time</th>
+                <th className="py-2 px-3 font-[inherit] text-left">Model</th>
+                <th className="py-2 px-3 font-[inherit]">In</th>
+                <th className="py-2 px-3 font-[inherit]">Out</th>
+                <th className="py-2 px-3 font-[inherit]">Cache R</th>
+                <th className="py-2 px-3 font-[inherit]">Cache W</th>
+                <th className="py-2 px-3 font-[inherit]">Cost</th>
+                <th className="py-2 px-3 font-[inherit]">Status</th>
+                <th className="py-2 px-3 font-[inherit]">Dur</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="py-6 text-center text-muted-foreground">
+                    {page.loading ? "loading…" : "no entries in this range"}
+                  </td>
+                </tr>
+              ) : (
+                entries.map((e, i) => (
+                  <tr
+                    key={i}
+                    className={cn(
+                      "border-b border-border/50 last:border-0 hover:bg-muted/40 transition-colors",
+                      e.status >= 400 && "bg-destructive/5",
+                    )}
+                  >
+                    <td className="py-1.5 px-3 tabular opacity-80 whitespace-nowrap">
+                      {fmtTableTime(e.ts)}
+                    </td>
+                    <td className="py-1.5 px-3 whitespace-nowrap" title={e.model}>
+                      {e.model || "—"}
+                    </td>
+                    <td className="py-1.5 px-3 tabular text-right">{fmtInt(e.input_tokens)}</td>
+                    <td className="py-1.5 px-3 tabular text-right">{fmtInt(e.output_tokens)}</td>
+                    <td className="py-1.5 px-3 tabular text-right opacity-80">
+                      {fmtInt(e.cache_read_tokens)}
+                    </td>
+                    <td className="py-1.5 px-3 tabular text-right opacity-80">
+                      {fmtInt(e.cache_create_tokens)}
+                    </td>
+                    <td className="py-1.5 px-3 tabular text-right font-medium">
+                      ${e.cost_usd.toFixed(4)}
+                    </td>
+                    <td
+                      className={cn(
+                        "py-1.5 px-3 tabular text-right",
+                        e.status >= 400 && "text-destructive font-medium",
+                      )}
+                    >
+                      {e.status}
+                    </td>
+                    <td className="py-1.5 px-3 tabular text-right opacity-80 whitespace-nowrap">
+                      {fmtDur(e.duration_ms)}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Pager */}
+      {pageCount > 1 && (
+        <div className="mt-2 flex items-center justify-between gap-2 text-xs mono">
+          <span className="opacity-60 tabular">
+            page {pageIdx + 1} / {pageCount}
+          </span>
+          <div className="flex items-center gap-1">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 px-2"
+              onClick={() => goto(0)}
+              disabled={pageIdx === 0 || page.loading}
+              title="First"
+            >
+              «
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 px-2"
+              onClick={() => goto(Math.max(0, offset - limit))}
+              disabled={pageIdx === 0 || page.loading}
+            >
+              ‹ Prev
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 px-2"
+              onClick={() => goto(offset + limit)}
+              disabled={pageIdx + 1 >= pageCount || page.loading}
+            >
+              Next ›
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 px-2"
+              onClick={() => goto((pageCount - 1) * limit)}
+              disabled={pageIdx + 1 >= pageCount || page.loading}
+              title="Last"
+            >
+              »
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// "YYYY-MM-DD HH:MM:SS" in local time, compact.
+function fmtTableTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function fmtDur(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+const dailyCostConfig: ChartConfig = {
+  cost_usd: {
+    label: "Cost (USD)",
+    theme: {
+      light: "oklch(0.45 0.16 155)",
+      dark: "oklch(0.8 0.16 145)",
+    },
+  },
+};

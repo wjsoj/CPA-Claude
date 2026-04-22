@@ -52,30 +52,30 @@ function MetricCell({
   accent?: boolean;
 }) {
   return (
-    <div className="relative px-4 py-4 md:px-5 md:py-5 bg-card overflow-hidden group">
-      <div className="eyebrow mb-2.5">{label}</div>
-      <div className="flex items-baseline gap-1.5">
-        <span
-          className={cn(
-            "font-mono text-2xl md:text-[2rem] leading-none font-medium tracking-tight tabular",
-            accent ? "text-primary" : "text-foreground",
-          )}
-        >
-          {value}
-        </span>
-        {unit && (
-          <span className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
-            {unit}
+    <div className={cn("metric-cell", accent && "metric-cell-accent")}>
+      <div className="relative z-10">
+        <div className="eyebrow mb-2.5">{label}</div>
+        <div className="flex items-baseline gap-1.5">
+          <span
+            className={cn(
+              "font-mono text-2xl md:text-[2rem] leading-none font-medium tracking-tight tabular",
+              accent ? "text-primary" : "text-foreground",
+            )}
+          >
+            {value}
           </span>
+          {unit && (
+            <span className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
+              {unit}
+            </span>
+          )}
+        </div>
+        {hint && (
+          <div className="mt-2 text-[11px] font-mono text-muted-foreground tabular">{hint}</div>
         )}
       </div>
-      {hint && (
-        <div className="mt-2 text-[11px] font-mono text-muted-foreground tabular">{hint}</div>
-      )}
-      <div
-        aria-hidden
-        className="absolute right-0 top-0 h-5 w-5 border-t border-r border-border-strong opacity-50 group-hover:border-primary group-hover:opacity-100 transition-all"
-      />
+      <span aria-hidden className="metric-cell-corner" />
+      <span aria-hidden className="metric-cell-spark" />
     </div>
   );
 }
@@ -285,7 +285,8 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
         {/* METRICS STRIP */}
         <section className="stagger">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 border border-border-strong rounded-md overflow-hidden [&>*]:border-r [&>*]:border-b [&>*]:border-border [&>*]:-mr-px [&>*]:-mb-px">
+          <div className="hud-strip">
+            <div className="hud-strip-grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
             <MetricCell
               label="Credentials"
               value={`${healthyCreds}`}
@@ -302,6 +303,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             />
             <MetricCell label="24h in" value={fmtInt(totals.in24)} unit="tok" />
             <MetricCell label="Σ out" value={fmtInt(totals.out)} unit="tok" />
+            </div>
           </div>
         </section>
 

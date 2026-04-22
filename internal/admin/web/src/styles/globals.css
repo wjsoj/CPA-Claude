@@ -12,9 +12,8 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  /* Warm paper & ink — not neutral slate, not pure white. Readers see
-     warmth before they notice it. */
-  --background: oklch(0.985 0.006 85);
+  /* Near-white, with the faintest cool tint so it's never pure #fff. */
+  --background: oklch(0.985 0.006 160);
   --foreground: oklch(0.16 0.018 60);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.16 0.018 60);
@@ -49,9 +48,8 @@
 }
 
 .dark {
-  /* Warm near-black (not pure #000) + bone foreground. Hints of blue so
-     it doesn't feel tungsten-warm. */
-  --background: oklch(0.145 0.012 260);
+  /* Deep teal-navy — visibly colored, never pure black. */
+  --background: oklch(0.17 0.03 215);
   --foreground: oklch(0.94 0.008 85);
   --card: oklch(0.19 0.013 260);
   --card-foreground: oklch(0.94 0.008 85);
@@ -135,13 +133,62 @@
     /* Bricolage Grotesque smaller opsize for body copy */
     font-variation-settings: "opsz" 14, "wdth" 100;
     min-height: 100vh;
-    /* Paper grain in light, starfield dust in dark. 1% alpha radial
-       so it's a felt texture, never a decoration. */
-    background-image:
-      radial-gradient(at 0% 0%, color-mix(in oklch, var(--primary) 6%, transparent) 0px, transparent 50%),
-      radial-gradient(at 100% 100%, color-mix(in oklch, var(--info) 5%, transparent) 0px, transparent 55%);
+    position: relative;
     background-attachment: fixed;
   }
+
+  /* Dark mode: multi-source aurora mesh (green + teal + cyan + warm) */
+  html.dark body {
+    background-image:
+      radial-gradient(ellipse 70% 50% at 8% 0%, color-mix(in oklch, var(--primary) 22%, transparent) 0%, transparent 60%),
+      radial-gradient(ellipse 55% 45% at 95% 5%, color-mix(in oklch, var(--info) 16%, transparent) 0%, transparent 65%),
+      radial-gradient(ellipse 65% 50% at 0% 100%, color-mix(in oklch, var(--info) 14%, transparent) 0%, transparent 70%),
+      radial-gradient(ellipse 60% 45% at 100% 95%, color-mix(in oklch, var(--warning) 10%, transparent) 0%, transparent 70%),
+      conic-gradient(from 210deg at 50% 40%,
+        color-mix(in oklch, var(--primary) 4%, transparent),
+        color-mix(in oklch, var(--info) 4%, transparent),
+        transparent 60%,
+        color-mix(in oklch, var(--primary) 3%, transparent));
+  }
+
+  /* Light mode: near-white canvas with soft green-only mesh + gentle
+     concentric ripples, like a freshly laid glass plane. */
+  html:not(.dark) body {
+    background-image:
+      radial-gradient(ellipse 55% 45% at 10% 5%, color-mix(in oklch, var(--success) 14%, transparent) 0%, transparent 65%),
+      radial-gradient(ellipse 45% 40% at 95% 10%, color-mix(in oklch, var(--success) 8%, transparent) 0%, transparent 70%),
+      radial-gradient(ellipse 60% 45% at 15% 100%, color-mix(in oklch, var(--success) 10%, transparent) 0%, transparent 70%),
+      radial-gradient(ellipse 50% 40% at 95% 95%, color-mix(in oklch, var(--success) 7%, transparent) 0%, transparent 70%),
+      /* Ripple: three soft concentric rings fading outward */
+      radial-gradient(circle at 50% 110%,
+        transparent 0%, transparent 30%,
+        color-mix(in oklch, var(--success) 5%, transparent) 32%,
+        transparent 34%, transparent 45%,
+        color-mix(in oklch, var(--success) 4%, transparent) 47%,
+        transparent 49%, transparent 60%,
+        color-mix(in oklch, var(--success) 3%, transparent) 62%,
+        transparent 64%);
+  }
+
+  /* Fine 48px grid overlay — held under the content via z-index:0, the
+     whole app renders above it. Uses linear-gradients on a pseudo to
+     keep body's existing radials clean. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background-image:
+      linear-gradient(to right, color-mix(in oklch, var(--border) 35%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklch, var(--border) 35%, transparent) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(ellipse 90% 90% at 50% 35%, black 20%, transparent 90%);
+    -webkit-mask-image: radial-gradient(ellipse 90% 90% at 50% 35%, black 20%, transparent 90%);
+    opacity: 0.55;
+  }
+  html.dark body::before { opacity: 0.35; }
+  body > * { position: relative; z-index: 1; }
 
   /* Legacy .mono class used across components — rebind to var. */
   .mono {
@@ -236,6 +283,142 @@
   }
   .no-scrollbar::-webkit-scrollbar {
     display: none;
+  }
+
+  /* HUD-style metric strip: a single gradient-backed panel with a glowing
+     rim. Children sit over a 1px gap → that gap is the "divider", which
+     lets per-cell hover glows draw over neighbours without getting
+     clipped by borders. */
+  .hud-strip {
+    position: relative;
+    isolation: isolate;
+    border-radius: 0.4rem;
+    background:
+      linear-gradient(135deg,
+        color-mix(in oklch, var(--primary) 12%, var(--card)) 0%,
+        var(--card) 40%,
+        color-mix(in oklch, var(--info) 8%, var(--card)) 100%);
+    padding: 1px;
+  }
+  .hud-strip::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: 0.45rem;
+    padding: 1px;
+    background: linear-gradient(135deg,
+      color-mix(in oklch, var(--primary) 55%, transparent),
+      color-mix(in oklch, var(--border-strong) 80%, transparent) 35%,
+      color-mix(in oklch, var(--border-strong) 60%, transparent) 65%,
+      color-mix(in oklch, var(--info) 50%, transparent));
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    pointer-events: none;
+    z-index: -1;
+  }
+  .hud-strip::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 60% 140% at 0% 0%,
+        color-mix(in oklch, var(--primary) 18%, transparent) 0%, transparent 55%),
+      radial-gradient(ellipse 60% 140% at 100% 100%,
+        color-mix(in oklch, var(--info) 14%, transparent) 0%, transparent 55%);
+    border-radius: inherit;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .hud-strip-grid {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: 1px;
+    background: color-mix(in oklch, var(--border-strong) 60%, transparent);
+    border-radius: calc(0.4rem - 1px);
+    overflow: hidden;
+  }
+
+  .metric-cell {
+    position: relative;
+    padding: 1rem 1.1rem;
+    background: var(--card);
+    transition: background 220ms ease, transform 220ms ease;
+    overflow: hidden;
+  }
+  @media (min-width: 768px) {
+    .metric-cell { padding: 1.25rem 1.35rem; }
+  }
+  .metric-cell::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 120% 100% at 50% 120%,
+        color-mix(in oklch, var(--primary) 22%, transparent) 0%,
+        transparent 70%);
+    opacity: 0;
+    transition: opacity 260ms ease;
+    pointer-events: none;
+  }
+  .metric-cell:hover::before { opacity: 1; }
+  .metric-cell:hover {
+    background: color-mix(in oklch, var(--primary) 4%, var(--card));
+  }
+  .metric-cell-corner {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 22px;
+    height: 22px;
+    border-top: 1px solid color-mix(in oklch, var(--border-strong) 80%, transparent);
+    border-right: 1px solid color-mix(in oklch, var(--border-strong) 80%, transparent);
+    transition: border-color 220ms ease, box-shadow 260ms ease;
+  }
+  .metric-cell:hover .metric-cell-corner {
+    border-color: var(--primary);
+    box-shadow: 0 0 12px 0 color-mix(in oklch, var(--primary) 55%, transparent);
+  }
+  .metric-cell-spark {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: linear-gradient(90deg,
+      transparent,
+      color-mix(in oklch, var(--primary) 65%, transparent),
+      transparent);
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 340ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .metric-cell:hover .metric-cell-spark { transform: scaleX(1); }
+
+  /* Scanline halo for accented metric (the "healthy/total" KPI) */
+  .metric-cell-accent .metric-cell-corner {
+    border-color: color-mix(in oklch, var(--primary) 70%, transparent);
+  }
+  .metric-cell-accent::after {
+    content: "";
+    position: absolute;
+    left: -20%;
+    right: -20%;
+    top: -40%;
+    bottom: -40%;
+    background:
+      conic-gradient(from 120deg at 50% 50%,
+        transparent 0deg, color-mix(in oklch, var(--primary) 12%, transparent) 60deg,
+        transparent 180deg);
+    opacity: 0.35;
+    pointer-events: none;
+    animation: cellSweep 12s linear infinite;
+  }
+  @keyframes cellSweep {
+    to { transform: rotate(360deg); }
   }
 
   /* Glow pulse for healthy status dots */

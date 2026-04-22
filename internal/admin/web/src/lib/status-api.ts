@@ -60,6 +60,12 @@ export interface StatusWeekEntry {
   };
 }
 
+export interface StatusDailyEntry {
+  date: string;
+  cost_usd: number;
+  requests: number;
+}
+
 export interface StatusTokenResult {
   masked: string;
   found: boolean;
@@ -70,9 +76,18 @@ export interface StatusTokenResult {
   blocked: boolean;
   total: { tokens: Record<string, number>; cost_usd: number; requests: number };
   weekly?: StatusWeekEntry[];
+  daily?: StatusDailyEntry[];
   last_used?: string;
   recent?: StatusRecent[];
+  recent_total?: number;
   window_24h?: StatusAgg;
+}
+
+export interface StatusHistoryResp {
+  entries: StatusRecent[];
+  total: number;
+  offset: number;
+  limit: number;
 }
 
 async function fetchJSON<T>(
@@ -106,6 +121,19 @@ export function queryStatusTokens(
   return fetchJSON<{ results: StatusTokenResult[] }>("/status/api/query", {
     method: "POST",
     body: JSON.stringify({ tokens }),
+  });
+}
+
+export function queryStatusHistory(args: {
+  token: string;
+  offset?: number;
+  limit?: number;
+  from?: string;
+  to?: string;
+}): Promise<StatusHistoryResp> {
+  return fetchJSON<StatusHistoryResp>("/status/api/history", {
+    method: "POST",
+    body: JSON.stringify(args),
   });
 }
 
