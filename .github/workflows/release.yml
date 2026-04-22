@@ -21,7 +21,14 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      - name: Verify build
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build admin SPA
+        run: make web
+
+      - name: Verify Go build
         run: go build ./...
 
       - name: Run GoReleaser

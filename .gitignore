@@ -2,5 +2,13 @@
 /state.json
 /state.json.tmp
 /config.yaml
+/tokens.json
+/logs/
 /bin/
 *.log
+*.bak
+
+# Admin SPA build output & deps
+/internal/admin/web/node_modules/
+/internal/admin/web/dist/*
+!/internal/admin/web/dist/.gitkeep

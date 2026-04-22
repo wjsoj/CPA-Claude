@@ -1,0 +1,250 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Rounded-geometric tech pairing. Bricolage Grotesque Variable carries
+   display + body duty via its opsize axis (small = compact, large =
+   distinctive terminals). JetBrains Mono Variable handles data. */
+@import "@fontsource-variable/bricolage-grotesque";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* Class-based dark mode. `.dark` on <html> flips the palette; system
+   preference is honored on first load by a tiny bootstrap in index.html. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  /* Warm paper & ink — not neutral slate, not pure white. Readers see
+     warmth before they notice it. */
+  --background: oklch(0.985 0.006 85);
+  --foreground: oklch(0.16 0.018 60);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.16 0.018 60);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.16 0.018 60);
+  /* Accent: petrol / deep teal — quiet in light mode, assertive on hover */
+  --primary: oklch(0.38 0.09 215);
+  --primary-foreground: oklch(0.99 0.005 85);
+  --secondary: oklch(0.96 0.008 85);
+  --secondary-foreground: oklch(0.22 0.018 60);
+  --muted: oklch(0.955 0.008 85);
+  --muted-foreground: oklch(0.48 0.012 70);
+  --accent: oklch(0.94 0.012 85);
+  --accent-foreground: oklch(0.22 0.018 60);
+  --destructive: oklch(0.52 0.18 25);
+  --destructive-foreground: oklch(0.99 0.005 85);
+  --success: oklch(0.58 0.12 150);
+  --warning: oklch(0.68 0.15 70);
+  --info: oklch(0.48 0.1 215);
+  --border: oklch(0.9 0.008 85);
+  --border-strong: oklch(0.82 0.01 85);
+  --input: oklch(0.9 0.008 85);
+  --ring: oklch(0.38 0.09 215);
+  --radius: 0.5rem;
+
+  /* Display uses larger opsize (distinctive terminals, more character).
+     Body uses smaller opsize (cleaner at 14–16px). Tailwind applies
+     font-variation-settings via class. */
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.dark {
+  /* Warm near-black (not pure #000) + bone foreground. Hints of blue so
+     it doesn't feel tungsten-warm. */
+  --background: oklch(0.145 0.012 260);
+  --foreground: oklch(0.94 0.008 85);
+  --card: oklch(0.19 0.013 260);
+  --card-foreground: oklch(0.94 0.008 85);
+  --popover: oklch(0.2 0.013 260);
+  --popover-foreground: oklch(0.94 0.008 85);
+  /* Phosphor green accent — terminal-era echo */
+  --primary: oklch(0.82 0.16 145);
+  --primary-foreground: oklch(0.14 0.012 260);
+  --secondary: oklch(0.25 0.014 260);
+  --secondary-foreground: oklch(0.94 0.008 85);
+  --muted: oklch(0.24 0.014 260);
+  --muted-foreground: oklch(0.62 0.012 80);
+  --accent: oklch(0.27 0.02 260);
+  --accent-foreground: oklch(0.94 0.008 85);
+  --destructive: oklch(0.68 0.2 25);
+  --destructive-foreground: oklch(0.14 0.012 260);
+  --success: oklch(0.78 0.16 145);
+  --warning: oklch(0.82 0.16 72);
+  --info: oklch(0.72 0.14 215);
+  --border: oklch(0.26 0.015 260);
+  --border-strong: oklch(0.36 0.02 260);
+  --input: oklch(0.3 0.015 260);
+  --ring: oklch(0.82 0.16 145);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-xs: calc(var(--radius) - 4px);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 6px);
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    color-scheme: light;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "ss01", "cv11";
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    /* Bricolage Grotesque smaller opsize for body copy */
+    font-variation-settings: "opsz" 14, "wdth" 100;
+    min-height: 100vh;
+    /* Paper grain in light, starfield dust in dark. 1% alpha radial
+       so it's a felt texture, never a decoration. */
+    background-image:
+      radial-gradient(at 0% 0%, color-mix(in oklch, var(--primary) 6%, transparent) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, color-mix(in oklch, var(--info) 5%, transparent) 0px, transparent 55%);
+    background-attachment: fixed;
+  }
+
+  /* Legacy .mono class used across components — rebind to var. */
+  .mono {
+    font-family: var(--font-mono);
+    font-feature-settings: "zero", "ss01", "cv01";
+  }
+
+  h1, h2, h3, h4 {
+    letter-spacing: -0.025em;
+    /* Larger opsize for display type — more rounded, distinctive terminals */
+    font-variation-settings: "opsz" 96, "wdth" 100;
+  }
+
+  /* Utility class for display-weight Bricolage — use on font-display spans */
+  .font-display {
+    font-family: var(--font-display);
+    font-variation-settings: "opsz" 96, "wdth" 100;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  /* Hairline 1px dividers regardless of DPR. */
+  hr, .hairline {
+    border-color: var(--color-border);
+  }
+
+  ::selection {
+    background-color: color-mix(in oklch, var(--primary) 25%, transparent);
+  }
+
+  /* A subtle uppercase eyebrow label used for section headers */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-muted-foreground);
+    font-feature-settings: "tnum", "zero";
+  }
+
+  /* Tabular numbers for any mono block by default */
+  .mono, .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum", "zero";
+  }
+
+  /* Distinctive animated entry for page sections */
+  .stagger > * {
+    animation: riseIn 0.6s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  }
+  .stagger > *:nth-child(1) { animation-delay: 0.02s; }
+  .stagger > *:nth-child(2) { animation-delay: 0.08s; }
+  .stagger > *:nth-child(3) { animation-delay: 0.14s; }
+  .stagger > *:nth-child(4) { animation-delay: 0.2s; }
+  .stagger > *:nth-child(5) { animation-delay: 0.26s; }
+  .stagger > *:nth-child(6) { animation-delay: 0.32s; }
+  .stagger > *:nth-child(7) { animation-delay: 0.38s; }
+  .stagger > *:nth-child(8) { animation-delay: 0.44s; }
+
+  @keyframes riseIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Scrollbar refinement — visible but unobtrusive */
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: color-mix(in oklch, var(--muted-foreground) 25%, transparent);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklch, var(--muted-foreground) 45%, transparent);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Glow pulse for healthy status dots */
+  .status-pulse {
+    box-shadow: 0 0 0 0 currentColor;
+    animation: statusPulse 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes statusPulse {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, currentColor 45%, transparent); }
+    50%      { box-shadow: 0 0 0 5px color-mix(in oklch, currentColor 0%,  transparent); }
+  }
+}

@@ -30,7 +30,15 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 )
 
-//go:embed web
+//go:generate bash -c "cd web && bun install --frozen-lockfile && bun run build"
+
+// The SPA under web/ is built with Vite; the bundled output in web/dist is
+// what actually ships in the binary. The directory is committed with a
+// .gitkeep so this embed works even on a clean checkout where `make web`
+// hasn't run yet — the panel will 404 until the build step populates
+// web/dist.
+//
+//go:embed all:web/dist
 var webFS embed.FS
 
 type Handler struct {
@@ -98,8 +106,9 @@ func (h *Handler) Register(r *gin.Engine) {
 	log.Infof("admin: panel enabled at %s/", base)
 
 	// Serve the SPA (no auth required for the HTML shell itself; the API
-	// underneath is protected).
-	sub, err := fs.Sub(webFS, "web")
+	// underneath is protected). dist/ is the Vite build output; before
+	// `make web` has run it contains only .gitkeep and the panel 404s.
+	sub, err := fs.Sub(webFS, "web/dist")
 	if err != nil {
 		log.Errorf("admin: failed to scope embed FS: %v", err)
 		return
@@ -132,36 +141,29 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/tokens/:token/inherit", h.handleInheritToken)
 	}
 
-	// Static SPA under a dedicated sub-path so no wildcard conflicts with
-	// <base>/api/*. Bare <base>/ and any <base>/app/* fall through to
-	// index.html.
+	// Static SPA. Vite emits a single entry HTML plus hashed chunks under
+	// /assets/. We expose /assets/* explicitly so the catch-all never eats
+	// requests destined for /api or unrelated Gin routes registered at a
+	// different prefix.
 	r.GET(base, func(c *gin.Context) {
 		c.Redirect(http.StatusFound, base+"/")
 	})
 	r.GET(base+"/", func(c *gin.Context) {
 		serveAsset(c, sub, "index.html")
 	})
-	r.GET(base+"/app/*filepath", func(c *gin.Context) {
+	r.GET(base+"/assets/*filepath", func(c *gin.Context) {
 		p := strings.TrimPrefix(c.Param("filepath"), "/")
-		if p == "" || strings.HasSuffix(p, "/") {
-			// SPA client-side route → serve shell HTML.
-			serveAsset(c, sub, "index.html")
+		if p == "" {
+			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
-		// Real ES-module files live under web/app/. serveAsset falls
-		// back to index.html on miss, which matches SPA routing.
-		serveAsset(c, sub, "app/"+p)
+		serveAsset(c, sub, "assets/"+p)
 	})
 }
 
 func serveAsset(c *gin.Context, root fs.FS, name string) {
 	f, err := root.Open(name)
 	if err != nil {
-		// Fall back to index.html so client-side routing works.
-		if name != "index.html" {
-			serveAsset(c, root, "index.html")
-			return
-		}
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -186,6 +188,16 @@ func guessMime(name string) string {
 		return "application/json"
 	case ".svg":
 		return "image/svg+xml"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	case ".png":
+		return "image/png"
+	case ".ico":
+		return "image/x-icon"
+	case ".map":
+		return "application/json"
 	default:
 		return "application/octet-stream"
 	}

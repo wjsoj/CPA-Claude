@@ -48,11 +48,15 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 		v1.POST("/messages/count_tokens", s.handleCountTokens)
 	}
 
-	// Status endpoint (also behind client auth if tokens configured).
-	engine.GET("/status", s.clientAuth(), s.handleStatus)
+	// Legacy JSON status endpoint (behind client auth). The bare /status
+	// path now serves the public status SPA — keep this as a monitoring
+	// hook for scripts that were consuming the JSON shape.
+	engine.GET("/status.json", s.clientAuth(), s.handleStatus)
 
-	// Admin SPA + API.
-	admin.New(cfg, pool, store, cat, tokens).Register(engine)
+	// Admin SPA + API, and the public /status/ page.
+	ah := admin.New(cfg, pool, store, cat, tokens)
+	ah.RegisterStatus(engine) // always; no admin_token required
+	ah.Register(engine)       // no-op unless admin_token is set
 
 	s.http = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),

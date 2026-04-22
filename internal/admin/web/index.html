@@ -1,38 +1,26 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CPA-Claude Admin</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    /* Tailwind's CDN default darkMode is "media" — tracks the OS / browser
-       preference automatically; no JS toggle needed. color-scheme hints
-       native form controls to render dark too. */
-    html { color-scheme: light dark; }
-    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
-    [hidden] { display: none !important; }
-    .badge { display:inline-block; padding:2px 8px; border-radius:9999px; font-size:11px; font-weight:600; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; }
-    details>summary { list-style:none; cursor:pointer; }
-    details>summary::-webkit-details-marker { display:none; }
-  </style>
-
-  <!-- Pin preact/htm to a single URL each so every component file imports
-       the same module instance. Two Preact instances in the same page
-       silently break hooks. -->
-  <script type="importmap">
-  {
-    "imports": {
-      "preact": "https://esm.sh/preact@10.24.3",
-      "preact/hooks": "https://esm.sh/preact@10.24.3/hooks",
-      "htm": "https://esm.sh/htm@3.1.1"
-    }
-  }
-  </script>
-</head>
-<body class="bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-100">
-  <div id="app"></div>
-  <script type="module" src="app/main.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>CPA-Claude / Console</title>
+    <script>
+      // Inline theme bootstrap — runs before React to avoid FOUC.
+      (function () {
+        try {
+          var s = localStorage.getItem("cpa.admin.theme");
+          var isDark =
+            s === "dark" ||
+            (!s && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (isDark) document.documentElement.classList.add("dark");
+          document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+        } catch (_) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>
