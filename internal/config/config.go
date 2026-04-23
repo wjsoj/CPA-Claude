@@ -100,7 +100,7 @@ func applyDefaults(c *Config, path string) {
 		c.ActiveWindowMinutes = 5
 	}
 	if c.ClientMaxConcurrent == 0 {
-		c.ClientMaxConcurrent = 3
+		c.ClientMaxConcurrent = 15
 	}
 	if c.AnthropicBaseURL == "" {
 		c.AnthropicBaseURL = "https://api.anthropic.com"

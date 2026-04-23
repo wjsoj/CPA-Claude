@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -55,9 +56,25 @@ type Handler struct {
 	lifetimeMu    sync.Mutex
 	lifetimeCache map[string]requestlog.Aggregate
 	lifetimeAt    time.Time
+
+	// Cache for /api/requests responses. The overview dashboard polls
+	// every 10s and issues two filter shapes (14-day window + all-time);
+	// without caching each poll re-scans every rotated log file. A short
+	// TTL keeps the UI live while collapsing N concurrent pollers into
+	// one disk pass. Invalidation is by TTL only — the log is append-only
+	// so minor staleness is acceptable.
+	reqCacheMu sync.Mutex
+	reqCache   map[string]reqCacheEntry
+}
+
+type reqCacheEntry struct {
+	at     time.Time
+	result *requestlog.Result
 }
 
 const lifetimeCacheTTL = 15 * time.Second
+const requestsCacheTTL = 15 * time.Second
+const requestsCacheMax = 16
 
 func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.Catalog, tokens *clienttoken.Store) *Handler {
 	return &Handler{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens}
@@ -132,6 +149,7 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/auths/:id/anthropic-usage", h.handleAnthropicUsage)
 		api.GET("/requests", h.handleRequestsQuery)
 		api.GET("/requests/clients", h.handleRequestsClients)
+		api.GET("/requests/hourly", h.handleRequestsHourly)
 		api.GET("/tokens", h.handleListTokens)
 		api.POST("/tokens", h.handleCreateToken)
 		api.GET("/orphan-tokens", h.handleListOrphanTokens)
@@ -914,17 +932,49 @@ func (h *Handler) handleAnthropicUsage(c *gin.Context) {
 
 // ---- request log query ----
 
-func (h *Handler) handleRequestsClients(c *gin.Context) {
+func (h *Handler) handleRequestsHourly(c *gin.Context) {
 	if h.cfg.LogDir == "" {
-		c.JSON(http.StatusOK, gin.H{"clients": []string{}})
+		c.JSON(http.StatusOK, gin.H{"buckets": []requestlog.HourBucket{}})
 		return
 	}
-	cls, err := requestlog.Clients(h.cfg.LogDir)
+	hours := 24
+	if v := strings.TrimSpace(c.Query("hours")); v != "" {
+		fmt.Sscanf(v, "%d", &hours)
+		if hours < 1 {
+			hours = 1
+		}
+		if hours > 168 {
+			hours = 168
+		}
+	}
+	buckets, err := requestlog.AggregateHourly(h.cfg.LogDir, hours)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"clients": cls})
+	c.JSON(http.StatusOK, gin.H{"buckets": buckets})
+}
+
+func (h *Handler) handleRequestsClients(c *gin.Context) {
+	// Return current token names (no log scan). Orphan names that exist only
+	// in historical logs are not offered as filter options; the user can
+	// still type the old name into the URL if needed.
+	seen := make(map[string]struct{})
+	if h.tokens != nil {
+		for _, t := range h.tokens.List() {
+			n := strings.TrimSpace(t.Name)
+			if n == "" {
+				continue
+			}
+			seen[n] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	c.JSON(http.StatusOK, gin.H{"clients": out})
 }
 
 func (h *Handler) handleRequestsQuery(c *gin.Context) {
@@ -933,9 +983,27 @@ func (h *Handler) handleRequestsQuery(c *gin.Context) {
 		return
 	}
 	f := requestlog.Filter{
-		Dir:    h.cfg.LogDir,
-		Client: strings.TrimSpace(c.Query("client")),
-		Model:  strings.TrimSpace(c.Query("model")),
+		Dir:   h.cfg.LogDir,
+		Model: strings.TrimSpace(c.Query("model")),
+	}
+	// Resolve the `client` query param (a current token name) to the masked
+	// token so the filter matches across renames. Fall back to string match
+	// on Record.Client for orphan names that no longer resolve.
+	if name := strings.TrimSpace(c.Query("client")); name != "" {
+		var matched string
+		if h.tokens != nil {
+			for _, t := range h.tokens.List() {
+				if strings.EqualFold(strings.TrimSpace(t.Name), name) {
+					matched = maskToken(t.Token)
+					break
+				}
+			}
+		}
+		if matched != "" {
+			f.ClientToken = matched
+		} else {
+			f.Client = name
+		}
 	}
 	if v := strings.TrimSpace(c.Query("from")); v != "" {
 		if t, err := parseDateBound(v, false); err == nil {
@@ -956,13 +1024,109 @@ func (h *Handler) handleRequestsQuery(c *gin.Context) {
 	if v := c.Query("status"); v != "" {
 		fmt.Sscanf(v, "%d", &f.Status)
 	}
-	res, err := requestlog.Query(f)
+	res, err := h.cachedQuery(f)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	h.remapDisplayNames(res.Entries)
+	res.ByClient = h.remapByClient(res.ByClient)
 	c.JSON(http.StatusOK, res)
+}
+
+// cachedQuery returns a fresh shallow copy of the cached Result for the
+// given filter. Aggregate maps (ByClient/ByModel/ByDay) and Summary are
+// shared with the cache — callers must replace them, not mutate in place.
+// Entries are cloned into a fresh slice so downstream remapDisplayNames
+// can mutate without data-racing concurrent readers.
+func (h *Handler) cachedQuery(f requestlog.Filter) (*requestlog.Result, error) {
+	key := reqCacheKey(f)
+	h.reqCacheMu.Lock()
+	if ent, ok := h.reqCache[key]; ok && time.Since(ent.at) < requestsCacheTTL {
+		clone := cloneResult(ent.result)
+		h.reqCacheMu.Unlock()
+		return clone, nil
+	}
+	h.reqCacheMu.Unlock()
+
+	res, err := requestlog.Query(f)
+	if err != nil {
+		return nil, err
+	}
+
+	h.reqCacheMu.Lock()
+	if h.reqCache == nil || len(h.reqCache) >= requestsCacheMax {
+		// Coarse eviction: when the cache grows unbounded (e.g., varied
+		// user filters from the Requests tab), drop everything. The hot
+		// Overview polls refill the two common keys within 10s.
+		h.reqCache = make(map[string]reqCacheEntry, 4)
+	}
+	h.reqCache[key] = reqCacheEntry{at: time.Now(), result: res}
+	clone := cloneResult(res)
+	h.reqCacheMu.Unlock()
+	return clone, nil
+}
+
+func reqCacheKey(f requestlog.Filter) string {
+	// Dir is constant per process; skip it to keep keys short.
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%d|%d|%d",
+		f.From.UTC().Format(time.RFC3339),
+		f.To.UTC().Format(time.RFC3339),
+		f.Client, f.ClientToken, f.Model,
+		f.Status, f.Limit, f.Offset,
+	)
+}
+
+func cloneResult(r *requestlog.Result) *requestlog.Result {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	if r.Entries != nil {
+		out.Entries = append([]requestlog.Record(nil), r.Entries...)
+	}
+	return &out
+}
+
+// remapByClient rewrites ByClient map keys from masked ClientToken to the
+// current display name. Unknown masks (deleted tokens) fall back to the
+// mask itself so they remain visible as orphan rows. Merges buckets if two
+// masks ever map to the same name (shouldn't happen in practice).
+func (h *Handler) remapByClient(in map[string]requestlog.Aggregate) map[string]requestlog.Aggregate {
+	if len(in) == 0 {
+		return in
+	}
+	nameByMasked := make(map[string]string)
+	if h.tokens != nil {
+		for _, t := range h.tokens.List() {
+			n := strings.TrimSpace(t.Name)
+			if n == "" {
+				continue
+			}
+			nameByMasked[maskToken(t.Token)] = n
+		}
+	}
+	out := make(map[string]requestlog.Aggregate, len(in))
+	for k, v := range in {
+		display := k
+		if cur, ok := nameByMasked[k]; ok {
+			display = cur
+		}
+		if existing, ok := out[display]; ok {
+			existing.Count += v.Count
+			existing.InputTokens += v.InputTokens
+			existing.OutputTokens += v.OutputTokens
+			existing.CacheReadTokens += v.CacheReadTokens
+			existing.CacheCreateTokens += v.CacheCreateTokens
+			existing.CostUSD += v.CostUSD
+			existing.Errors += v.Errors
+			existing.TotalDurationMs += v.TotalDurationMs
+			out[display] = existing
+		} else {
+			out[display] = v
+		}
+	}
+	return out
 }
 
 // remapDisplayNames rewrites snapshot display fields on log entries to their

@@ -39,9 +39,173 @@ func (h *Handler) RegisterStatus(r *gin.Engine) {
 		serveAsset(c, sub, "assets/"+p)
 	})
 	r.GET("/status/api/overview", h.handleStatusOverview)
+	r.GET("/status/api/dashboard", h.handleStatusDashboard)
 	r.POST("/status/api/query", h.handleStatusQuery)
 	r.POST("/status/api/history", h.handleStatusHistory)
 	log.Info("admin: public /status/ page enabled")
+}
+
+// Pseudonyms used to anonymize client-token identities on the public
+// dashboard. The pool is intentionally wider than the 26 cryptographic
+// standbys to reduce collision rate for small- to mid-scale deployments.
+var statusPseudonyms = []string{
+	"Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi",
+	"Ivan", "Judy", "Mallory", "Niaj", "Olivia", "Peggy", "Quentin", "Rupert",
+	"Sybil", "Trent", "Uma", "Victor", "Walter", "Xena", "Yvonne", "Zach",
+	"Aria", "Blake", "Cleo", "Dax", "Enzo", "Faye", "Gus", "Hana",
+	"Iris", "Jace", "Kai", "Luna", "Milo", "Nova", "Otto", "Pia",
+	"Quill", "Remy", "Sage", "Tess", "Ulli", "Vera", "Wren", "Yuri",
+}
+
+// pseudonymFor maps a stable identifier (masked client token, or a
+// display name when the backend has already remapped) to a deterministic
+// pseudonym. Collisions are possible for > ~50 distinct identities; we
+// accept them — the goal is public obfuscation, not perfect pseudonymity.
+// Implementation is FNV-1a 32-bit, inlined to avoid an import just for
+// this one call site.
+func pseudonymFor(key string) string {
+	if key == "" {
+		return "Anon"
+	}
+	var h uint32 = 2166136261
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return statusPseudonyms[int(h)%len(statusPseudonyms)]
+}
+
+// anonymizeByClient rebuilds the ByClient aggregate map with pseudonymous
+// keys. Real display names/masks are never sent over the public wire.
+// Collisions merge buckets (Count/Tokens/Cost summed) — acceptable because
+// the dashboard shows totals, not identity.
+func anonymizeByClient(in map[string]requestlog.Aggregate) map[string]requestlog.Aggregate {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string]requestlog.Aggregate, len(in))
+	for k, v := range in {
+		name := pseudonymFor(k)
+		if existing, ok := out[name]; ok {
+			existing.Count += v.Count
+			existing.InputTokens += v.InputTokens
+			existing.OutputTokens += v.OutputTokens
+			existing.CacheReadTokens += v.CacheReadTokens
+			existing.CacheCreateTokens += v.CacheCreateTokens
+			existing.CostUSD += v.CostUSD
+			existing.Errors += v.Errors
+			existing.TotalDurationMs += v.TotalDurationMs
+			out[name] = existing
+		} else {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// ---- /status/api/dashboard ----
+
+type statusDashboardPool struct {
+	Total     int `json:"total"`
+	Healthy   int `json:"healthy"`
+	Quota     int `json:"quota"`
+	Unhealthy int `json:"unhealthy"`
+	Disabled  int `json:"disabled"`
+	OAuth     int `json:"oauth"`
+	APIKey    int `json:"apikey"`
+}
+
+type statusDashboardRequests struct {
+	Summary  requestlog.Aggregate            `json:"summary"`
+	ByClient map[string]requestlog.Aggregate `json:"by_client"`
+	ByModel  map[string]requestlog.Aggregate `json:"by_model"`
+	ByDay    map[string]requestlog.Aggregate `json:"by_day"`
+}
+
+type statusDashboard struct {
+	Pool        statusDashboardPool     `json:"pool"`
+	Pricing     any                     `json:"pricing,omitempty"`
+	Requests14d statusDashboardRequests `json:"requests_14d"`
+	RequestsAll statusDashboardRequests `json:"requests_all"`
+	Hourly24h   []requestlog.HourBucket `json:"hourly_24h"`
+}
+
+func (h *Handler) handleStatusDashboard(c *gin.Context) {
+	var out statusDashboard
+
+	// Pool health — same counts the /overview endpoint produces, inlined
+	// here so the SPA only needs one round trip for the dashboard tab.
+	for _, st := range h.pool.Status() {
+		out.Pool.Total++
+		if st.Auth.Kind == auth.KindAPIKey {
+			out.Pool.APIKey++
+		} else {
+			out.Pool.OAuth++
+		}
+		live := h.pool.FindByID(st.Auth.ID)
+		var healthy, hardFail bool
+		if live != nil {
+			healthy, hardFail, _, _ = live.HealthSnapshot()
+		}
+		quota := !st.Auth.QuotaExceededAt.IsZero()
+		switch {
+		case st.Auth.Disabled:
+			out.Pool.Disabled++
+		case quota:
+			out.Pool.Quota++
+		case hardFail || !healthy:
+			out.Pool.Unhealthy++
+		default:
+			out.Pool.Healthy++
+		}
+	}
+
+	// Pricing (public — same shape admin /summary exposes).
+	if h.pricing != nil {
+		out.Pricing = gin.H{
+			"default": h.pricing.Default(),
+			"models":  h.pricing.Models(),
+		}
+	}
+
+	if h.cfg.LogDir == "" {
+		c.JSON(http.StatusOK, out)
+		return
+	}
+
+	// 14-day window.
+	today := time.Now().UTC()
+	from14 := today.AddDate(0, 0, -13).Truncate(24 * time.Hour)
+	to := today.Add(24 * time.Hour)
+	if res, err := h.cachedQuery(requestlog.Filter{
+		Dir: h.cfg.LogDir, From: from14, To: to, Limit: 1,
+	}); err == nil {
+		out.Requests14d = statusDashboardRequests{
+			Summary:  res.Summary,
+			ByClient: anonymizeByClient(res.ByClient),
+			ByModel:  res.ByModel,
+			ByDay:    res.ByDay,
+		}
+	}
+
+	// All-time — needed for cache stats, tokens/$ and weekly/monthly charts.
+	if res, err := h.cachedQuery(requestlog.Filter{
+		Dir: h.cfg.LogDir, Limit: 1,
+	}); err == nil {
+		out.RequestsAll = statusDashboardRequests{
+			Summary:  res.Summary,
+			ByClient: anonymizeByClient(res.ByClient),
+			ByModel:  res.ByModel,
+			ByDay:    res.ByDay,
+		}
+	}
+
+	// 24h hourly.
+	if buckets, err := requestlog.AggregateHourly(h.cfg.LogDir, 24); err == nil {
+		out.Hourly24h = buckets
+	}
+
+	c.JSON(http.StatusOK, out)
 }
 
 // ---- /status/api/overview ----

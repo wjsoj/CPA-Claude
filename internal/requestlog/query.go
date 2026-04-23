@@ -38,14 +38,15 @@ func (a *Aggregate) add(r Record) {
 // Filter selects records. Empty string fields and zero time fields mean
 // "no constraint".
 type Filter struct {
-	Dir    string
-	From   time.Time // inclusive; compared at day granularity (UTC)
-	To     time.Time // inclusive
-	Client string    // exact match on Record.Client
-	Model  string    // exact match on Record.Model
-	Status int       // 0 = any; otherwise exact match
-	Limit  int       // page size for Entries (0 = 50)
-	Offset int       // number of newest-first records to skip before Limit
+	Dir         string
+	From        time.Time // inclusive; compared at day granularity (UTC)
+	To          time.Time // inclusive
+	ClientToken string    // exact match on Record.ClientToken (masked); preferred over Client
+	Client      string    // exact match on Record.Client (fallback for orphans)
+	Model       string    // exact match on Record.Model
+	Status      int       // 0 = any; otherwise exact match
+	Limit       int       // page size for Entries (0 = 50)
+	Offset      int       // number of newest-first records to skip before Limit
 }
 
 // Result is the Query return value.
@@ -56,6 +57,84 @@ type Result struct {
 	ByDay    map[string]Aggregate `json:"by_day"`
 	Entries  []Record             `json:"entries"`
 	Scanned  int64                `json:"scanned"`
+}
+
+// HourBucket holds one hour's worth of aggregated counters.
+type HourBucket struct {
+	Hour              time.Time `json:"hour"` // UTC, truncated to the hour
+	Count             int64     `json:"count"`
+	InputTokens       int64     `json:"input_tokens"`
+	OutputTokens      int64     `json:"output_tokens"`
+	CacheReadTokens   int64     `json:"cache_read_tokens"`
+	CacheCreateTokens int64     `json:"cache_create_tokens"`
+	CostUSD           float64   `json:"cost_usd"`
+	Errors            int64     `json:"errors"`
+}
+
+// AggregateHourly scans the log files that could contain records in the
+// last `hours` window and returns `hours` consecutive hour buckets ending
+// at the current hour (inclusive). Missing hours are returned zero-filled
+// so the UI can render a continuous timeseries without gap handling.
+func AggregateHourly(dir string, hours int) ([]HourBucket, error) {
+	if hours <= 0 {
+		hours = 24
+	}
+	now := time.Now().UTC().Truncate(time.Hour)
+	start := now.Add(-time.Duration(hours-1) * time.Hour)
+	// The window can straddle up to three local days (start-day, end-day, and
+	// UTC day roll). We scan every file whose day string is within the
+	// inclusive UTC date range, which is cheap — at most 2 files for 24h.
+	files, err := listLogFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	buckets := make([]HourBucket, hours)
+	for i := 0; i < hours; i++ {
+		buckets[i].Hour = start.Add(time.Duration(i) * time.Hour)
+	}
+	for _, path := range files {
+		day := extractDay(path)
+		if day < start.Format("2006-01-02") || day > now.Format("2006-01-02") {
+			continue
+		}
+		fh, err := os.Open(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		sc := bufio.NewScanner(fh)
+		sc.Buffer(make([]byte, 64*1024), 2*1024*1024)
+		for sc.Scan() {
+			var r Record
+			if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+				continue
+			}
+			if r.TS.Before(start) || r.TS.After(now.Add(time.Hour)) {
+				continue
+			}
+			idx := int(r.TS.UTC().Truncate(time.Hour).Sub(start) / time.Hour)
+			if idx < 0 || idx >= hours {
+				continue
+			}
+			b := &buckets[idx]
+			b.Count++
+			b.InputTokens += r.Input
+			b.OutputTokens += r.Output
+			b.CacheReadTokens += r.CacheRead
+			b.CacheCreateTokens += r.CacheCreate
+			b.CostUSD += r.CostUSD
+			if r.Status >= 400 || r.Error != "" {
+				b.Errors++
+			}
+		}
+		_ = fh.Close()
+		if err := sc.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return buckets, nil
 }
 
 // AggregateByAuth scans rotated log files whose day is within [from, to]
@@ -107,40 +186,6 @@ func AggregateByAuth(dir string, from, to time.Time) (map[string]Aggregate, erro
 			return nil, err
 		}
 	}
-	return out, nil
-}
-
-// Clients returns the sorted set of distinct client names seen across all
-// rotated log files. Useful to populate a filter dropdown.
-func Clients(dir string) ([]string, error) {
-	files, err := listLogFiles(dir)
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]struct{})
-	for _, f := range files {
-		fh, err := os.Open(f)
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(fh)
-		sc.Buffer(make([]byte, 64*1024), 1024*1024)
-		for sc.Scan() {
-			var r Record
-			if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
-				continue
-			}
-			if r.Client != "" {
-				seen[r.Client] = struct{}{}
-			}
-		}
-		_ = fh.Close()
-	}
-	out := make([]string, 0, len(seen))
-	for k := range seen {
-		out = append(out, k)
-	}
-	sort.Strings(out)
 	return out, nil
 }
 
@@ -214,9 +259,15 @@ func scanFile(path string, f Filter, res *Result) error {
 			continue
 		}
 		res.Summary.add(r)
-		by := res.ByClient[r.Client]
+		// Key by masked ClientToken so renames don't split buckets; caller
+		// remaps keys to current display names before returning to the UI.
+		ckey := r.ClientToken
+		if ckey == "" {
+			ckey = r.Client
+		}
+		by := res.ByClient[ckey]
 		by.add(r)
-		res.ByClient[r.Client] = by
+		res.ByClient[ckey] = by
 		bm := res.ByModel[r.Model]
 		bm.add(r)
 		res.ByModel[r.Model] = bm
@@ -233,7 +284,11 @@ func scanFile(path string, f Filter, res *Result) error {
 }
 
 func matches(r Record, f Filter) bool {
-	if f.Client != "" && !strings.EqualFold(r.Client, f.Client) {
+	if f.ClientToken != "" {
+		if r.ClientToken != f.ClientToken {
+			return false
+		}
+	} else if f.Client != "" && !strings.EqualFold(r.Client, f.Client) {
 		return false
 	}
 	if f.Model != "" && !strings.EqualFold(r.Model, f.Model) {

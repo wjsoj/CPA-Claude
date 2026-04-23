@@ -117,6 +117,21 @@ export interface RequestsResp {
   scanned: number;
 }
 
+export interface HourBucket {
+  hour: string; // RFC3339 UTC, truncated to hour
+  count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_create_tokens: number;
+  cost_usd: number;
+  errors: number;
+}
+
+export interface HourlyResp {
+  buckets: HourBucket[];
+}
+
 export interface OrphanToken {
   token: string;
   masked: string;

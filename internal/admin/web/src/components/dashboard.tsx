@@ -125,8 +125,22 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 10000);
-    return () => clearInterval(t);
+    // Skip the tick when the tab is hidden — no point polling dashboards
+    // the operator isn't looking at, and it collapses the server-side
+    // request-log scans that each refresh triggers.
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      refresh();
+    };
+    const t = setInterval(tick, 10000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [refresh]);
 
   const onDeleteToken = async (cl: ClientRow) => {

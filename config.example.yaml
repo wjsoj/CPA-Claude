@@ -33,7 +33,7 @@ active_window_minutes: 5
 
 # Default maximum concurrent in-flight requests per client token.
 # 0 = unlimited. Per-token overrides (set via admin panel) take precedence.
-client_max_concurrent: 3
+client_max_concurrent: 15
 
 # Use uTLS (Chrome fingerprint) for all upstream calls. Recommended —
 # Anthropic edge fingerprint-checks non-browser clients.

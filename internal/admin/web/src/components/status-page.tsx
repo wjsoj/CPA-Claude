@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import {
   Activity,
   AlertTriangle,
+  BarChart3,
   CheckCircle2,
   CircleOff,
   Gauge,
@@ -14,6 +15,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import { StatusDashboardPanel } from "./status-dashboard-panel";
 import {
   loadStatusOverview,
   loadSavedTokens,
@@ -123,6 +125,8 @@ function Metric({
   );
 }
 
+type StatusTab = "dashboard" | "lookup";
+
 export function StatusPage() {
   const [ov, setOv] = useState<StatusOverview | null>(null);
   const [ovErr, setOvErr] = useState("");
@@ -131,6 +135,14 @@ export function StatusPage() {
   const [input, setInput] = useState("");
   const [results, setResults] = useState<StatusTokenResult[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<StatusTab>(() => {
+    const stored = localStorage.getItem("cpa.status.tab");
+    return stored === "lookup" ? "lookup" : "dashboard";
+  });
+  const [refreshTick, setRefreshTick] = useState(0);
+  useEffect(() => {
+    localStorage.setItem("cpa.status.tab", tab);
+  }, [tab]);
 
   useEffect(() => {
     saveSavedTokens(tokens);
@@ -147,6 +159,10 @@ export function StatusPage() {
     } finally {
       setTimeout(() => setRefreshing(false), 400);
     }
+    // Bump the tick so the Dashboard panel re-fetches when the user hits
+    // Refresh. We don't auto-refresh that panel on the 15s interval to
+    // keep the public endpoint load proportional to actual attention.
+    setRefreshTick((t) => t + 1);
   }, []);
   useEffect(() => {
     refresh();
@@ -275,6 +291,59 @@ export function StatusPage() {
           )}
         </header>
 
+        {/* TAB NAV */}
+        <nav
+          role="tablist"
+          aria-label="Sections"
+          className="border-b border-border-strong"
+        >
+          <div className="flex overflow-x-auto gap-x-1 gap-y-2 items-end no-scrollbar">
+            {([
+              { key: "dashboard" as const, label: "Dashboard", hint: "CHARTS · AGGREGATE", icon: BarChart3 },
+              { key: "lookup" as const, label: "Usage lookup", hint: "TOKEN · LEDGER", icon: Search },
+            ]).map(({ key, label, hint, icon: Icon }) => {
+              const active = tab === key;
+              return (
+                <button
+                  key={key}
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setTab(key)}
+                  className={cn(
+                    "group relative px-3.5 md:px-5 py-3 -mb-px transition-colors flex items-baseline gap-2.5 shrink-0 whitespace-nowrap",
+                    active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <Icon className="h-4 w-4 self-center" />
+                  <span
+                    className={cn(
+                      "font-display text-base md:text-xl lg:text-2xl tracking-tight",
+                      active && "font-medium",
+                    )}
+                  >
+                    {label}
+                  </span>
+                  <span className="eyebrow hidden lg:inline opacity-60">{hint}</span>
+                  <span
+                    className={cn(
+                      "absolute inset-x-0 bottom-0 h-[2px] bg-primary transition-transform origin-left",
+                      active ? "scale-x-100" : "scale-x-0 group-hover:scale-x-50",
+                    )}
+                  />
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+
+        {tab === "dashboard" && (
+          <div className="stagger pt-2 md:pt-4">
+            <StatusDashboardPanel refreshTick={refreshTick} />
+          </div>
+        )}
+
+        {tab === "lookup" && (
+          <>
         {/* OVERVIEW METRICS */}
         <section className="stagger">
           <div className="hud-strip">
@@ -460,6 +529,8 @@ export function StatusPage() {
             </div>
           )}
         </section>
+          </>
+        )}
 
         <footer className="pt-8 mt-6 border-t border-border eyebrow flex justify-between items-center flex-wrap gap-2">
           <span>tokens stored locally · public endpoint · no secrets collected</span>

@@ -117,6 +117,38 @@ export function loadStatusOverview(): Promise<StatusOverview> {
   return fetchJSON<StatusOverview>("/status/api/overview");
 }
 
+// Shape matches internal/admin/status.go statusDashboard. by_client keys
+// are deterministic pseudonyms (Alice/Bob/...), not real customer labels.
+export interface StatusDashboardResp {
+  pool: {
+    total: number;
+    healthy: number;
+    quota: number;
+    unhealthy: number;
+    disabled: number;
+    oauth: number;
+    apikey: number;
+  };
+  pricing?: import("./types").Pricing;
+  requests_14d: {
+    summary: import("./types").RequestAgg;
+    by_client: Record<string, import("./types").RequestAgg>;
+    by_model: Record<string, import("./types").RequestAgg>;
+    by_day: Record<string, import("./types").RequestAgg>;
+  };
+  requests_all: {
+    summary: import("./types").RequestAgg;
+    by_client: Record<string, import("./types").RequestAgg>;
+    by_model: Record<string, import("./types").RequestAgg>;
+    by_day: Record<string, import("./types").RequestAgg>;
+  };
+  hourly_24h: import("./types").HourBucket[];
+}
+
+export function loadStatusDashboard(): Promise<StatusDashboardResp> {
+  return fetchJSON<StatusDashboardResp>("/status/api/dashboard");
+}
+
 export function queryStatusTokens(
   tokens: string[],
 ): Promise<{ results: StatusTokenResult[] }> {
