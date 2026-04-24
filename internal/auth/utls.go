@@ -50,26 +50,42 @@ func ClientFor(proxyURL string, useUTLS bool) *http.Client {
 
 func newStdTransport(proxyURL string) http.RoundTripper {
 	tr := &http.Transport{
-		ForceAttemptHTTP2:     true,
-		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2: true,
+		// Prune idle connections aggressively. The transport is globally
+		// cached per proxy URL, so any stale connection held here gets
+		// reused by the *next* request and explodes with
+		// "read: connection reset by peer" if the remote or proxy quietly
+		// dropped it. 30s is short enough that most backends' keep-alive
+		// windows (chatgpt.com is ~60s, Anthropic ~60s) don't end up
+		// holding zombie sockets against us.
+		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
-	if proxyURL == "" {
-		return tr
-	}
-	u, err := url.Parse(proxyURL)
-	if err != nil {
-		return tr
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme == "socks5" || scheme == "socks5h" {
-		// http.Transport.Proxy does not support SOCKS; use DialContext instead.
-		if dc := socks5DialContext(u); dc != nil {
-			tr.DialContext = dc
+	if proxyURL != "" {
+		u, err := url.Parse(proxyURL)
+		if err == nil {
+			scheme := strings.ToLower(u.Scheme)
+			if scheme == "socks5" || scheme == "socks5h" {
+				// http.Transport.Proxy does not support SOCKS; use DialContext instead.
+				if dc := socks5DialContext(u); dc != nil {
+					tr.DialContext = dc
+				}
+			} else {
+				tr.Proxy = http.ProxyURL(u)
+			}
 		}
-	} else {
-		tr.Proxy = http.ProxyURL(u)
+	}
+	// Turn on HTTP/2 PING-based health checks. Without this, a stale h2
+	// connection (common behind long-lived SOCKS5 tunnels or behind a
+	// backend that silently drops idle streams) isn't noticed until the
+	// next request tries to write on it and fails with "connection reset
+	// by peer". ReadIdleTimeout fires a PING after N seconds of silence
+	// and PingTimeout closes the connection if the PING doesn't come back
+	// — the transport then re-dials for the in-flight request.
+	if h2, err := http2.ConfigureTransports(tr); err == nil && h2 != nil {
+		h2.ReadIdleTimeout = 30 * time.Second
+		h2.PingTimeout = 15 * time.Second
 	}
 	return tr
 }
