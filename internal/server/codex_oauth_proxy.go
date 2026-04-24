@@ -268,9 +268,12 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		upReq.Header.Set("Chatgpt-Account-Id", accountID)
 	}
 
-	// chatgpt.com sits behind Cloudflare which fingerprints Go's default TLS
-	// ClientHello and 403s us. Use uTLS Chrome_Auto here to match browser JA3.
-	client := auth.NewPlainHTTPClient(snap.ProxyURL, true)
+	// Fresh transport per request + crypto/tls. uTLS Chrome_Auto was tried
+	// (v0.11.4) and made things worse — handshake itself was RST, suggesting
+	// CF's anti-mimicry rules flag our Chrome_Auto fingerprint. Stock tls
+	// at least completes the handshake; if CF still 403s on app layer, the
+	// identity-encoded body below tells us why.
+	client := auth.NewPlainHTTPClient(snap.ProxyURL, false)
 	resp, err := client.Do(upReq)
 	if err != nil {
 		if isClientDisconnect(ctx, err) {
