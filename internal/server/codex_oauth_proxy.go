@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -268,7 +267,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	client := auth.ClientFor(snap.ProxyURL, false)
 	resp, err := client.Do(upReq)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isClientDisconnect(err) {
+		if isClientDisconnect(ctx, err) {
 			a.MarkClientCancel(err.Error())
 			s.emitLog(requestlog.Record{
 				Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,

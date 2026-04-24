@@ -202,7 +202,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	client := auth.ClientFor(snap.ProxyURL, false) // uTLS isn't needed for OpenAI API
 	resp, err := client.Do(upReq)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isClientDisconnect(err) {
+		if isClientDisconnect(ctx, err) {
 			a.MarkClientCancel(err.Error())
 			log.Infof("codex proxy: client canceled via %s: %v", a.ID, err)
 			s.emitLog(requestlog.Record{
@@ -443,13 +443,25 @@ func (u openaiUsage) toCounts() usage.Counts {
 
 // small helper duplicating what proxy.go expresses inline — kept separate
 // so codex_proxy stays self-contained for future edits.
-func isClientDisconnect(err error) bool {
+// isClientDisconnect reports whether err from an upstream request came from
+// the *client* going away, not the upstream / proxy dropping the socket.
+// Use `ctx` (the client's request context) as the discriminator: if our own
+// context is canceled, the client is gone; otherwise the error happened on
+// the wire between us and the upstream and should be retried on another
+// credential, not masked as "client canceled".
+//
+// We still accept context.Canceled / DeadlineExceeded *when the ctx has a
+// matching error* — http.Client.Do sometimes wraps proxy-side resets in
+// context.Canceled after an internal timeout, and those we want to retry.
+func isClientDisconnect(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "context canceled") ||
-		strings.Contains(msg, "connection reset by peer") ||
-		strings.Contains(msg, "broken pipe")
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	// Fall-through: a raw context.Canceled with no ctx cancel means the
+	// transport itself aborted — treat as upstream failure, not client cancel.
+	return false
 }
 
