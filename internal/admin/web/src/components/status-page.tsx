@@ -406,7 +406,11 @@ export function StatusPage() {
                       <div className="eyebrow mb-0.5">
                         {a.kind === "oauth" ? "OAuth" : "API key"}
                         {a.group && (
-                          <span className="opacity-60"> · {a.group}</span>
+                          <span className={a.group.toLowerCase() === "new"
+                            ? "ml-1 font-semibold tracking-wider text-amber-600 dark:text-amber-400"
+                            : "opacity-60"}>
+                            {a.group.toLowerCase() === "new" ? " · NEW" : ` · ${a.group}`}
+                          </span>
                         )}
                       </div>
                       <div className="font-display text-base truncate" title={a.label ? a.label.split("@")[0] : undefined}>
@@ -580,7 +584,13 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
         <div className="min-w-0 flex-1">
           <div className="eyebrow mb-0.5">
             {r.masked}
-            {r.group && <span className="opacity-60"> · {r.group}</span>}
+            {r.group && (
+              <span className={r.group.toLowerCase() === "new"
+                ? "ml-1 font-semibold tracking-wider text-amber-600 dark:text-amber-400"
+                : "opacity-60"}>
+                {r.group.toLowerCase() === "new" ? " · NEW" : ` · ${r.group}`}
+              </span>
+            )}
           </div>
           <div className="font-display text-lg md:text-xl tracking-tight truncate">
             {r.name || <span className="text-muted-foreground">(unnamed)</span>}

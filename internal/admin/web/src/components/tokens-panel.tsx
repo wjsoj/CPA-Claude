@@ -4,6 +4,7 @@ import type { ClientRow, Summary } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { GroupBadge } from "./group-badge";
 import { CopyTokenBtn } from "./copy-token-btn";
 import { cn, fmtDate, fmtInt, isoWeekRange } from "@/lib/utils";
 
@@ -224,9 +225,7 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
                       </td>
                       <td className="py-3 px-4 mono text-xs text-muted-foreground">{cl.token}</td>
                       <td className="py-3 px-4">
-                        <Badge variant={cl.group ? "violet" : "slate"}>
-                          {cl.group || "public"}
-                        </Badge>
+                        <GroupBadge group={cl.group} />
                       </td>
                       <td className="py-3 px-4 mono text-sm">
                         <div

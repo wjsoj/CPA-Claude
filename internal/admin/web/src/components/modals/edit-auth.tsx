@@ -134,6 +134,7 @@ export function EditAuthModal({ auth, onClose, onSaved }: Props) {
             />
             <p className="text-xs text-muted-foreground">
               Empty or "public" = shared pool. Name a group to restrict this credential.
+              Built-in <span className="font-semibold tracking-wider text-amber-600 dark:text-amber-400">NEW</span>: shared by everyone but idle 10 random whole hours / day.
             </p>
           </div>
           <div className="flex items-center gap-2">

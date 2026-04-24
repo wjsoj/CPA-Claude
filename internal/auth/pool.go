@@ -127,14 +127,26 @@ func (p *Pool) Acquire(ctx context.Context, provider, clientToken, clientGroup, 
 	}
 	sessionKey := provider + "|" + clientToken
 
-	// Allowed groups in preference order: the client's own group first, then
-	// public as a fallback. If the client is already public we only try once.
+	// Allowed groups in preference order: the client's own group first
+	// (when non-empty), then the built-in shared "new" tier (available to
+	// every client, but with scheduled downtime — see schedule.go), then
+	// the public tier as the always-on fallback. Duplicates collapse so a
+	// client already in "new" or "public" gets a sensible 1- or 2-tier
+	// list.
 	var tiers []string
-	if clientGroup != "" {
-		tiers = []string{clientGroup, ""}
-	} else {
-		tiers = []string{""}
+	seen := make(map[string]bool, 3)
+	addTier := func(g string) {
+		if seen[g] {
+			return
+		}
+		seen[g] = true
+		tiers = append(tiers, g)
 	}
+	if clientGroup != "" {
+		addTier(clientGroup)
+	}
+	addTier("new")
+	addTier("")
 	allowed := func(authGroup string) bool {
 		for _, g := range tiers {
 			if authGroup == g {
@@ -163,7 +175,11 @@ func (p *Pool) Acquire(ctx context.Context, provider, clientToken, clientGroup, 
 	// window even if its own credentials regain capacity.
 	if s.authID != "" && s.kind == KindOAuth && !excluded[s.authID] {
 		if a := p.findOAuthLocked(s.authID); a != nil && allowed(a.Group) && NormalizeProvider(a.Provider) == provider && p.oauthUsableLocked(a, now) {
-			upgrade := clientGroup != "" && a.Group == "" && p.pickOAuthLocked(now, excluded, clientGroup, provider) != nil
+			// Upgrade sticky pick to the client's own group when one becomes
+			// available. Covers both sticky=public and sticky="new" cases —
+			// we always prefer the client's dedicated pool when it has slots.
+			upgrade := clientGroup != "" && a.Group != clientGroup &&
+				p.pickOAuthLocked(now, excluded, clientGroup, provider) != nil
 			if !upgrade {
 				// Reusing an assignment we already hold a slot for: counts us
 				// only once because activeCountLocked scans distinct sessions.
@@ -233,6 +249,9 @@ func (p *Pool) Acquire(ctx context.Context, provider, clientToken, clientGroup, 
 			if k.IsQuotaExceeded(now) {
 				continue
 			}
+			if isGroupIdleNow(k.Group, now) {
+				continue
+			}
 			// Per-key model routing: a key with a non-empty ModelMap only
 			// serves models listed in it. Empty map = wildcard.
 			if !k.AcceptsModel(clientModel) {
@@ -292,6 +311,12 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 		return false
 	}
 	if a.IsQuotaExceeded(now) {
+		return false
+	}
+	// Group-level scheduled downtime (e.g. "new" group drops 10 random
+	// whole-hour windows per local day). Behaves like a transient quota
+	// miss — credential reappears on the next hour boundary.
+	if isGroupIdleNow(a.Group, now) {
 		return false
 	}
 	return true
@@ -435,10 +460,22 @@ func MaskToken(t string) string {
 func (p *Pool) HasAPIKeyFor(provider, clientGroup, model string) bool {
 	provider = NormalizeProvider(provider)
 	clientGroup = NormalizeGroup(clientGroup)
-	tiers := []string{""}
-	if clientGroup != "" {
-		tiers = []string{clientGroup, ""}
+	// Same tiering policy as Acquire — client's group (if any), built-in
+	// shared "new", then public.
+	var tiers []string
+	seen := make(map[string]bool, 3)
+	addTier := func(g string) {
+		if seen[g] {
+			return
+		}
+		seen[g] = true
+		tiers = append(tiers, g)
 	}
+	if clientGroup != "" {
+		addTier(clientGroup)
+	}
+	addTier("new")
+	addTier("")
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -451,6 +488,9 @@ func (p *Pool) HasAPIKeyFor(provider, clientGroup, model string) bool {
 				continue
 			}
 			if k.Disabled || k.IsHardFailed() || k.IsQuotaExceeded(now) {
+				continue
+			}
+			if isGroupIdleNow(k.Group, now) {
 				continue
 			}
 			if !k.AcceptsModel(model) {

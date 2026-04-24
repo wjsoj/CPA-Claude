@@ -9,7 +9,9 @@ import (
 
 // NormalizeGroup canonicalizes a group identifier. Empty string and the
 // literal "public" (case-insensitive) both mean the public/default pool.
-// All other values are trimmed and preserved case-sensitively.
+// The reserved built-in "new" group is always lowercased so any casing
+// ("NEW", "New") collapses to the same tier. All other values are trimmed
+// and preserved case-sensitively.
 func NormalizeGroup(s string) string {
 	g := strings.TrimSpace(s)
 	if g == "" {
@@ -17,6 +19,9 @@ func NormalizeGroup(s string) string {
 	}
 	if strings.EqualFold(g, "public") {
 		return ""
+	}
+	if strings.EqualFold(g, "new") {
+		return "new"
 	}
 	return g
 }

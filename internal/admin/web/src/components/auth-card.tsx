@@ -4,6 +4,7 @@ import { Sparkline } from "./sparkline";
 import { CardUpstreamQuota } from "./upstream-quota";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { GroupBadge } from "./group-badge";
 import { cn, fmtDate, fmtInt } from "@/lib/utils";
 import {
   AlertTriangle,
@@ -90,9 +91,8 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
               {a.plan_type}
             </Badge>
           )}
-          <Badge variant={a.group ? "violet" : "slate"} title="Credential group">
-            {a.group || "public"}
-          </Badge>
+          <GroupBadge group={a.group} />
+
           <span className={cn("eyebrow !text-[10px]", status.tone)}>{status.label}</span>
         </div>
       </header>
