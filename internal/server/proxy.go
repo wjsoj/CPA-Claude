@@ -39,14 +39,19 @@ var hopHeaders = map[string]bool{
 }
 
 func (s *Server) handleMessages(c *gin.Context) {
-	s.forward(c, "/v1/messages")
+	s.forward(c, auth.ProviderAnthropic, "/v1/messages")
 }
 
 func (s *Server) handleCountTokens(c *gin.Context) {
-	s.forward(c, "/v1/messages/count_tokens")
+	s.forward(c, auth.ProviderAnthropic, "/v1/messages/count_tokens")
 }
 
-func (s *Server) forward(c *gin.Context, path string) {
+// forward runs the per-provider retry loop and credential routing for a
+// single client request. `provider` picks the credential pool subset; `path`
+// is the provider-native upstream path. doForward still assumes Anthropic
+// semantics for request shaping — Codex has its own doForward variant (see
+// codex_proxy.go) which this dispatcher will call once provider != anthropic.
+func (s *Server) forward(c *gin.Context, provider, path string) {
 	clientTok, _ := c.Get("client_token")
 	clientToken, _ := clientTok.(string)
 	if clientToken == "" {
@@ -88,6 +93,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 			s.emitLog(requestlog.Record{
 				Client:      clientName,
 				ClientToken: maskClientToken(clientToken),
+				Provider:    provider,
 				Model:       model,
 				Stream:      peek.Stream,
 				Path:        path,
@@ -116,6 +122,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 			s.emitLog(requestlog.Record{
 				Client:      clientName,
 				ClientToken: maskClientToken(clientToken),
+				Provider:    provider,
 				Model:       model,
 				Stream:      peek.Stream,
 				Path:        path,
@@ -137,7 +144,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 		for id := range tried {
 			excludeIDs = append(excludeIDs, id)
 		}
-		a := s.pool.Acquire(c.Request.Context(), clientToken, clientGroup, model, excludeIDs...)
+		a := s.pool.Acquire(c.Request.Context(), provider, clientToken, clientGroup, model, excludeIDs...)
 		if a == nil {
 			msg := "no upstream credentials available"
 			if len(tried) > 0 {
@@ -145,7 +152,7 @@ func (s *Server) forward(c *gin.Context, path string) {
 			}
 			c.AbortWithStatusJSON(503, gin.H{"error": msg})
 			s.emitLog(requestlog.Record{
-				Client: clientName, ClientToken: maskClientToken(clientToken), Model: model,
+				Client: clientName, ClientToken: maskClientToken(clientToken), Provider: provider, Model: model,
 				Stream: peek.Stream, Path: path, Status: 503, Attempts: attempts,
 				DurationMs: time.Since(start).Milliseconds(), Error: msg,
 			})
@@ -156,18 +163,18 @@ func (s *Server) forward(c *gin.Context, path string) {
 
 		retry, done := s.doForward(c, a, path, body, peek.Stream, model, clientToken, clientName, start, attempts)
 		if done {
-			s.pool.Release(clientToken)
+			s.pool.Release(provider, clientToken)
 			return
 		}
 		if !retry {
-			s.pool.Release(clientToken)
+			s.pool.Release(provider, clientToken)
 			return
 		}
 		log.Warnf("proxy: retrying with a different credential (last auth=%s)", a.ID)
 	}
 	c.AbortWithStatusJSON(503, gin.H{"error": "upstream retries exhausted"})
 	s.emitLog(requestlog.Record{
-		Client: clientName, ClientToken: maskClientToken(clientToken), Model: model,
+		Client: clientName, ClientToken: maskClientToken(clientToken), Provider: provider, Model: model,
 		Stream: peek.Stream, Path: path, Status: 503, Attempts: attempts,
 		DurationMs: time.Since(start).Milliseconds(), Error: "upstream retries exhausted",
 	})
@@ -247,6 +254,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 			s.emitLog(requestlog.Record{
 				Client:      clientName,
 				ClientToken: maskClientToken(clientToken),
+				Provider:    auth.NormalizeProvider(a.Provider),
 				AuthID:      a.ID,
 				AuthLabel:   a.Label,
 				AuthKind:    authKind,
@@ -316,7 +324,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		})
 		// Break sticky session so the next request from this client can
 		// be assigned to a different (hopefully healthy) credential.
-		s.pool.Unstick(clientToken)
+		s.pool.Unstick(auth.NormalizeProvider(a.Provider), clientToken)
 
 		writeResponseHeaders(c, resp)
 		c.Writer.Write(errBody)
@@ -355,7 +363,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	// Charge the client for the tokens they actually consumed.
 	var costUSD float64
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
-		costUSD = s.pricing.Cost(model, counts)
+		costUSD = s.pricing.Cost(auth.NormalizeProvider(a.Provider), model, counts)
 		// clientName already carries the store-resolved name (or "" in
 		// open-mode). No additional fallback needed.
 		s.usage.RecordClient(clientToken, clientName, counts, costUSD)
@@ -367,6 +375,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	s.emitLog(requestlog.Record{
 		Client:      clientName,
 		ClientToken: maskClientToken(clientToken),
+		Provider:    auth.NormalizeProvider(a.Provider),
 		AuthID:      a.ID,
 		AuthLabel:   a.Label,
 		AuthKind:    authKind,

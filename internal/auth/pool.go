@@ -41,6 +41,7 @@ type Pool struct {
 
 type session struct {
 	clientToken string
+	provider    string // canonical provider id; sessions are scoped per-provider
 	authID      string // empty = never assigned
 	kind        Kind
 	lastSeen    time.Time
@@ -106,17 +107,22 @@ func (p *Pool) activeCountLocked(authID string, now time.Time) int {
 // clientGroup scopes credential selection: group-matching credentials are
 // preferred, falling back to public ("") credentials when the group's
 // credentials are exhausted. clientGroup == "" means public-only.
+// provider restricts selection to credentials of that upstream provider
+// (anthropic/openai) — sessions are keyed per (clientToken, provider) so a
+// token hitting both endpoints maintains independent stickiness.
 //
 // excludeIDs lets a retrying caller skip credentials it has already tried in
 // the current request, so a transient connection error on one credential
 // doesn't keep selecting the same one (the sticky-session logic would
 // otherwise pin the client to the failing auth until its session times out).
-func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup, clientModel string, excludeIDs ...string) *Auth {
+func (p *Pool) Acquire(ctx context.Context, provider, clientToken, clientGroup, clientModel string, excludeIDs ...string) *Auth {
+	provider = NormalizeProvider(provider)
 	clientGroup = NormalizeGroup(clientGroup)
 	excluded := make(map[string]bool, len(excludeIDs))
 	for _, id := range excludeIDs {
 		excluded[id] = true
 	}
+	sessionKey := provider + "|" + clientToken
 
 	// Allowed groups in preference order: the client's own group first, then
 	// public as a fallback. If the client is already public we only try once.
@@ -139,10 +145,10 @@ func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup, clientMode
 	now := time.Now()
 	p.gcLocked(now)
 
-	s, ok := p.sessions[clientToken]
+	s, ok := p.sessions[sessionKey]
 	if !ok {
-		s = &session{clientToken: clientToken}
-		p.sessions[clientToken] = s
+		s = &session{clientToken: clientToken, provider: provider}
+		p.sessions[sessionKey] = s
 	}
 
 	// If session has a sticky OAuth assignment, it's still healthy, has
@@ -153,8 +159,8 @@ func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup, clientMode
 	// check a group client stays pinned to public for the whole active
 	// window even if its own credentials regain capacity.
 	if s.authID != "" && s.kind == KindOAuth && !excluded[s.authID] {
-		if a := p.findOAuthLocked(s.authID); a != nil && allowed(a.Group) && p.oauthUsableLocked(a, now) {
-			upgrade := clientGroup != "" && a.Group == "" && p.pickOAuthLocked(now, excluded, clientGroup) != nil
+		if a := p.findOAuthLocked(s.authID); a != nil && allowed(a.Group) && NormalizeProvider(a.Provider) == provider && p.oauthUsableLocked(a, now) {
+			upgrade := clientGroup != "" && a.Group == "" && p.pickOAuthLocked(now, excluded, clientGroup, provider) != nil
 			if !upgrade {
 				// Reusing an assignment we already hold a slot for: counts us
 				// only once because activeCountLocked scans distinct sessions.
@@ -188,7 +194,7 @@ func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup, clientMode
 	// next tier (public).
 	for _, tier := range tiers {
 		for {
-			chosen := p.pickOAuthLocked(now, excluded, tier)
+			chosen := p.pickOAuthLocked(now, excluded, tier, provider)
 			if chosen == nil {
 				break
 			}
@@ -206,6 +212,9 @@ func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup, clientMode
 			return chosen
 		}
 		for _, k := range p.apikeys {
+			if NormalizeProvider(k.Provider) != provider {
+				continue
+			}
 			if k.Group != tier {
 				continue
 			}
@@ -239,11 +248,13 @@ func (p *Pool) Acquire(ctx context.Context, clientToken, clientGroup, clientMode
 }
 
 // Release stamps the session as seen right now (call at end of request).
-// This extends its active window.
-func (p *Pool) Release(clientToken string) {
+// This extends its active window. provider must match the one used on the
+// paired Acquire — sessions are scoped per (clientToken, provider).
+func (p *Pool) Release(provider, clientToken string) {
+	provider = NormalizeProvider(provider)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if s, ok := p.sessions[clientToken]; ok {
+	if s, ok := p.sessions[provider+"|"+clientToken]; ok {
 		s.lastSeen = time.Now()
 	}
 }
@@ -251,11 +262,12 @@ func (p *Pool) Release(clientToken string) {
 // Unstick clears the sticky credential binding for a client session so the
 // next Acquire picks a fresh credential. Call this when the current credential
 // returned an upstream error — otherwise the client keeps hitting the same
-// failing auth until the session expires.
-func (p *Pool) Unstick(clientToken string) {
+// failing auth until the session expires. provider must match Acquire.
+func (p *Pool) Unstick(provider, clientToken string) {
+	provider = NormalizeProvider(provider)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if s, ok := p.sessions[clientToken]; ok {
+	if s, ok := p.sessions[provider+"|"+clientToken]; ok {
 		s.authID = ""
 	}
 }
@@ -295,7 +307,7 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 // spreads load toward credentials doing less real work — cache-heavy
 // clients don't starve a credential out just by racking up near-free
 // cache_read volume.
-func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group string) *Auth {
+func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group, provider string) *Auth {
 	type cand struct {
 		a    *Auth
 		load int64 // weighted tokens consumed in the recent load-balancing window (0 if unknown)
@@ -303,6 +315,9 @@ func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group st
 	var cands []cand
 	for _, a := range p.oauths {
 		if a.Group != group {
+			continue
+		}
+		if NormalizeProvider(a.Provider) != provider {
 			continue
 		}
 		if excluded[a.ID] {

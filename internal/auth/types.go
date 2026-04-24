@@ -37,15 +37,23 @@ type Auth struct {
 	mu        sync.RWMutex
 	refreshMu sync.Mutex // serializes OAuth refresh calls; prevents concurrent burns of a rotating refresh_token
 
-	ID    string // stable identifier (OAuth: file basename; APIKey: "apikey:<label-or-prefix>")
-	Kind  Kind
-	Label string
-	Email string
+	ID       string // stable identifier (OAuth: file basename; APIKey: "apikey:<label-or-prefix>")
+	Kind     Kind
+	Provider string // "anthropic" | "openai" — drives routing + per-provider token endpoints
+	Label    string
+	Email    string
 
 	// Credentials
 	AccessToken  string
 	RefreshToken string // OAuth only
 	ExpiresAt    time.Time
+
+	// Codex (OpenAI) OAuth specifics. IDToken carries the ChatGPT account
+	// claims; AccountID + PlanType drive upstream request headers and
+	// per-plan model visibility. Unused for Anthropic auths.
+	IDToken   string
+	AccountID string
+	PlanType  string
 
 	// Routing
 	ProxyURL      string // per-credential upstream proxy (empty = direct/use default)
@@ -134,6 +142,7 @@ func (a *Auth) Snapshot() AuthInfo {
 	return AuthInfo{
 		ID:              a.ID,
 		Kind:            a.Kind,
+		Provider:        a.Provider,
 		Label:           a.Label,
 		Email:           a.Email,
 		ExpiresAt:       a.ExpiresAt,
@@ -152,6 +161,7 @@ func (a *Auth) Snapshot() AuthInfo {
 type AuthInfo struct {
 	ID              string
 	Kind            Kind
+	Provider        string
 	Label           string
 	Email           string
 	ExpiresAt       time.Time

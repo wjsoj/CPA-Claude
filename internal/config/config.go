@@ -12,6 +12,7 @@ import (
 
 type APIKey struct {
 	Key      string            `yaml:"key"`
+	Provider string            `yaml:"provider,omitempty"` // "anthropic" | "openai"; empty = anthropic (legacy)
 	ProxyURL string            `yaml:"proxy_url,omitempty"`
 	Label    string            `yaml:"label,omitempty"`
 	BaseURL  string            `yaml:"base_url,omitempty"`

@@ -20,6 +20,7 @@ type Record struct {
 	TS          time.Time `json:"ts"`
 	Client      string    `json:"client,omitempty"` // name from access_tokens
 	ClientToken string    `json:"client_token"`     // masked
+	Provider    string    `json:"provider,omitempty"` // "anthropic" | "openai"; empty on legacy records
 	AuthID      string    `json:"auth_id"`
 	AuthLabel   string    `json:"auth_label,omitempty"`
 	AuthKind    string    `json:"auth_kind"` // "oauth" or "apikey"

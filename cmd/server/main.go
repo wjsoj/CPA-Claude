@@ -75,6 +75,7 @@ func main() {
 		apikeys = append(apikeys, &auth.Auth{
 			ID:          "apikey:" + label,
 			Kind:        auth.KindAPIKey,
+			Provider:    auth.NormalizeProvider(k.Provider),
 			Label:       label,
 			AccessToken: k.Key,
 			ProxyURL:    proxy,

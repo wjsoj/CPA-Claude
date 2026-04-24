@@ -44,13 +44,35 @@ func parseFile(path string, data []byte) (*Auth, error) {
 	}
 	t, _ := raw["type"].(string)
 	kindStr := strings.ToLower(strings.TrimSpace(t))
+	// The `type` field encodes both provider and credential kind for legacy
+	// compatibility. New file layouts also carry a standalone `provider`
+	// field — we prefer that when present, falling back to inference from
+	// `type`. Kind inference is purely on the `type` token.
+	provHint, _ := raw["provider"].(string)
+	provider := NormalizeProvider(provHint)
 	switch kindStr {
 	case "claude":
+		if provHint == "" {
+			provider = ProviderAnthropic
+		}
 		// OAuth credential (fall through to existing parse path).
+	case "codex", "openai", "chatgpt":
+		if provHint == "" {
+			provider = ProviderOpenAI
+		}
+		return parseCodexOAuthFile(path, raw, provider)
 	case "apikey", "api_key", "anthropic_api_key":
-		return parseAPIKeyFile(path, raw)
+		if provHint == "" {
+			provider = ProviderAnthropic
+		}
+		return parseAPIKeyFile(path, raw, provider)
+	case "openai_api_key", "codex_api_key":
+		if provHint == "" {
+			provider = ProviderOpenAI
+		}
+		return parseAPIKeyFile(path, raw, provider)
 	default:
-		return nil, fmt.Errorf("unsupported type %q (expected claude or apikey)", t)
+		return nil, fmt.Errorf("unsupported type %q (expected claude/codex/apikey)", t)
 	}
 	access, _ := raw["access_token"].(string)
 	refresh, _ := raw["refresh_token"].(string)
@@ -88,6 +110,7 @@ func parseFile(path string, data []byte) (*Auth, error) {
 	a := &Auth{
 		ID:            filepath.Base(path),
 		Kind:          KindOAuth,
+		Provider:      provider,
 		Label:         label,
 		Email:         email,
 		AccessToken:   access,
@@ -102,7 +125,7 @@ func parseFile(path string, data []byte) (*Auth, error) {
 	return a, nil
 }
 
-func parseAPIKeyFile(path string, raw map[string]any) (*Auth, error) {
+func parseAPIKeyFile(path string, raw map[string]any, provider string) (*Auth, error) {
 	apiKey, _ := raw["api_key"].(string)
 	if apiKey == "" {
 		// Tolerate "key" / "access_token" spellings.
@@ -127,6 +150,7 @@ func parseAPIKeyFile(path string, raw map[string]any) (*Auth, error) {
 	return &Auth{
 		ID:          filepath.Base(path),
 		Kind:        KindAPIKey,
+		Provider:    provider,
 		Label:       label,
 		AccessToken: apiKey,
 		ProxyURL:    proxyURL,
@@ -135,6 +159,66 @@ func parseAPIKeyFile(path string, raw map[string]any) (*Auth, error) {
 		Disabled:    disabled,
 		Group:       NormalizeGroup(group),
 		ModelMap:    modelMap,
+	}, nil
+}
+
+// parseCodexOAuthFile parses a Codex (OpenAI/ChatGPT) OAuth credential file.
+// Layout mirrors Claude OAuth but carries id_token + account_id + plan_type
+// which Codex upstream requests depend on (session headers and per-plan
+// model visibility). Expiry format differs from Claude — Codex writes
+// "expired" as RFC3339 (same as Claude) for simplicity.
+func parseCodexOAuthFile(path string, raw map[string]any, provider string) (*Auth, error) {
+	access, _ := raw["access_token"].(string)
+	refresh, _ := raw["refresh_token"].(string)
+	if access == "" && refresh == "" {
+		return nil, fmt.Errorf("missing access_token and refresh_token")
+	}
+	email, _ := raw["email"].(string)
+	label, _ := raw["label"].(string)
+	if label == "" {
+		label = email
+	}
+	if label == "" {
+		label = filepath.Base(path)
+	}
+	disabled, _ := raw["disabled"].(bool)
+	proxyURL, _ := raw["proxy_url"].(string)
+	group, _ := raw["group"].(string)
+	idToken, _ := raw["id_token"].(string)
+	accountID, _ := raw["account_id"].(string)
+	planType, _ := raw["plan_type"].(string)
+	maxConc := 0
+	if v, ok := raw["max_concurrent"].(float64); ok {
+		maxConc = int(v)
+	}
+	exp := time.Time{}
+	if s, ok := raw["expired"].(string); ok && s != "" {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			exp = t
+		}
+	}
+	if exp.IsZero() {
+		if v, ok := raw["expires_at"].(float64); ok {
+			exp = time.Unix(int64(v), 0)
+		}
+	}
+	return &Auth{
+		ID:            filepath.Base(path),
+		Kind:          KindOAuth,
+		Provider:      provider,
+		Label:         label,
+		Email:         email,
+		AccessToken:   access,
+		RefreshToken:  refresh,
+		IDToken:       idToken,
+		AccountID:     accountID,
+		PlanType:      planType,
+		ExpiresAt:     exp,
+		ProxyURL:      proxyURL,
+		MaxConcurrent: maxConc,
+		FilePath:      path,
+		Disabled:      disabled,
+		Group:         NormalizeGroup(group),
 	}, nil
 }
 
@@ -221,8 +305,14 @@ func saveAuth(a *Auth) error {
 		raw = make(map[string]any)
 	}
 	a.mu.RLock()
+	provider := NormalizeProvider(a.Provider)
+	raw["provider"] = provider
 	if a.Kind == KindAPIKey {
-		raw["type"] = "apikey"
+		if provider == ProviderOpenAI {
+			raw["type"] = "openai_api_key"
+		} else {
+			raw["type"] = "apikey"
+		}
 		raw["api_key"] = a.AccessToken
 		if a.BaseURL != "" {
 			raw["base_url"] = a.BaseURL
@@ -243,16 +333,38 @@ func saveAuth(a *Auth) error {
 		delete(raw, "access_token")
 		delete(raw, "expired")
 		delete(raw, "id_token")
+		delete(raw, "account_id")
+		delete(raw, "plan_type")
 		delete(raw, "last_refresh")
 		delete(raw, "max_concurrent")
 	} else {
-		raw["type"] = "claude"
+		if provider == ProviderOpenAI {
+			raw["type"] = "codex"
+		} else {
+			raw["type"] = "claude"
+		}
 		raw["access_token"] = a.AccessToken
 		raw["refresh_token"] = a.RefreshToken
 		if !a.ExpiresAt.IsZero() {
 			raw["expired"] = a.ExpiresAt.UTC().Format(time.RFC3339)
 		}
 		raw["max_concurrent"] = a.MaxConcurrent
+		// Codex-specific extras (empty for Claude, naturally omitted).
+		if a.IDToken != "" {
+			raw["id_token"] = a.IDToken
+		} else {
+			delete(raw, "id_token")
+		}
+		if a.AccountID != "" {
+			raw["account_id"] = a.AccountID
+		} else {
+			delete(raw, "account_id")
+		}
+		if a.PlanType != "" {
+			raw["plan_type"] = a.PlanType
+		} else {
+			delete(raw, "plan_type")
+		}
 	}
 	raw["disabled"] = a.Disabled
 	if a.ProxyURL != "" {
@@ -327,7 +439,20 @@ func (a *Auth) EnsureFresh(ctx context.Context, leeway time.Duration, useUTLS bo
 }
 
 // doRefreshLocked performs the HTTP exchange. Caller must hold a.refreshMu.
+// Dispatches to the per-provider refresh implementation. The Anthropic path
+// (default) lives inline below; Codex has its own exchange shape and token
+// URL handled in codex_refresh.go.
 func (a *Auth) doRefreshLocked(ctx context.Context, useUTLS bool) error {
+	switch NormalizeProvider(a.Provider) {
+	case ProviderOpenAI:
+		return a.refreshCodexLocked(ctx, useUTLS)
+	default:
+		return a.refreshAnthropicLocked(ctx, useUTLS)
+	}
+}
+
+// refreshAnthropicLocked refreshes a Claude OAuth access token.
+func (a *Auth) refreshAnthropicLocked(ctx context.Context, useUTLS bool) error {
 	a.mu.RLock()
 	refresh := a.RefreshToken
 	a.mu.RUnlock()
