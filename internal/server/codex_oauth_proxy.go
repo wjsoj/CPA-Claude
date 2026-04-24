@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,29 +29,27 @@ const (
 	codexBackendOriginator = "codex-tui"
 )
 
-// codexOAuthPath maps the client-facing route to the ChatGPT backend
-// suffix. Only /v1/responses is supported on the OAuth path — the backend
-// doesn't host a /v1/chat/completions endpoint and we can't fake one
-// without a full OpenAI-chat → Codex-responses translator (out of scope).
-func codexOAuthPath(stream bool) string {
-	if stream {
-		return "/responses"
-	}
-	return "/responses/compact"
-}
+// codexOAuthPath is the ChatGPT backend suffix for the /v1/responses route.
+// The backend only hosts a streaming /responses endpoint — non-streaming
+// client requests are satisfied by running a streamed upstream and
+// aggregating the SSE into a single JSON object on our side (see
+// aggregateCodexResponseStream). There is a /responses/compact endpoint but
+// it's reserved for Codex's conversation-compaction flow and rejects
+// normal inference payloads; we do not route through it.
+func codexOAuthPath() string { return "/responses" }
 
 // sanitizeCodexRequestBody shapes the client's /v1/responses body into what
 // the ChatGPT Codex backend expects. Behavior is modeled directly on
-// CLIProxyAPI's Execute / executeCompact bodies (codex_executor.go:176-183,
-// 327-330): strip the thinking suffix off `model`, force-enable streaming
-// on the /responses path, force-disable on /responses/compact, drop four
-// upstream-private fields, backfill empty `instructions`, and ensure an
-// image_generation tool is registered (skipped for *-spark models the
-// backend rejects it on).
-func sanitizeCodexRequestBody(body []byte, stream bool) ([]byte, error) {
+// CLIProxyAPI (translator/codex/openai/responses/codex_openai-responses_request.go
+// + runtime/executor/codex_executor.go:Execute): the backend accepts a
+// narrow subset of the OpenAI /v1/responses schema, so we force the
+// required fields, delete the ones that get rejected, and normalize the
+// payload shape. Upstream is always streamed — the `stream` bool on the
+// client request does not change the body we send.
+func sanitizeCodexRequestBody(body []byte) ([]byte, string, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return body, err
+		return body, "", err
 	}
 	// Strip thinking suffix from model. CLIProxyAPI uses "model-name(value)"
 	// convention (e.g. gpt-5.3-codex(high)); the backend wants just the
@@ -60,19 +59,115 @@ func sanitizeCodexRequestBody(body []byte, stream bool) ([]byte, error) {
 		baseModel = stripThinkingSuffix(m)
 		raw["model"] = baseModel
 	}
-	if stream {
-		raw["stream"] = true
-	} else {
-		delete(raw, "stream")
-	}
-	for _, k := range []string{"previous_response_id", "prompt_cache_retention", "safety_identifier", "stream_options"} {
+
+	// Always stream upstream — the backend only emits completed responses
+	// via SSE. Non-streaming clients get aggregation on our side.
+	raw["stream"] = true
+
+	// Required fields for the Codex backend.
+	raw["store"] = false
+	raw["parallel_tool_calls"] = true
+	raw["include"] = []any{"reasoning.encrypted_content"}
+
+	// Fields the backend rejects or that leak through from openai.com-
+	// compatible SDKs but don't belong on the Codex backend.
+	for _, k := range []string{
+		"previous_response_id",
+		"prompt_cache_retention",
+		"safety_identifier",
+		"stream_options",
+		"max_output_tokens",
+		"max_completion_tokens",
+		"temperature",
+		"top_p",
+		"truncation",
+		"user",
+		"context_management",
+	} {
 		delete(raw, k)
 	}
+
+	// service_tier: backend only honors "priority"; anything else 400s.
+	if st, ok := raw["service_tier"].(string); ok && st != "priority" {
+		delete(raw, "service_tier")
+	}
+
+	// Input may be a plain string on SDKs that use the convenience shape.
+	// Promote to the canonical [{"type":"message","role":"user",...}] form.
+	if s, ok := raw["input"].(string); ok {
+		raw["input"] = []any{map[string]any{
+			"type": "message",
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_text",
+				"text": s,
+			}},
+		}}
+	}
+	// Convert role "system" → "developer" in input items (Codex rejects
+	// "system" there).
+	if items, ok := raw["input"].([]any); ok {
+		for _, it := range items {
+			if m, _ := it.(map[string]any); m != nil {
+				if role, _ := m["role"].(string); role == "system" {
+					m["role"] = "developer"
+				}
+			}
+		}
+	}
+
+	// Normalize legacy/preview built-in tool type aliases.
+	normalizeBuiltinToolsInPlace(raw)
+
+	// Backfill empty instructions (backend requires the key to exist).
 	if v, ok := raw["instructions"]; !ok || v == nil {
 		raw["instructions"] = ""
 	}
+
+	// Ensure image_generation tool is present (matches vendor CLI; skipped
+	// on *-spark models where the backend rejects it).
 	raw["tools"] = ensureImageGenerationTool(raw["tools"], baseModel)
-	return json.Marshal(raw)
+
+	out, err := json.Marshal(raw)
+	return out, baseModel, err
+}
+
+// normalizeBuiltinToolsInPlace rewrites the legacy Codex built-in tool
+// aliases to the stable names the backend accepts today. Mirrors
+// CLIProxyAPI's normalizeCodexBuiltinTools.
+func normalizeBuiltinToolsInPlace(raw map[string]any) {
+	rewrite := func(m map[string]any) {
+		if t, _ := m["type"].(string); t != "" {
+			if n := normalizeBuiltinToolType(t); n != "" {
+				m["type"] = n
+			}
+		}
+	}
+	if tools, ok := raw["tools"].([]any); ok {
+		for _, t := range tools {
+			if m, _ := t.(map[string]any); m != nil {
+				rewrite(m)
+			}
+		}
+	}
+	if tc, ok := raw["tool_choice"].(map[string]any); ok {
+		rewrite(tc)
+		if inner, ok := tc["tools"].([]any); ok {
+			for _, t := range inner {
+				if m, _ := t.(map[string]any); m != nil {
+					rewrite(m)
+				}
+			}
+		}
+	}
+}
+
+func normalizeBuiltinToolType(t string) string {
+	switch t {
+	case "web_search_preview", "web_search_preview_2025_03_11":
+		return "web_search"
+	}
+	return ""
 }
 
 // stripThinkingSuffix mirrors thinking.ParseSuffix from CLIProxyAPI: a
@@ -127,6 +222,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		// serve /v1/chat/completions. Ask the retry loop to try a different
 		// credential (API-key creds handle chat/completions fine). Don't
 		// MarkFailure — this credential isn't broken, just the wrong kind.
+		// forward() has already fast-failed if no API-key alternatives exist.
 		log.Debugf("codex oauth: %s skipping %s (OAuth path supports /v1/responses only)", a.ID, path)
 		return true, false
 	}
@@ -137,9 +233,9 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	if ab := strings.TrimRight(snap.BaseURL, "/"); ab != "" {
 		baseURL = ab
 	}
-	upURL := baseURL + codexOAuthPath(stream)
+	upURL := baseURL + codexOAuthPath()
 
-	upstreamBody, err := sanitizeCodexRequestBody(body, stream)
+	upstreamBody, _, err := sanitizeCodexRequestBody(body)
 	if err != nil {
 		log.Warnf("codex oauth: body sanitize failed via %s: %v", a.ID, err)
 		upstreamBody = body
@@ -156,11 +252,9 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	accessToken, _ := a.Credentials()
 	upReq.Header.Set("Authorization", "Bearer "+accessToken)
 	upReq.Header.Set("Content-Type", "application/json")
-	if stream {
-		upReq.Header.Set("Accept", "text/event-stream")
-	} else {
-		upReq.Header.Set("Accept", "application/json")
-	}
+	// Upstream is always streamed; aggregation happens on our side when the
+	// client asked for a non-streaming response.
+	upReq.Header.Set("Accept", "text/event-stream")
 	upReq.Header.Set("Connection", "Keep-Alive")
 	upReq.Header.Set("Session_id", newRequestUUID())
 	upReq.Header.Set("Originator", codexBackendOriginator)
@@ -225,14 +319,40 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		return false, true
 	}
 
-	writeResponseHeaders(c, resp)
 	var counts usage.Counts
-	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if stream {
+		// Streaming client: passthrough SSE verbatim.
+		writeResponseHeaders(c, resp)
 		streamSSECodexBackend(c, resp, &counts)
 	} else {
-		respBody, _ := io.ReadAll(resp.Body)
-		c.Writer.Write(respBody)
-		counts.Add(extractCodexBackendUsageFromJSON(respBody))
+		// Non-streaming client: aggregate SSE into a single response object
+		// (mirrors CLIProxyAPI's CodexExecutor.Execute aggregation).
+		payload, aerr := aggregateCodexResponseStream(resp.Body, &counts)
+		if aerr != nil {
+			log.Warnf("codex oauth: aggregation via %s failed: %v", a.ID, aerr)
+			c.AbortWithStatusJSON(502, gin.H{"error": "codex upstream: " + aerr.Error()})
+			_ = resp.Body.Close()
+			s.emitLog(requestlog.Record{
+				Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
+				AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
+				Stream: stream, Path: path, Status: 502, Attempts: attempts,
+				DurationMs: time.Since(start).Milliseconds(),
+				Error:      aerr.Error(),
+			})
+			return false, true
+		}
+		// Drop the upstream's Content-Type: we're returning JSON, not SSE.
+		for k, v := range resp.Header {
+			if strings.EqualFold(k, "Content-Type") || strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
+				continue
+			}
+			for _, val := range v {
+				c.Writer.Header().Add(k, val)
+			}
+		}
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.WriteHeader(http.StatusOK)
+		c.Writer.Write(payload)
 	}
 	_ = resp.Body.Close()
 
@@ -264,6 +384,96 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		a.MarkSuccess()
 	}
 	return false, true
+}
+
+// aggregateCodexResponseStream reads the backend SSE stream and returns
+// the final response JSON object for a non-streaming client. Mirrors the
+// aggregation in CLIProxyAPI's CodexExecutor.Execute: collects
+// `response.output_item.done` items (keyed by output_index when present,
+// falling back to arrival order), then on `response.completed` patches
+// the response.output field if it arrived empty. Output shape matches
+// OpenAI's /v1/responses non-streaming reply: the bare `response` object
+// (id, object, output, usage, …) — not the SSE event envelope.
+func aggregateCodexResponseStream(r io.Reader, counts *usage.Counts) ([]byte, error) {
+	reader := newLineReader(r)
+	var byIndex []codexOutputSlot
+	var fallback []json.RawMessage
+
+	for {
+		line, rerr := reader.readLine()
+		if len(line) > 0 {
+			trim := bytes.TrimRight(line, "\r\n")
+			if bytes.HasPrefix(trim, []byte("data:")) {
+				payload := bytes.TrimSpace(trim[5:])
+				if len(payload) > 0 && payload[0] == '{' {
+					var ev struct {
+						Type        string          `json:"type"`
+						Item        json.RawMessage `json:"item"`
+						OutputIndex *int64          `json:"output_index"`
+						Response    json.RawMessage `json:"response"`
+					}
+					if err := json.Unmarshal(payload, &ev); err == nil {
+						switch ev.Type {
+						case "response.output_item.done":
+							if len(ev.Item) > 0 {
+								if ev.OutputIndex != nil {
+									byIndex = append(byIndex, codexOutputSlot{idx: *ev.OutputIndex, data: ev.Item})
+								} else {
+									fallback = append(fallback, ev.Item)
+								}
+							}
+						case "response.completed":
+							if len(ev.Response) == 0 {
+								return nil, errors.New("response.completed missing response field")
+							}
+							counts.Add(extractCodexBackendUsageFromJSON(payload))
+							return patchResponseOutput(ev.Response, byIndex, fallback)
+						}
+					}
+				}
+			}
+		}
+		if rerr != nil {
+			return nil, fmt.Errorf("stream closed before response.completed: %w", rerr)
+		}
+	}
+}
+
+// patchResponseOutput replaces response.output with the collected
+// output_item.done events when the completed event arrived with an empty
+// or missing output array. Returns the (possibly unchanged) response JSON.
+type codexOutputSlot struct {
+	idx  int64
+	data json.RawMessage
+}
+
+func patchResponseOutput(response json.RawMessage, byIndex []codexOutputSlot, fallback []json.RawMessage) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(response, &obj); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	// Only patch if the existing output is missing or empty.
+	needsPatch := true
+	if cur, ok := obj["output"]; ok {
+		t := bytes.TrimSpace(cur)
+		if len(t) > 2 && !bytes.Equal(t, []byte("[]")) && !bytes.Equal(t, []byte("null")) {
+			needsPatch = false
+		}
+	}
+	if needsPatch && (len(byIndex) > 0 || len(fallback) > 0) {
+		sort.SliceStable(byIndex, func(i, j int) bool { return byIndex[i].idx < byIndex[j].idx })
+		items := make([]json.RawMessage, 0, len(byIndex)+len(fallback))
+		for _, s := range byIndex {
+			items = append(items, s.data)
+		}
+		items = append(items, fallback...)
+		patched, err := json.Marshal(items)
+		if err != nil {
+			return nil, err
+		}
+		obj["output"] = patched
+	}
+	return json.Marshal(obj)
 }
 
 // streamSSECodexBackend is the Codex backend SSE passthrough. The format

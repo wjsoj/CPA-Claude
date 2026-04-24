@@ -105,10 +105,32 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 		}
 	}
 
+	// Fail fast when the route can't be served by any available credential.
+	// OAuth Codex credentials only speak /v1/responses — they can't serve
+	// /v1/chat/completions, and without this check the forward loop would
+	// cycle every OAuth cred (each returning retry=true), then surface a
+	// misleading 503 "all upstream credentials exhausted". If no API-key
+	// credential of this provider can serve the requested model, tell the
+	// client directly what's wrong.
+	if auth.NormalizeProvider(provider) == auth.ProviderOpenAI && path == "/v1/chat/completions" && !s.pool.HasAPIKeyFor(provider, clientGroup, model) {
+		msg := fmt.Sprintf("model %q is only available via /v1/responses on this server (no OpenAI-compatible API-key credential is configured for it); retry with the /v1/responses endpoint", model)
+		c.AbortWithStatusJSON(400, gin.H{"error": msg})
+		s.emitLog(requestlog.Record{
+			Client: clientName, ClientToken: maskClientToken(clientToken), Provider: provider, Model: model,
+			Stream: peek.Stream, Path: path, Status: 400,
+			DurationMs: time.Since(start).Milliseconds(), Error: "route unsupported for available credentials",
+		})
+		return
+	}
+
 	// Concurrency limit per client token.
 	maxConc := s.clientMaxConcurrent(clientToken)
 	if maxConc > 0 {
-		v, _ := s.inflight.LoadOrStore(clientToken, new(int32))
+		// Scope the counter per provider so Claude and Codex share a token
+		// but not a concurrency bucket — matches the per-provider session
+		// keying in Pool.Acquire.
+		inflightKey := auth.NormalizeProvider(provider) + "|" + clientToken
+		v, _ := s.inflight.LoadOrStore(inflightKey, new(int32))
 		counter := v.(*int32)
 		cur := atomic.AddInt32(counter, 1)
 		defer atomic.AddInt32(counter, -1)

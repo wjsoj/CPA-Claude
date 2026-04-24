@@ -239,6 +239,23 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
       )}
 
       {a.kind === "oauth" && a.provider === "anthropic" && <CardUpstreamQuota auth={a} />}
+      {a.kind === "oauth" && a.provider === "openai" && u && (
+        <div className="px-5 py-3 border-t border-border bg-muted/20">
+          <div className="flex items-center justify-between gap-2">
+            <div className="eyebrow">Rolling 5h (local)</div>
+            <div className="mono tabular text-xs">
+              in {fmtInt(u.sum_5h.input_tokens)} · out {fmtInt(u.sum_5h.output_tokens)}
+              {u.sum_5h.cache_read_tokens ? (
+                <span className="text-muted-foreground"> · cache {fmtInt(u.sum_5h.cache_read_tokens)}</span>
+              ) : null}
+            </div>
+          </div>
+          <div className="mt-1 text-[10px] text-muted-foreground leading-snug">
+            ChatGPT backend doesn't expose remaining-quota probes; this is our local rolling
+            count. Quota exhaustion surfaces as the red banner above once the backend 429s.
+          </div>
+        </div>
+      )}
 
       <footer className="px-5 py-3 flex gap-1.5 flex-wrap">
         {a.kind === "oauth" && (

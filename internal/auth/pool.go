@@ -425,6 +425,43 @@ func MaskToken(t string) string {
 	return t[:4] + "..." + t[len(t)-4:]
 }
 
+// HasAPIKeyFor reports whether any usable API-key credential in the pool
+// can serve this (provider, clientGroup, model) tuple. "Usable" means not
+// disabled, not hard-failed, not in quota cooldown, and AcceptsModel(model).
+// Groups are checked in the same preference order as Acquire: client group
+// first (if non-empty), then the public tier. Used by the proxy to
+// fail-fast on routes (e.g. chat/completions) that OAuth credentials
+// cannot serve, rather than cycling the retry loop to a misleading 503.
+func (p *Pool) HasAPIKeyFor(provider, clientGroup, model string) bool {
+	provider = NormalizeProvider(provider)
+	clientGroup = NormalizeGroup(clientGroup)
+	tiers := []string{""}
+	if clientGroup != "" {
+		tiers = []string{clientGroup, ""}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, tier := range tiers {
+		for _, k := range p.apikeys {
+			if NormalizeProvider(k.Provider) != provider {
+				continue
+			}
+			if k.Group != tier {
+				continue
+			}
+			if k.Disabled || k.IsHardFailed() || k.IsQuotaExceeded(now) {
+				continue
+			}
+			if !k.AcceptsModel(model) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // FindByID returns the Auth (OAuth or APIKey) with the given ID, or nil.
 func (p *Pool) FindByID(id string) *Auth {
 	p.mu.Lock()

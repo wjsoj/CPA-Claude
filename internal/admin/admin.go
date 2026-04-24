@@ -276,8 +276,13 @@ type authRow struct {
 }
 
 type usageSummary struct {
-	Total    usage.Counts     `json:"total"`
-	Sum24h   usage.Counts     `json:"sum_24h"`
+	Total  usage.Counts `json:"total"`
+	Sum24h usage.Counts `json:"sum_24h"`
+	// Sum5h is the in-memory rolling 5h window — used by the UI to show
+	// "recent burn" for Codex OAuth creds (ChatGPT backend doesn't expose
+	// a proactive remaining-quota API, so this is the best signal we have
+	// before a 429 actually fires).
+	Sum5h    usage.Counts     `json:"sum_5h"`
 	LastUsed *time.Time       `json:"last_used,omitempty"`
 	Daily    []usage.DayEntry `json:"daily"` // last 14 days, oldest first
 }
@@ -330,6 +335,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			u = &usageSummary{
 				Total:    aggToCounts(lifeAgg),
 				Sum24h:   aggToCounts(last24Agg),
+				Sum5h:    h.usage.Sum5h(st.Auth.ID),
 				LastUsed: lastPtr,
 				Daily:    daily,
 			}

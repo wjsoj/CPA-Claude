@@ -38,9 +38,10 @@ type Server struct {
 	tokens    *clienttoken.Store
 	reqLog    *requestlog.Writer
 	endpoints []*endpoint
-	// inflight is intentionally shared across endpoints: a single client token
-	// hitting both Claude and Codex counts into one concurrency bucket (the
-	// user's cap is a per-token budget, not per-provider).
+	// inflight is keyed by (provider | clientToken): Claude and Codex are
+	// treated as independent budgets for the same user so a client running
+	// Claude at cap doesn't block its Codex calls (and vice-versa). Matches
+	// the per-provider stickiness already used by Pool.Acquire.
 	inflight sync.Map
 }
 

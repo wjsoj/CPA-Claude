@@ -18,6 +18,7 @@ export interface DayEntry {
 export interface UsageSummary {
   total: Counts;
   sum_24h: Counts;
+  sum_5h: Counts;
   last_used?: string;
   daily?: DayEntry[];
 }
