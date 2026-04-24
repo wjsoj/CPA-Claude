@@ -270,13 +270,36 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		upReq.Header.Set("Chatgpt-Account-Id", accountID)
 	}
 
-	// Fresh transport per request + crypto/tls. uTLS Chrome_Auto was tried
-	// (v0.11.4) and made things worse — handshake itself was RST, suggesting
-	// CF's anti-mimicry rules flag our Chrome_Auto fingerprint. Stock tls
-	// at least completes the handshake; if CF still 403s on app layer, the
-	// identity-encoded body below tells us why.
-	client := auth.NewPlainHTTPClient(snap.ProxyURL, false)
+	// Shared pooled transport (per proxyURL). Reusing HTTP/2 connections is
+	// critical here: chatgpt.com's CF edge rate-limits new TCP/TLS connections
+	// from VPS/proxy IPs and RSTs the handshake when the per-IP new-connection
+	// quota is hit — the classic alternating 200/503 symptom. A pooled h2 conn
+	// carries many requests so we stay under the limit. ClientFor's transport
+	// has HTTP/2 PING health checks (utls.go) so stale reused conns are
+	// detected and re-dialed transparently.
+	client := auth.ClientFor(snap.ProxyURL, false)
 	resp, err := client.Do(upReq)
+	// Network-error retry once on the SAME credential. These errors
+	// (`connection reset by peer`, `broken pipe`, `EOF`) are almost always
+	// transient infra flaps (CF new-conn rate limit, proxy hiccup, stale h2
+	// conn racing a server close) — not a problem with the credential. A
+	// single retry at ~400ms dodges the CF rate-limit window without
+	// burning the cred via MarkFailure / the pool's cross-cred retry loop,
+	// which is what was surfacing as 503 "all upstream credentials
+	// exhausted" in single-cred deployments.
+	if err != nil && !isClientDisconnect(ctx, err) && isTransientNetErr(err) {
+		log.Debugf("codex oauth: transient network error via %s (%v); retrying once on same cred", a.ID, err)
+		time.Sleep(400 * time.Millisecond)
+		retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(upstreamBody))
+		if rerr == nil {
+			retryReq.Header = upReq.Header.Clone()
+			if resp2, err2 := client.Do(retryReq); err2 == nil {
+				resp, err = resp2, nil
+			} else {
+				err = err2
+			}
+		}
+	}
 	if err != nil {
 		if isClientDisconnect(ctx, err) {
 			a.MarkClientCancel(err.Error())

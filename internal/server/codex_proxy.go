@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -113,7 +114,7 @@ func (s *Server) fetchCodexAPIKeyModels(ctx context.Context, a *auth.Auth) ([]co
 	access, _ := a.Credentials()
 	req.Header.Set("Authorization", "Bearer "+access)
 	req.Header.Set("Accept", "application/json")
-	client := auth.NewPlainHTTPClient(snap.ProxyURL, false)
+	client := auth.ClientFor(snap.ProxyURL, false)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -200,9 +201,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		upReq.Header.Set("Accept", "application/json")
 	}
 
-	// Fresh transport per request — shared pool exhibited stale h2 reuse against
-	// chatgpt.com-style backends. api.openai.com et al. don't care either way.
-	client := auth.NewPlainHTTPClient(snap.ProxyURL, false)
+	client := auth.ClientFor(snap.ProxyURL, false)
 	resp, err := client.Do(upReq)
 	if err != nil {
 		if isClientDisconnect(ctx, err) {
@@ -466,5 +465,24 @@ func isClientDisconnect(ctx context.Context, err error) bool {
 	// Fall-through: a raw context.Canceled with no ctx cancel means the
 	// transport itself aborted — treat as upstream failure, not client cancel.
 	return false
+}
+
+// isTransientNetErr reports whether err looks like a transient wire-level
+// failure worth a short retry on the same credential. Targets the CF
+// new-connection rate-limit symptom on chatgpt.com (RST mid-TLS) and similar
+// proxy/h2 flaps. Distinct from isClientDisconnect (client went away) and
+// from HTTP-status errors (handled by the pool's ReportUpstreamError path).
+func isTransientNetErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.Is(err, io.EOF) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "connection reset by peer") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "unexpected EOF") ||
+		strings.Contains(s, "http2: server sent GOAWAY")
 }
 
