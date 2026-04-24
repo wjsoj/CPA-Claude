@@ -200,12 +200,15 @@ auth_curl() {
 
 if [ "$VERSION" = "latest" ]; then
   msg "resolving latest release..."
+  # Tag resolution goes direct to api.github.com, never through the mirror:
+  # common mirrors (e.g. gh-proxy.com) refuse api.github.com and return 403,
+  # and the github.com /releases/latest HTML redirect is also blocked as
+  # "web page content". The API response is tiny, so a direct hit is fine
+  # even from mirror-land. Mirror is reserved for the actual binary download.
   API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-  TAG_SRC="$API_URL"
-  [ -n "$MIRROR" ] && TAG_SRC="${MIRROR}${API_URL}"
-  TAG="$(auth_curl -fsSL "$TAG_SRC" \
+  TAG="$(auth_curl -fsSL --connect-timeout 15 --max-time 30 "$API_URL" \
     | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
-  [ -n "$TAG" ] || err "could not resolve latest tag (try --version vX.Y.Z)"
+  [ -n "$TAG" ] || err "could not resolve latest tag via api.github.com (try --version vX.Y.Z)"
 else
   TAG="$VERSION"
 fi
