@@ -273,6 +273,11 @@ type authRow struct {
 	ClientCancelReason string            `json:"client_cancel_reason,omitempty"`
 	ModelMap           map[string]string `json:"model_map,omitempty"`
 	Usage              *usageSummary     `json:"usage,omitempty"`
+	// CodexRateLimits holds the latest x-codex-* response headers from
+	// chatgpt.com — primary/secondary window used-percent, resets etc.
+	// Empty for non-OAuth / non-Codex credentials or until first call.
+	CodexRateLimits   map[string]string `json:"codex_rate_limits,omitempty"`
+	CodexRateLimitsAt *time.Time        `json:"codex_rate_limits_at,omitempty"`
 }
 
 type usageSummary struct {
@@ -383,6 +388,24 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			ClientCancelReason: cancelReason,
 			ModelMap:           st.Auth.ModelMap,
 			Usage:              u,
+			CodexRateLimits: func() map[string]string {
+				if live == nil {
+					return nil
+				}
+				snap := live.Snapshot()
+				return snap.CodexRateLimits
+			}(),
+			CodexRateLimitsAt: func() *time.Time {
+				if live == nil {
+					return nil
+				}
+				snap := live.Snapshot()
+				if snap.CodexRateLimitsAt.IsZero() {
+					return nil
+				}
+				t := snap.CodexRateLimitsAt
+				return &t
+			}(),
 		})
 	}
 	// Clients (per-access-token spending).

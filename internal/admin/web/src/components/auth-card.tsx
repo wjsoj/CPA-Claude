@@ -1,3 +1,4 @@
+import React from "react";
 import type { AuthRow } from "@/lib/types";
 import { Sparkline } from "./sparkline";
 import { CardUpstreamQuota } from "./upstream-quota";
@@ -251,10 +252,17 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
             </div>
           </div>
           <div className="mt-1 text-[10px] text-muted-foreground leading-snug">
-            ChatGPT backend doesn't expose remaining-quota probes; this is our local rolling
-            count. Quota exhaustion surfaces as the red banner above once the backend 429s.
+            Local counter from our own request log. Backend-reported quota, when available,
+            appears below.
           </div>
         </div>
+      )}
+
+      {a.kind === "oauth" && a.provider === "openai" && a.codex_rate_limits && (
+        <CodexRateLimitPanel
+          limits={a.codex_rate_limits}
+          capturedAt={a.codex_rate_limits_at}
+        />
       )}
 
       <footer className="px-5 py-3 flex gap-1.5 flex-wrap">
@@ -364,4 +372,130 @@ function AlertStrip({
       </span>
     </div>
   );
+}
+
+// CodexRateLimitPanel renders the latest x-codex-* headers captured from
+// chatgpt.com responses. The backend's field set changes over time and some
+// are only present on a subset of responses, so this component stays loose:
+// it highlights the few fields we recognize (primary/secondary used-percent
+// + window-resets) and dumps the rest in a small key/value table.
+function CodexRateLimitPanel({
+  limits,
+  capturedAt,
+}: {
+  limits: Record<string, string>;
+  capturedAt?: string;
+}) {
+  // Known keys we promote to the prominent row. Matches what the Codex CLI
+  // actually displays to users.
+  const primaryUsed = pct(limits["x-codex-primary-used-percent"]);
+  const secondaryUsed = pct(limits["x-codex-secondary-used-percent"]);
+  const primaryReset =
+    limits["x-codex-primary-reset-after-seconds"] ||
+    limits["x-codex-primary-window-expires-at-iso"];
+  const secondaryReset =
+    limits["x-codex-secondary-reset-after-seconds"] ||
+    limits["x-codex-secondary-window-expires-at-iso"];
+  const known = new Set([
+    "x-codex-primary-used-percent",
+    "x-codex-secondary-used-percent",
+    "x-codex-primary-reset-after-seconds",
+    "x-codex-secondary-reset-after-seconds",
+    "x-codex-primary-window-expires-at-iso",
+    "x-codex-secondary-window-expires-at-iso",
+  ]);
+  const others = Object.entries(limits).filter(([k]) => !known.has(k));
+  return (
+    <div className="px-5 py-3 border-t border-border bg-muted/20">
+      <div className="flex items-center justify-between gap-2">
+        <div className="eyebrow">Backend quota (x-codex)</div>
+        {capturedAt && (
+          <div className="text-[10px] text-muted-foreground mono">
+            as of {new Date(capturedAt).toLocaleTimeString()}
+          </div>
+        )}
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+        <QuotaBar label="Primary (5h)" percent={primaryUsed} reset={primaryReset} />
+        <QuotaBar label="Secondary (weekly)" percent={secondaryUsed} reset={secondaryReset} />
+      </div>
+      {others.length > 0 && (
+        <details className="mt-2 text-[10px]">
+          <summary className="cursor-pointer text-muted-foreground">
+            other headers ({others.length})
+          </summary>
+          <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 mono">
+            {others.map(([k, v]) => (
+              <React.Fragment key={k}>
+                <span className="text-muted-foreground">{k.replace(/^x-codex-/, "")}</span>
+                <span className="truncate">{v}</span>
+              </React.Fragment>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function pct(raw?: string): number | null {
+  if (!raw) return null;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function QuotaBar({
+  label,
+  percent,
+  reset,
+}: {
+  label: string;
+  percent: number | null;
+  reset?: string;
+}) {
+  if (percent === null) {
+    return (
+      <div>
+        <div className="text-muted-foreground">{label}</div>
+        <div className="mono text-[10px] text-muted-foreground">—</div>
+      </div>
+    );
+  }
+  const pctDisplay = percent.toFixed(1);
+  const tone =
+    percent >= 90 ? "bg-destructive" : percent >= 70 ? "bg-[color:var(--warning)]" : "bg-primary";
+  return (
+    <div>
+      <div className="flex items-baseline justify-between">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="mono tabular">{pctDisplay}%</span>
+      </div>
+      <div className="h-1.5 mt-0.5 rounded-full bg-muted overflow-hidden">
+        <div className={cn("h-full", tone)} style={{ width: `${Math.min(100, percent)}%` }} />
+      </div>
+      {reset && (
+        <div className="text-[10px] text-muted-foreground mono mt-0.5">
+          resets {formatReset(reset)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatReset(raw: string): string {
+  // ISO timestamp → relative time; seconds → relative seconds
+  if (/^\d+$/.test(raw)) {
+    const s = parseInt(raw, 10);
+    if (s < 60) return `in ${s}s`;
+    if (s < 3600) return `in ${Math.round(s / 60)}m`;
+    if (s < 86400) return `in ${Math.round(s / 3600)}h`;
+    return `in ${Math.round(s / 86400)}d`;
+  }
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const delta = (d.getTime() - Date.now()) / 1000;
+  if (delta < 0) return "now";
+  if (delta < 3600) return `in ${Math.round(delta / 60)}m`;
+  if (delta < 86400) return `in ${Math.round(delta / 3600)}h`;
+  return `in ${Math.round(delta / 86400)}d`;
 }

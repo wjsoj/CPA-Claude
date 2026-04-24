@@ -294,6 +294,11 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		return true, false
 	}
 
+	// Capture rolling primary/secondary quota snapshot from upstream response
+	// headers (the `x-codex-*` family). Done unconditionally since 4xx/429
+	// responses also carry these — they're what tell us *why* we were blocked.
+	a.CaptureCodexRateLimits(resp.Header)
+
 	// Pre-read error bodies to inspect ChatGPT's usage-limit signals.
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusForbidden:

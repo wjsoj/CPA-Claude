@@ -51,6 +51,8 @@ export interface AuthRow {
   client_cancel_reason?: string;
   model_map?: Record<string, string>;
   usage?: UsageSummary;
+  codex_rate_limits?: Record<string, string>;
+  codex_rate_limits_at?: string;
 }
 
 export interface ClientRow {

@@ -96,6 +96,15 @@ type Auth struct {
 	// consecutive-failure counters, since the credential itself is fine.
 	LastClientCancel       time.Time
 	LastClientCancelReason string
+
+	// Codex rate-limit snapshot. ChatGPT's Codex backend returns
+	// x-codex-* headers on every response describing the caller's
+	// rolling primary (5h) and secondary (weekly) quota windows.
+	// We capture them verbatim so the admin UI can render whatever
+	// fields the backend currently exposes without code changes per
+	// header addition. CodexRateLimitsAt is zero = never captured.
+	CodexRateLimits   map[string]string
+	CodexRateLimitsAt time.Time
 }
 
 // healthGrace is how long after an isolated failure we still treat the
@@ -139,41 +148,52 @@ func (a *Auth) Snapshot() AuthInfo {
 			mm[k] = v
 		}
 	}
+	var rl map[string]string
+	if len(a.CodexRateLimits) > 0 {
+		rl = make(map[string]string, len(a.CodexRateLimits))
+		for k, v := range a.CodexRateLimits {
+			rl[k] = v
+		}
+	}
 	return AuthInfo{
-		ID:              a.ID,
-		Kind:            a.Kind,
-		Provider:        a.Provider,
-		Label:           a.Label,
-		Email:           a.Email,
-		ExpiresAt:       a.ExpiresAt,
-		ProxyURL:        a.ProxyURL,
-		MaxConcurrent:   a.MaxConcurrent,
-		Disabled:        a.Disabled,
-		QuotaExceededAt: a.QuotaExceededAt,
-		QuotaResetAt:    a.QuotaResetAt,
-		FilePath:        a.FilePath,
-		BaseURL:         a.BaseURL,
-		Group:           a.Group,
-		ModelMap:        mm,
+		ID:                a.ID,
+		Kind:              a.Kind,
+		Provider:          a.Provider,
+		Label:             a.Label,
+		Email:             a.Email,
+		ExpiresAt:         a.ExpiresAt,
+		ProxyURL:          a.ProxyURL,
+		MaxConcurrent:     a.MaxConcurrent,
+		Disabled:          a.Disabled,
+		QuotaExceededAt:   a.QuotaExceededAt,
+		QuotaResetAt:      a.QuotaResetAt,
+		FilePath:          a.FilePath,
+		BaseURL:           a.BaseURL,
+		Group:             a.Group,
+		ModelMap:          mm,
+		CodexRateLimits:   rl,
+		CodexRateLimitsAt: a.CodexRateLimitsAt,
 	}
 }
 
 type AuthInfo struct {
-	ID              string
-	Kind            Kind
-	Provider        string
-	Label           string
-	Email           string
-	ExpiresAt       time.Time
-	ProxyURL        string
-	MaxConcurrent   int
-	Disabled        bool
-	QuotaExceededAt time.Time
-	QuotaResetAt    time.Time
-	FilePath        string
-	BaseURL         string
-	Group           string
-	ModelMap        map[string]string
+	ID                string
+	Kind              Kind
+	Provider          string
+	Label             string
+	Email             string
+	ExpiresAt         time.Time
+	ProxyURL          string
+	MaxConcurrent     int
+	Disabled          bool
+	QuotaExceededAt   time.Time
+	QuotaResetAt      time.Time
+	FilePath          string
+	BaseURL           string
+	Group             string
+	ModelMap          map[string]string
+	CodexRateLimits   map[string]string
+	CodexRateLimitsAt time.Time
 }
 
 // IsQuotaExceeded reports true if Anthropic has signalled this auth is out of
@@ -343,6 +363,35 @@ func (a *Auth) CodexIdentity() (accountID, planType string) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.AccountID, a.PlanType
+}
+
+// CaptureCodexRateLimits extracts all x-codex-* response headers from upstream
+// and stores them as the latest rate-limit snapshot. Called after every Codex
+// upstream response regardless of status — a 403 or 429 also carries these
+// fields and keeping the view fresh matters most right when the user is about
+// to complain about a limit. Missing headers are simply ignored; we keep the
+// prior snapshot intact rather than wiping it.
+func (a *Auth) CaptureCodexRateLimits(h map[string][]string) {
+	if len(h) == 0 {
+		return
+	}
+	captured := make(map[string]string, 8)
+	for k, vs := range h {
+		if len(vs) == 0 {
+			continue
+		}
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "x-codex-") {
+			captured[lk] = vs[0]
+		}
+	}
+	if len(captured) == 0 {
+		return
+	}
+	a.mu.Lock()
+	a.CodexRateLimits = captured
+	a.CodexRateLimitsAt = time.Now()
+	a.mu.Unlock()
 }
 
 // IsHardFailed reports whether the credential has been flagged sticky-
