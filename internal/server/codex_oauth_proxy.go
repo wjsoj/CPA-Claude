@@ -264,7 +264,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		upReq.Header.Set("Chatgpt-Account-Id", accountID)
 	}
 
-	client := auth.ClientFor(snap.ProxyURL, false)
+	client := auth.NewPlainHTTPClient(snap.ProxyURL)
 	resp, err := client.Do(upReq)
 	if err != nil {
 		if isClientDisconnect(ctx, err) {

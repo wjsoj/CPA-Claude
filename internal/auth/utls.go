@@ -48,6 +48,34 @@ func ClientFor(proxyURL string, useUTLS bool) *http.Client {
 	return &http.Client{Transport: rt, Timeout: 0}
 }
 
+// NewPlainHTTPClient builds a fresh *http.Client per call with no cross-request
+// connection reuse — mirrors CLIProxyAPI's sdk/proxyutil pattern. Use this for
+// hosts that proved unreliable under the shared/pooled transport in ClientFor
+// (notably chatgpt.com/backend-api/codex), where stale h2 reuse surfaces as
+// spurious "connection reset by peer". SOCKS5/HTTP(S) proxies are honored.
+func NewPlainHTTPClient(proxyURL string) *http.Client {
+	tr, _ := http.DefaultTransport.(*http.Transport)
+	if tr == nil {
+		tr = &http.Transport{}
+	} else {
+		tr = tr.Clone()
+	}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			scheme := strings.ToLower(u.Scheme)
+			if scheme == "socks5" || scheme == "socks5h" {
+				tr.Proxy = nil
+				if dc := socks5DialContext(u); dc != nil {
+					tr.DialContext = dc
+				}
+			} else {
+				tr.Proxy = http.ProxyURL(u)
+			}
+		}
+	}
+	return &http.Client{Transport: tr}
+}
+
 func newStdTransport(proxyURL string) http.RoundTripper {
 	tr := &http.Transport{
 		ForceAttemptHTTP2: true,
