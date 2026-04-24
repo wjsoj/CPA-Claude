@@ -161,7 +161,13 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 		tried[a.ID] = true
 		attempts++
 
-		retry, done := s.doForward(c, a, path, body, peek.Stream, model, clientToken, clientName, start, attempts)
+		var retry, done bool
+		switch auth.NormalizeProvider(a.Provider) {
+		case auth.ProviderOpenAI:
+			retry, done = s.doForwardCodex(c, a, path, body, peek.Stream, model, clientToken, clientName, start, attempts)
+		default:
+			retry, done = s.doForward(c, a, path, body, peek.Stream, model, clientToken, clientName, start, attempts)
+		}
 		if done {
 			s.pool.Release(provider, clientToken)
 			return
