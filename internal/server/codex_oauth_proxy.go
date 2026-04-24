@@ -265,23 +265,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// Cloudflare's edge rules 403 the request before it reaches the OpenAI
 	// backend. We must look like the Codex CLI.
 	upReq.Header.Set("User-Agent", codexBackendUserAgent)
-	// Scrub headers that identify our ingress path before hitting chatgpt.com.
-	// Critical when our server sits behind Cloudflare Tunnel: cloudflared
-	// injects Cdn-Loop: cloudflare + a pile of Cf-* headers on every inbound
-	// request. Forwarding those to chatgpt.com (which is *also* behind CF)
-	// triggers CF's loop-prevention WAF rule and we get 403 HTML back. Strip
-	// by prefix to catch current + future CF-injected names, plus the usual
-	// reverse-proxy / client-leak headers.
-	for h := range upReq.Header {
-		lower := strings.ToLower(h)
-		if strings.HasPrefix(lower, "cf-") || strings.HasPrefix(lower, "cdn-") ||
-			strings.HasPrefix(lower, "x-forwarded-") || strings.HasPrefix(lower, "x-real-") {
-			upReq.Header.Del(h)
-		}
-	}
-	for _, h := range []string{"Forwarded", "Via", "Cookie", "Referer", "Origin", "True-Client-Ip"} {
-		upReq.Header.Del(h)
-	}
+	stripIngressHeaders(upReq.Header)
 	if accountID, _ := a.CodexIdentity(); accountID != "" {
 		upReq.Header.Set("Chatgpt-Account-Id", accountID)
 	}

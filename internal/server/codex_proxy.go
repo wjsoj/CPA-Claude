@@ -190,6 +190,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		return false, true
 	}
 	copyForwardableHeaders(c.Request.Header, upReq.Header)
+	stripIngressHeaders(upReq.Header)
 	accessToken, _ := a.Credentials()
 	upReq.Header.Set("Authorization", "Bearer "+accessToken)
 	upReq.Header.Set("Content-Type", "application/json")

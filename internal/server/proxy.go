@@ -260,6 +260,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 
 	// Forward selected client headers.
 	copyForwardableHeaders(c.Request.Header, upReq.Header)
+	stripIngressHeaders(upReq.Header)
 
 	// Anthropic auth + Claude Code fingerprint headers.
 	applyAnthropicHeaders(upReq, a, stream, isAnthropicBase)
@@ -420,6 +421,25 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		Attempts:    attempts,
 	})
 	return false, true
+}
+
+// stripIngressHeaders removes headers that describe the *ingress path* into
+// our server before forwarding upstream. Critical when the server sits
+// behind Cloudflare Tunnel: cloudflared injects Cdn-Loop: cloudflare plus a
+// pile of Cf-* headers, and api.anthropic.com / chatgpt.com are themselves
+// behind CF — seeing those headers triggers CF's loop-prevention WAF and
+// returns 403 HTML. Prefix match so future CF additions are covered.
+func stripIngressHeaders(h http.Header) {
+	for k := range h {
+		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, "cf-") || strings.HasPrefix(lower, "cdn-") ||
+			strings.HasPrefix(lower, "x-forwarded-") || strings.HasPrefix(lower, "x-real-") {
+			h.Del(k)
+		}
+	}
+	for _, k := range []string{"Forwarded", "Via", "Cookie", "Referer", "Origin", "True-Client-Ip"} {
+		h.Del(k)
+	}
 }
 
 func copyForwardableHeaders(src, dst http.Header) {
