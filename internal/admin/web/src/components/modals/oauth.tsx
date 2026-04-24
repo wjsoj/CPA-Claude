@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "@/lib/api";
-import type { OAuthStart } from "@/lib/types";
+import type { OAuthStart, Provider } from "@/lib/types";
 import {
   Dialog,
   DialogContent,
@@ -15,11 +15,34 @@ import { Textarea } from "@/components/ui/textarea";
 import { copyToClipboard } from "@/lib/utils";
 
 interface Props {
+  provider: Provider;
   onClose: () => void;
   onSaved: () => void;
 }
 
-export function OAuthModal({ onClose, onSaved }: Props) {
+// Per-provider UI copy. The backend handles the actual flow differences
+// (auth URL, redirect URI, token endpoint) via the `provider` field on
+// /oauth/start — the UI just needs to explain what the user is about to
+// see in the browser.
+const COPY: Record<Provider, { title: string; intro: string; proxyHint: string; redirect: string; primary: string }> = {
+  anthropic: {
+    title: "Sign in with Claude",
+    intro: "We'll open Claude's OAuth page. If this server can't reach claude.ai / api.anthropic.com directly, set a proxy URL — it's used for the token exchange and every subsequent request with this credential.",
+    proxyHint: "Typically only needed on restricted networks",
+    redirect: "http://localhost:54545/callback",
+    primary: "Open Claude login",
+  },
+  openai: {
+    title: "Sign in with ChatGPT (Codex)",
+    intro: "We'll open the ChatGPT Codex OAuth page. If this server can't reach auth.openai.com / chatgpt.com directly, set a proxy URL — it's used for the token exchange and every subsequent request with this credential.",
+    proxyHint: "Typically only needed on restricted networks",
+    redirect: "http://localhost:1455/auth/callback",
+    primary: "Open ChatGPT login",
+  },
+};
+
+export function OAuthModal({ provider, onClose, onSaved }: Props) {
+  const copy = COPY[provider];
   const [step, setStep] = useState<1 | 2>(1);
   const [proxy, setProxy] = useState("");
   const [label, setLabel] = useState("");
@@ -37,7 +60,7 @@ export function OAuthModal({ onClose, onSaved }: Props) {
     try {
       const d = await api<OAuthStart>("/admin/api/oauth/start", {
         method: "POST",
-        body: JSON.stringify({ proxy_url: proxy, label }),
+        body: JSON.stringify({ provider, proxy_url: proxy, label }),
       });
       setSess(d);
       setStep(2);
@@ -85,16 +108,11 @@ export function OAuthModal({ onClose, onSaved }: Props) {
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Sign in with Claude</DialogTitle>
+          <DialogTitle>{copy.title}</DialogTitle>
         </DialogHeader>
         {step === 1 && (
           <>
-            <p className="text-base text-muted-foreground">
-              We'll open Claude's OAuth page in a new tab. If this server is behind a firewall to{" "}
-              <code className="mono">claude.ai / api.anthropic.com</code>, set a proxy URL below — it
-              will be used both for the token exchange and for all subsequent requests made with this
-              credential.
-            </p>
+            <p className="text-base text-muted-foreground">{copy.intro}</p>
             <div className="space-y-1.5">
               <Label>Proxy URL (optional)</Label>
               <Input
@@ -103,6 +121,7 @@ export function OAuthModal({ onClose, onSaved }: Props) {
                 value={proxy}
                 onChange={(e) => setProxy(e.currentTarget.value)}
               />
+              <div className="text-xs text-muted-foreground">{copy.proxyHint}</div>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
@@ -138,7 +157,7 @@ export function OAuthModal({ onClose, onSaved }: Props) {
                 Cancel
               </Button>
               <Button disabled={busy} onClick={start}>
-                {busy ? "Starting…" : "Open Claude login"}
+                {busy ? "Starting…" : copy.primary}
               </Button>
             </DialogFooter>
           </>
@@ -149,7 +168,7 @@ export function OAuthModal({ onClose, onSaved }: Props) {
             <div className="text-base text-muted-foreground space-y-2">
               <p>
                 <b>Step 1.</b> Copy the login URL below and open it in a browser where you can sign
-                in to Claude.
+                in.
               </p>
             </div>
             <div className="space-y-1.5">
@@ -169,23 +188,21 @@ export function OAuthModal({ onClose, onSaved }: Props) {
 
             <div className="text-base text-muted-foreground space-y-2 pt-2">
               <p>
-                <b>Step 2.</b> After you authorize, Claude redirects to{" "}
-                <code className="mono break-all">
-                  http://localhost:54545/callback?code=…&amp;state=…
-                </code>
-                . That page normally fails to load — <b>that's fine</b>.
+                <b>Step 2.</b> After you authorize, the browser redirects to{" "}
+                <code className="mono break-all">{copy.redirect}?code=…&amp;state=…</code>. That
+                page usually fails to load — <b>that's fine</b>.
               </p>
               <p>
                 <b>Step 3.</b> Copy the <b>full URL from the browser address bar</b> (or the{" "}
-                <code className="mono">code#state</code> value Claude shows on its manual-copy
-                page) and paste it below.
+                <code className="mono">code#state</code> value shown on a manual-copy page) and
+                paste it below.
               </p>
             </div>
             <div className="space-y-1.5">
               <Label>Callback URL or code#state</Label>
               <Textarea
                 className="mono text-sm h-28"
-                placeholder="http://localhost:54545/callback?code=xxxxx&state=yyyyy"
+                placeholder={`${copy.redirect}?code=xxxxx&state=yyyyy`}
                 value={callback}
                 onChange={(e) => setCallback(e.currentTarget.value)}
               />

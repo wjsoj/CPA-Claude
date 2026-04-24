@@ -22,9 +22,13 @@ export interface UsageSummary {
   daily?: DayEntry[];
 }
 
+export type Provider = "anthropic" | "openai";
+
 export interface AuthRow {
   id: string;
   kind: "oauth" | "apikey";
+  provider: Provider;
+  plan_type?: string;
   label: string;
   email?: string;
   proxy_url: string;
@@ -86,6 +90,7 @@ export interface Summary {
 export interface RequestEntry {
   ts: string;
   client?: string;
+  provider?: Provider;
   model: string;
   auth_id: string;
   auth_label?: string;

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "@/lib/api";
+import type { Provider } from "@/lib/types";
 import {
   Dialog,
   DialogContent,
@@ -15,11 +16,32 @@ import { Textarea } from "@/components/ui/textarea";
 import { textToModelMap } from "@/lib/utils";
 
 interface Props {
+  provider: Provider;
   onClose: () => void;
   onSaved: () => void;
 }
 
-export function APIKeyModal({ onClose, onSaved }: Props) {
+// Per-provider hints so operators don't have to remember which key prefix
+// or base URL belongs to which upstream.
+const COPY: Record<Provider, { title: string; help: string; placeholder: string; baseDefault: string; routeHint: string }> = {
+  anthropic: {
+    title: "Add Anthropic API key",
+    help: "Anthropic sk-ant-api… key. Stored as JSON in auth_dir, editable from the panel.",
+    placeholder: "sk-ant-api03-...",
+    baseDefault: "api.anthropic.com",
+    routeHint: "{base_url}/v1/messages",
+  },
+  openai: {
+    title: "Add OpenAI / Codex API key",
+    help: "OpenAI sk-proj-… or sk-… key. Routed via the Codex endpoint to {base_url}/v1/chat/completions or /v1/responses.",
+    placeholder: "sk-proj-...",
+    baseDefault: "api.openai.com",
+    routeHint: "{base_url}/v1/chat/completions",
+  },
+};
+
+export function APIKeyModal({ provider, onClose, onSaved }: Props) {
+  const copy = COPY[provider];
   const [apiKey, setAPIKey] = useState("");
   const [label, setLabel] = useState("");
   const [proxy, setProxy] = useState("");
@@ -40,6 +62,7 @@ export function APIKeyModal({ onClose, onSaved }: Props) {
       await api("/admin/api/apikeys", {
         method: "POST",
         body: JSON.stringify({
+          provider,
           api_key: apiKey.trim(),
           label: label.trim(),
           proxy_url: proxy.trim(),
@@ -60,11 +83,8 @@ export function APIKeyModal({ onClose, onSaved }: Props) {
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add API key</DialogTitle>
-          <DialogDescription>
-            Anthropic <span className="mono">sk-ant-api…</span> key. Stored as a JSON file in{" "}
-            <span className="mono">auth_dir</span>, mutable from the panel.
-          </DialogDescription>
+          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogDescription>{copy.help}</DialogDescription>
         </DialogHeader>
         <div className="space-y-1.5">
           <Label>API key</Label>
@@ -72,7 +92,7 @@ export function APIKeyModal({ onClose, onSaved }: Props) {
             type="password"
             autoFocus
             className="mono"
-            placeholder="sk-ant-api03-..."
+            placeholder={copy.placeholder}
             value={apiKey}
             onChange={(e) => setAPIKey(e.currentTarget.value)}
           />
@@ -89,13 +109,13 @@ export function APIKeyModal({ onClose, onSaved }: Props) {
           <Label>Base URL (optional, for relay vendors)</Label>
           <Input
             className="mono"
-            placeholder="https://api.your-relay-vendor.com (default: api.anthropic.com)"
+            placeholder={`https://api.your-relay-vendor.com (default: ${copy.baseDefault})`}
             value={baseURL}
             onChange={(e) => setBaseURL(e.currentTarget.value)}
           />
           <p className="text-xs text-muted-foreground">
-            Requests with this key go to <span className="mono">{"{base_url}/v1/messages"}</span>.
-            Leave empty to hit Anthropic directly.
+            Requests with this key go to <span className="mono">{copy.routeHint}</span>. Leave
+            empty for the default upstream.
           </p>
         </div>
         <div className="space-y-1.5">
@@ -120,13 +140,17 @@ export function APIKeyModal({ onClose, onSaved }: Props) {
           <Label>Model map (optional)</Label>
           <Textarea
             className="mono text-sm h-32"
-            placeholder={"claude-opus-4-6 = [0.16]稳定喵/claude-opus-4-6\nclaude-haiku-4-5 ="}
+            placeholder={
+              provider === "openai"
+                ? "gpt-5 = vendor-name/gpt-5\ngpt-5-mini ="
+                : "claude-opus-4-6 = [0.16]稳定喵/claude-opus-4-6\nclaude-haiku-4-5 ="
+            }
             value={modelMapText}
             onChange={(e) => setModelMapText(e.currentTarget.value)}
           />
           <p className="text-xs text-muted-foreground">
-            One <span className="mono">client_model = upstream_model</span> per line. When non-empty,
-            this key only serves listed client models, and the request body's{" "}
+            One <span className="mono">client_model = upstream_model</span> per line. When
+            non-empty, this key only serves listed client models, and the request body's{" "}
             <span className="mono">model</span> is rewritten before forwarding.
           </p>
         </div>

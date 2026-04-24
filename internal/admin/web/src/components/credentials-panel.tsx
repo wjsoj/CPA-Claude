@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { KeyRound, Plus, FileJson } from "lucide-react";
-import type { AuthRow, Summary } from "@/lib/types";
+import type { AuthRow, Provider, Summary } from "@/lib/types";
 import { AuthCard } from "./auth-card";
 import { Button } from "@/components/ui/button";
 
@@ -9,9 +10,23 @@ interface Props {
   summary: Summary | null;
   onAction: (a: AuthRow, act: Action) => void;
   onEdit: (a: AuthRow) => void;
-  onAddOAuth: () => void;
-  onAddAPIKey: () => void;
+  onAddOAuth: (provider: Provider) => void;
+  onAddAPIKey: (provider: Provider) => void;
   onUpload: () => void;
+}
+
+// Sub-tab per upstream provider. The user explicitly asked for strict
+// separation — a single credential's auth flow, pricing, and upstream
+// are provider-specific, so mixing them in one card list makes the UI
+// unclear. Tokens / logs / stats / status stay unified at their own
+// top-level tabs.
+const TABS: { id: Provider; label: string; signInCta: string }[] = [
+  { id: "anthropic", label: "Claude", signInCta: "Sign in with Claude" },
+  { id: "openai", label: "Codex (ChatGPT)", signInCta: "Sign in with ChatGPT" },
+];
+
+function normProvider(p: string | undefined): Provider {
+  return p === "openai" ? "openai" : "anthropic";
 }
 
 export function CredentialsPanel({
@@ -22,12 +37,21 @@ export function CredentialsPanel({
   onAddAPIKey,
   onUpload,
 }: Props) {
+  const [provider, setProvider] = useState<Provider>("anthropic");
   const auths = summary?.auths || [];
-  const oauths = auths.filter((a) => a.kind === "oauth");
-  const apikeys = auths.filter((a) => a.kind === "apikey");
-  const healthy = auths.filter((a) => a.healthy).length;
-  const quota = auths.filter((a) => a.quota_exceeded).length;
-  const unhealthy = auths.filter((a) => a.hard_failure).length;
+  const scoped = auths.filter((a) => normProvider(a.provider) === provider);
+  const oauths = scoped.filter((a) => a.kind === "oauth");
+  const apikeys = scoped.filter((a) => a.kind === "apikey");
+  const healthy = scoped.filter((a) => a.healthy).length;
+  const quota = scoped.filter((a) => a.quota_exceeded).length;
+  const unhealthy = scoped.filter((a) => a.hard_failure).length;
+
+  const current = TABS.find((t) => t.id === provider)!;
+
+  // Per-provider counts so operators can see at a glance which tab has
+  // credentials. Rendered inline on the tab buttons.
+  const countFor = (p: Provider) =>
+    auths.filter((a) => normProvider(a.provider) === p).length;
 
   return (
     <div className="space-y-6">
@@ -45,11 +69,11 @@ export function CredentialsPanel({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={onAddOAuth} className="gap-2">
+          <Button onClick={() => onAddOAuth(provider)} className="gap-2">
             <Plus className="h-4 w-4" />
-            Sign in with Claude
+            {current.signInCta}
           </Button>
-          <Button variant="outline" onClick={onAddAPIKey} className="gap-2">
+          <Button variant="outline" onClick={() => onAddAPIKey(provider)} className="gap-2">
             <KeyRound className="h-4 w-4" />
             API key
           </Button>
@@ -60,17 +84,41 @@ export function CredentialsPanel({
         </div>
       </header>
 
+      {/* Provider sub-tabs. Strict separation — Claude and Codex credentials
+          never mix in the same list. */}
+      <nav className="flex gap-1 border-b border-border-strong">
+        {TABS.map((t) => {
+          const active = t.id === provider;
+          const n = countFor(t.id);
+          return (
+            <button
+              key={t.id}
+              onClick={() => setProvider(t.id)}
+              className={
+                "px-4 py-2 text-sm font-medium transition-colors -mb-px border-b-2 " +
+                (active
+                  ? "border-foreground text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground")
+              }
+            >
+              {t.label}
+              <span className="ml-2 mono text-xs opacity-70 tabular">{n}</span>
+            </button>
+          );
+        })}
+      </nav>
+
       {!summary ? (
         <div className="py-16 text-center eyebrow animate-pulse bg-card border border-border-strong rounded-md">
           <span className="opacity-60">Loading credentials…</span>
         </div>
-      ) : auths.length === 0 ? (
+      ) : scoped.length === 0 ? (
         <div className="py-14 px-6 text-center text-sm text-muted-foreground font-mono bg-card border border-border-strong rounded-md">
-          No credentials yet — use the buttons above to add one.
+          No {current.label} credentials yet — use the buttons above to add one.
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
-          {auths.map((a) => (
+          {scoped.map((a) => (
             <AuthCard key={a.id} a={a} onAction={onAction} onEdit={onEdit} />
           ))}
         </div>

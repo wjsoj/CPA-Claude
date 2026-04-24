@@ -246,6 +246,8 @@ func (h *Handler) adminAuth() gin.HandlerFunc {
 type authRow struct {
 	ID            string        `json:"id"`
 	Kind          string        `json:"kind"`
+	Provider      string        `json:"provider"` // "anthropic" | "openai"
+	PlanType      string        `json:"plan_type,omitempty"`
 	Label         string        `json:"label"`
 	Email         string        `json:"email,omitempty"`
 	ProxyURL      string        `json:"proxy_url"`
@@ -345,9 +347,16 @@ func (h *Handler) handleSummary(c *gin.Context) {
 				cancelReason = reason
 			}
 		}
+		provider := auth.NormalizeProvider(st.Auth.Provider)
+		var planType string
+		if live != nil {
+			_, planType = live.CodexIdentity()
+		}
 		rows = append(rows, authRow{
 			ID:            st.Auth.ID,
 			Kind:          kind,
+			Provider:      provider,
+			PlanType:      planType,
 			Label:         st.Auth.Label,
 			Email:         st.Auth.Email,
 			ProxyURL:      st.Auth.ProxyURL,

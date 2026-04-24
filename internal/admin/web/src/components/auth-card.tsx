@@ -80,7 +80,15 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
           <div className="mt-1 mono text-[11px] text-muted-foreground truncate pl-4.5">{a.id}</div>
         </div>
         <div className="flex flex-col items-end gap-1 shrink-0">
+          <Badge variant={a.provider === "openai" ? "violet" : "slate"} title="Upstream provider">
+            {a.provider === "openai" ? "Codex" : "Claude"}
+          </Badge>
           <Badge variant={a.kind === "apikey" ? "blue" : "slate"}>{kindLabel}</Badge>
+          {a.plan_type && (
+            <Badge variant="slate" title="ChatGPT subscription plan (from id_token)">
+              {a.plan_type}
+            </Badge>
+          )}
           <Badge variant={a.group ? "violet" : "slate"} title="Credential group">
             {a.group || "public"}
           </Badge>

@@ -10,7 +10,7 @@ import {
   Receipt,
 } from "lucide-react";
 import { api, setToken, ApiError } from "@/lib/api";
-import type { AuthRow, ClientRow, Summary } from "@/lib/types";
+import type { AuthRow, ClientRow, Provider, Summary } from "@/lib/types";
 import { OverviewPanel } from "./overview-panel";
 import { CredentialsPanel } from "./credentials-panel";
 import { TokensPanel } from "./tokens-panel";
@@ -85,8 +85,10 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [err, setErr] = useState("");
   const [editing, setEditing] = useState<AuthRow | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [oauthing, setOauthing] = useState(false);
-  const [apikeying, setAPIKeying] = useState(false);
+  // Track which provider the user is adding — the OAuth and API-key
+  // modals differ per upstream (URLs, placeholder text). null = closed.
+  const [oauthing, setOauthing] = useState<Provider | null>(null);
+  const [apikeying, setAPIKeying] = useState<Provider | null>(null);
   const [addingToken, setAddingToken] = useState(false);
   const [editingToken, setEditingToken] = useState<ClientRow | null>(null);
   const [lastTick, setLastTick] = useState(Date.now());
@@ -363,8 +365,8 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
               summary={data}
               onAction={onAction}
               onEdit={setEditing}
-              onAddOAuth={() => setOauthing(true)}
-              onAddAPIKey={() => setAPIKeying(true)}
+              onAddOAuth={(p) => setOauthing(p)}
+              onAddAPIKey={(p) => setAPIKeying(p)}
               onUpload={() => setUploading(true)}
             />
           )}
@@ -400,6 +402,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                     <table className="w-full text-sm">
                       <thead className="text-left border-b border-border-strong">
                         <tr className="eyebrow">
+                          <th className="py-3 px-4 font-[inherit]">Provider</th>
                           <th className="py-3 px-4 font-[inherit]">Model</th>
                           <th className="py-3 px-4 font-[inherit]">Input / 1M</th>
                           <th className="py-3 px-4 font-[inherit]">Output / 1M</th>
@@ -410,12 +413,19 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                       <tbody>
                         {Object.entries(data.pricing.models)
                           .sort(([a], [b]) => a.localeCompare(b))
-                          .map(([name, p]) => (
+                          .map(([name, p]) => {
+                            // Catalog keys are "provider/model"; legacy bare
+                            // keys default to Anthropic.
+                            const slash = name.indexOf("/");
+                            const prov = slash > 0 ? name.slice(0, slash) : "anthropic";
+                            const model = slash > 0 ? name.slice(slash + 1) : name;
+                            return (
                             <tr
                               key={name}
                               className="border-b border-border last:border-0 hover:bg-muted/50 transition-colors"
                             >
-                              <td className="py-2.5 px-4 mono text-sm">{name}</td>
+                              <td className="py-2.5 px-4 mono text-xs uppercase opacity-70">{prov}</td>
+                              <td className="py-2.5 px-4 mono text-sm">{model}</td>
                               <td className="py-2.5 px-4 mono text-sm">
                                 ${p.input_per_1m.toFixed(2)}
                               </td>
@@ -429,8 +439,10 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                                 ${p.cache_create_per_1m.toFixed(2)}
                               </td>
                             </tr>
-                          ))}
+                          );
+                          })}
                         <tr className="bg-muted/50">
+                          <td className="py-2.5 px-4 mono text-xs uppercase opacity-70">—</td>
                           <td className="py-2.5 px-4 mono text-sm text-muted-foreground">
                             (default / fallback)
                           </td>
@@ -483,18 +495,20 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
       )}
       {oauthing && (
         <OAuthModal
-          onClose={() => setOauthing(false)}
+          provider={oauthing}
+          onClose={() => setOauthing(null)}
           onSaved={() => {
-            setOauthing(false);
+            setOauthing(null);
             refresh();
           }}
         />
       )}
       {apikeying && (
         <APIKeyModal
-          onClose={() => setAPIKeying(false)}
+          provider={apikeying}
+          onClose={() => setAPIKeying(null)}
           onSaved={() => {
-            setAPIKeying(false);
+            setAPIKeying(null);
             refresh();
           }}
         />
