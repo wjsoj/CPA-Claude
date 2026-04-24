@@ -44,6 +44,7 @@ type Filter struct {
 	ClientToken string    // exact match on Record.ClientToken (masked); preferred over Client
 	Client      string    // exact match on Record.Client (fallback for orphans)
 	Model       string    // exact match on Record.Model
+	Provider    string    // exact match on Record.Provider ("anthropic" | "openai"). Legacy records (no provider field) match when Provider == "anthropic" so back-fill isn't needed.
 	Status      int       // 0 = any; otherwise exact match
 	Limit       int       // page size for Entries (0 = 50)
 	Offset      int       // number of newest-first records to skip before Limit
@@ -293,6 +294,18 @@ func matches(r Record, f Filter) bool {
 	}
 	if f.Model != "" && !strings.EqualFold(r.Model, f.Model) {
 		return false
+	}
+	if f.Provider != "" {
+		// Records written before the provider field existed will have
+		// r.Provider == "". Treat them as anthropic so historical data is
+		// still reachable without a back-fill migration.
+		rp := strings.ToLower(r.Provider)
+		if rp == "" {
+			rp = "anthropic"
+		}
+		if !strings.EqualFold(rp, f.Provider) {
+			return false
+		}
 	}
 	if f.Status != 0 && r.Status != f.Status {
 		return false

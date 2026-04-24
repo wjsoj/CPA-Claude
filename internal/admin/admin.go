@@ -894,6 +894,13 @@ func (h *Handler) handleAnthropicUsage(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "oauth credential not found"})
 		return
 	}
+	// Endpoint only speaks Anthropic's OAuth usage API — reject Codex
+	// credentials up front rather than 502ing after a pointless token
+	// refresh and an unknown-host probe.
+	if auth.NormalizeProvider(a.Provider) != auth.ProviderAnthropic {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "anthropic-usage endpoint is Anthropic-only"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 	// Ensure the access token is fresh before hitting the upstream endpoints.

@@ -112,9 +112,14 @@ admin_path: /mgmt-console
 
 # API-key fallback pool. Used when every OAuth file is saturated or
 # unavailable. API keys have no concurrency limit. Same fields are
-# editable per-key from the admin panel.
-api_keys: []
-  # — Anthropic API key (legacy default; omit `provider` and it's assumed)
+# editable per-key from the admin panel. Leave as an empty list to
+# disable (`api_keys: []`) or remove the stanza entirely.
+#
+# Each entry writes a file under auth_dir on first load; the admin
+# panel can edit the resulting files in-place afterwards.
+api_keys:
+  # — Anthropic API key (omit `provider` and anthropic is assumed — keeps
+  #   older configs working unchanged)
   # - key: "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
   #   provider: anthropic
   #   label: "primary-claude"
@@ -123,17 +128,18 @@ api_keys: []
   #   group: ""             # public; or e.g. "premium" to scope this key
   #   model_map: {}         # non-empty turns this key model-restricted
   #
-  # — OpenAI (BYOK) API key for the Codex endpoint
+  # — OpenAI BYOK key used by the Codex endpoint. Routed to
+  #   {base_url}/v1/chat/completions or /v1/responses.
   # - key: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxx"
   #   provider: openai
   #   label: "openai-primary"
   #   proxy_url: ""
-  #   base_url: ""          # override upstream host
+  #   base_url: ""
   #
-  # — Third-party Claude relay example with quirky model names. model_map
-  #   both routes (key only handles the listed client-facing model names)
-  #   and rewrites the request body's "model" field before forwarding.
-  #   Empty value = accept the model name without rewriting.
+  # — Third-party Claude relay with a custom base URL + model name rewrite.
+  #   model_map both routes (key only accepts listed client-facing model
+  #   names) and rewrites the request body's `model` field before
+  #   forwarding. Empty value = accept the model name without rewriting.
   # - key: "sk-relayvendor-xxx"
   #   provider: anthropic
   #   label: "relay-A"

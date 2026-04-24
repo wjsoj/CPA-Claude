@@ -95,7 +95,7 @@ export function EditAuthModal({ auth, onClose, onSaved }: Props) {
                   onChange={(e) => setBaseURL(e.currentTarget.value)}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Per-key upstream override; leave blank for Anthropic.
+                  Per-key upstream override; leave blank for the provider default.
                 </p>
               </div>
               <div className="space-y-1.5">

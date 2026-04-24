@@ -238,7 +238,7 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
         </div>
       )}
 
-      {a.kind === "oauth" && <CardUpstreamQuota auth={a} />}
+      {a.kind === "oauth" && a.provider === "anthropic" && <CardUpstreamQuota auth={a} />}
 
       <footer className="px-5 py-3 flex gap-1.5 flex-wrap">
         {a.kind === "oauth" && (

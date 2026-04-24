@@ -62,7 +62,7 @@ export function UploadModal({ onClose, onSaved }: Props) {
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add OAuth credential</DialogTitle>
+          <DialogTitle>Upload credential JSON</DialogTitle>
         </DialogHeader>
         <input
           type="file"
@@ -86,7 +86,7 @@ export function UploadModal({ onClose, onSaved }: Props) {
           <Label>or paste JSON</Label>
           <Textarea
             className="mono h-40"
-            placeholder='{"type":"claude","access_token":"...","refresh_token":"...","email":"..."}'
+            placeholder='{"type":"claude" | "codex" | "apikey" | "openai_api_key", "provider":"anthropic" | "openai", "access_token":"...", ...}'
             value={content}
             onChange={(e) => setContent(e.currentTarget.value)}
           />

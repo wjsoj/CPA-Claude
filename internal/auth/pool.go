@@ -30,7 +30,10 @@ type Pool struct {
 	defaultProxy string
 	// usageLoad, when set, returns a cost-weighted token count for the given
 	// OAuth auth over the recent rolling window used for load balancing —
-	// currently the last ~5h to align with Anthropic's 5-hour quota window
+	// currently the last ~5h to align with Anthropic's 5-hour quota window.
+	// OpenAI/Codex does not expose a comparable rolling quota; the same
+	// 5h window still gives a reasonable "recent load" signal for picking
+	// the least-used Codex credential
 	// (see usage.Counts.WeightedTotal — input 1×, cache_create 1.25×,
 	// cache_read 0.1×, output 5×). Drives OAuth selection in
 	// pickOAuthLocked: the candidate with the lowest weighted usage wins,
