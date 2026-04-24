@@ -1,20 +1,38 @@
-# CPA-Claude — native Anthropic Claude proxy configuration.
+# CPA-Claude — native Anthropic Claude + OpenAI Codex proxy configuration.
 #
 # Every field below is optional; values shown are the built-in defaults
 # applied when the key is missing. Client access tokens are NOT in this
 # file — manage them from the admin panel (persisted in tokens.json
 # next to state_file).
 
-# Listen address.
-host: "0.0.0.0"
-port: 8317
+# Two independent HTTP listeners, one per upstream provider. They share
+# the same client token store, usage ledger, request log, and admin
+# panel — only the routes and the credential pool subset differ.
+#
+# The admin panel + public /status page are mounted on the "primary"
+# endpoint: Claude when it's enabled, otherwise Codex.
+endpoints:
+  claude:
+    host: "0.0.0.0"
+    port: 8317
+    disabled: false
+  codex:
+    host: "0.0.0.0"
+    port: 8318
+    disabled: true    # opt-in: set to false after adding Codex credentials
+
+# Legacy top-level host/port. Kept for backward compatibility — when
+# endpoints.claude.port is unset these are used as its fallback. New
+# configs should write them under endpoints.claude instead.
+# host: "0.0.0.0"
+# port: 8317
 
 # trace | debug | info | warn | error
 log_level: info
 
-# Directory containing per-credential OAuth JSON files (one per Claude
-# account). Each file may declare its own proxy URL and max_concurrent.
-# Relative paths resolve against the config file's directory.
+# Directory containing per-credential OAuth JSON files (one per Claude /
+# Codex account). Each file may declare its own proxy URL and
+# max_concurrent. Relative paths resolve against this file's directory.
 auth_dir: ./auths
 
 # Persistent usage statistics and session state. Survives restarts.
@@ -22,17 +40,21 @@ auth_dir: ./auths
 state_file: ./state.json
 
 # Per-request JSONL log. Writes to log_dir/requests-YYYY-MM-DD.jsonl,
-# rotated daily. Leave empty to disable.
+# rotated daily. Leave empty to disable. Records now carry a `provider`
+# field so log aggregation can split Claude vs Codex traffic.
 log_dir: ./logs
 
 # Days to retain rotated request logs. 0 = keep forever.
 log_retention_days: 90
 
-# Minutes of inactivity after which a client session releases its OAuth slot.
+# Minutes of inactivity after which a client session releases its OAuth
+# slot. Sessions are scoped per (client_token, provider) so the same
+# token using both endpoints has independent stickiness windows.
 active_window_minutes: 5
 
 # Default maximum concurrent in-flight requests per client token.
-# 0 = unlimited. Per-token overrides (set via admin panel) take precedence.
+# 0 = unlimited. Per-token overrides (set via admin panel) take
+# precedence. This cap is *global* across both endpoints.
 client_max_concurrent: 15
 
 # Use uTLS (Chrome fingerprint) for all upstream calls. Recommended —
@@ -43,8 +65,10 @@ use_utls: true
 # specify one of their own. Empty = direct connection.
 default_proxy_url: ""
 
-# Override Anthropic base URL (normally leave default).
-anthropic_base_url: "https://api.anthropic.com"
+# Upstream base URLs (normally leave at default).
+anthropic_base_url:        "https://api.anthropic.com"
+openai_base_url:           "https://api.openai.com"          # BYOK Codex API-key path
+chatgpt_backend_base_url:  "https://chatgpt.com/backend-api" # Codex OAuth path
 
 # Admin panel token. If set, the SPA is served under admin_path and
 # protected by this token (X-Admin-Token header or Authorization: Bearer).
@@ -56,41 +80,62 @@ admin_token: "change-me-long-random-string"
 # with "/" and not end with "/".
 admin_path: /mgmt-console
 
-# Pricing table. Built-in defaults already cover:
-#   claude-haiku-4-5-20251001, claude-haiku-4-5
-#   claude-opus-4-6
-#   claude-sonnet-4-6
-# Only needed to override or add new models. Unlisted models fall back
-# to `default` (currently Sonnet pricing).
+# Pricing table. Keyed by "<provider>/<model>". Built-in defaults cover:
+#   Anthropic: claude-haiku-4-5, claude-opus-4-6, claude-opus-4-7,
+#              claude-sonnet-4-6
+#   OpenAI:    gpt-5.2, gpt-5.3-codex[-spark], gpt-5.4[-mini], gpt-5.5,
+#              gpt-5, gpt-5-mini, gpt-5-nano, gpt-4o, gpt-4o-mini
+# Bare model keys (no slash) are interpreted as anthropic/<model> for
+# backward compatibility with older configs. Unlisted models fall back
+# to provider_defaults[provider], then to `default`.
 # pricing:
 #   default:
 #     input_per_1m: 3.00
 #     output_per_1m: 15.00
 #     cache_read_per_1m: 0.30
 #     cache_create_per_1m: 3.75
+#   provider_defaults:
+#     openai:
+#       input_per_1m: 1.25
+#       output_per_1m: 10.00
+#       cache_read_per_1m: 0.125
 #   models:
-#     claude-custom:
-#       input_per_1m: 2.0
+#     anthropic/claude-opus-4-7:
+#       input_per_1m: 5.0
+#       output_per_1m: 25.0
+#       cache_read_per_1m: 0.50
+#       cache_create_per_1m: 6.25
+#     openai/gpt-5.3-codex:
+#       input_per_1m: 1.25
 #       output_per_1m: 10.0
-#       cache_read_per_1m: 0.2
-#       cache_create_per_1m: 2.5
+#       cache_read_per_1m: 0.125
 
 # API-key fallback pool. Used when every OAuth file is saturated or
 # unavailable. API keys have no concurrency limit. Same fields are
 # editable per-key from the admin panel.
 api_keys: []
+  # — Anthropic API key (legacy default; omit `provider` and it's assumed)
   # - key: "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  #   label: "primary"
+  #   provider: anthropic
+  #   label: "primary-claude"
   #   proxy_url: ""
   #   base_url: ""          # override upstream host (third-party relays)
   #   group: ""             # public; or e.g. "premium" to scope this key
   #   model_map: {}         # non-empty turns this key model-restricted
   #
-  # Third-party relay example with quirky model names. model_map both
-  # routes (this key only handles the listed client model names) and
-  # rewrites the request body's "model" field before forwarding. Empty
-  # value = accept the model name without rewriting.
+  # — OpenAI (BYOK) API key for the Codex endpoint
+  # - key: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxx"
+  #   provider: openai
+  #   label: "openai-primary"
+  #   proxy_url: ""
+  #   base_url: ""          # override upstream host
+  #
+  # — Third-party Claude relay example with quirky model names. model_map
+  #   both routes (key only handles the listed client-facing model names)
+  #   and rewrites the request body's "model" field before forwarding.
+  #   Empty value = accept the model name without rewriting.
   # - key: "sk-relayvendor-xxx"
+  #   provider: anthropic
   #   label: "relay-A"
   #   base_url: "https://az.zlapi.pro"
   #   group: ""

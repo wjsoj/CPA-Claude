@@ -132,6 +132,13 @@ func main() {
 	log.Infof("client tokens: %d loaded from %s", len(tokens.List()), tokensPath)
 
 	s := server.New(cfg, pool, store, reqLog, tokens)
+	for _, ep := range s.Endpoints() {
+		primary := ""
+		if ep.Primary {
+			primary = " (primary — admin panel mounted here)"
+		}
+		log.Infof("endpoint %s [%s] → %s%s", ep.Name, ep.Provider, ep.Addr, primary)
+	}
 
 	// Graceful shutdown. We block main on the done channel so store.Close()
 	// is guaranteed to finish (final usage flush + fsync) before we exit.

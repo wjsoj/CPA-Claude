@@ -23,10 +23,41 @@ type APIKey struct {
 	ModelMap map[string]string `yaml:"model_map,omitempty"`
 }
 
+// EndpointConfig selects the listening host/port for one provider-scoped
+// HTTP endpoint. An endpoint is considered live when Port > 0 and !Disabled
+// — this lets users toggle Claude or Codex off without having to remove the
+// whole section.
+type EndpointConfig struct {
+	Host     string `yaml:"host,omitempty"`
+	Port     int    `yaml:"port,omitempty"`
+	Disabled bool   `yaml:"disabled,omitempty"`
+}
+
+// IsEnabled reports whether this endpoint should be bound on startup.
+func (e EndpointConfig) IsEnabled() bool { return !e.Disabled && e.Port > 0 }
+
+// EndpointsConfig groups the per-provider endpoint configs. Both endpoints
+// share the same upstream credential pool, client token store, usage store,
+// and request log. They differ only in the routes they expose and the
+// credential subset they route to.
+type EndpointsConfig struct {
+	Claude EndpointConfig `yaml:"claude"`
+	Codex  EndpointConfig `yaml:"codex"`
+}
+
 type Config struct {
+	// Legacy top-level host/port. When endpoints.claude is unset these are
+	// migrated into endpoints.claude.{host,port} by applyDefaults so old
+	// configs keep working unchanged.
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
 	LogLevel string `yaml:"log_level"`
+
+	// Endpoints configures per-provider HTTP listeners. See the struct doc
+	// on EndpointsConfig. Admin panel + public status page are served on
+	// whichever endpoint is designated primary (claude if enabled, else
+	// codex, else startup fails).
+	Endpoints EndpointsConfig `yaml:"endpoints"`
 
 	// Directory containing OAuth credential JSON files.
 	AuthDir string `yaml:"auth_dir"`
@@ -54,6 +85,15 @@ type Config struct {
 
 	// Anthropic API base URL (override for testing).
 	AnthropicBaseURL string `yaml:"anthropic_base_url,omitempty"`
+
+	// OpenAI API base URL (override for testing; used for BYOK Codex API-key
+	// routing). Defaults to https://api.openai.com.
+	OpenAIBaseURL string `yaml:"openai_base_url,omitempty"`
+
+	// Codex OAuth-authenticated requests hit the ChatGPT backend, not the
+	// public OpenAI API. This base URL is here so installations behind
+	// vendor relays can override it; normally unchanged.
+	ChatGPTBackendBaseURL string `yaml:"chatgpt_backend_base_url,omitempty"`
 
 	// If true, OAuth/API-key refresh+request uses utls Chrome fingerprint.
 	UseUTLS bool `yaml:"use_utls"`
@@ -94,6 +134,25 @@ func applyDefaults(c *Config, path string) {
 	if c.Port == 0 {
 		c.Port = 8317
 	}
+	// Migrate legacy top-level host/port into endpoints.claude when the
+	// user hasn't written an explicit endpoints section. Users who only
+	// ever configured the old `host: / port:` layout keep working with no
+	// yaml changes.
+	if c.Endpoints.Claude.Port == 0 {
+		c.Endpoints.Claude.Port = c.Port
+	}
+	if c.Endpoints.Claude.Host == "" {
+		c.Endpoints.Claude.Host = c.Host
+	}
+	if c.Endpoints.Codex.Port == 0 {
+		// Codex endpoint defaults to configured-but-disabled so merely
+		// upgrading the server binary doesn't flip on an empty listener.
+		c.Endpoints.Codex.Port = 8318
+		c.Endpoints.Codex.Disabled = true
+	}
+	if c.Endpoints.Codex.Host == "" {
+		c.Endpoints.Codex.Host = "0.0.0.0"
+	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
@@ -105,6 +164,12 @@ func applyDefaults(c *Config, path string) {
 	}
 	if c.AnthropicBaseURL == "" {
 		c.AnthropicBaseURL = "https://api.anthropic.com"
+	}
+	if c.OpenAIBaseURL == "" {
+		c.OpenAIBaseURL = "https://api.openai.com"
+	}
+	if c.ChatGPTBackendBaseURL == "" {
+		c.ChatGPTBackendBaseURL = "https://chatgpt.com/backend-api"
 	}
 	dir := filepath.Dir(path)
 	if c.AuthDir == "" {
