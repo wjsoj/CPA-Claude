@@ -127,29 +127,20 @@ func (p *Pool) Acquire(ctx context.Context, provider, clientToken, clientGroup, 
 	}
 	sessionKey := provider + "|" + clientToken
 
-	// Allowed groups in preference order: the client's own group first
-	// (when non-empty), then the built-in shared "new" tier (available to
-	// every client, but with scheduled downtime — see schedule.go), then
-	// the public tier as the always-on fallback. Duplicates collapse so a
-	// client already in "new" or "public" gets a sensible 1- or 2-tier
-	// list.
-	var tiers []string
-	seen := make(map[string]bool, 3)
-	addTier := func(g string) {
-		if seen[g] {
-			return
-		}
-		seen[g] = true
-		tiers = append(tiers, g)
+	// Tiers, in preference order:
+	//   1. the client's own group, if it's a named non-shared group
+	//   2. the shared pool = NEW ∪ public (same priority; load balancer
+	//      picks the least-used candidate across both)
+	// A client already scoped to "new" or public has only the shared tier.
+	// Each tier is a set of allowed auth-group values.
+	var tiers []map[string]bool
+	if clientGroup != "" && clientGroup != "new" {
+		tiers = append(tiers, map[string]bool{clientGroup: true})
 	}
-	if clientGroup != "" {
-		addTier(clientGroup)
-	}
-	addTier("new")
-	addTier("")
+	tiers = append(tiers, map[string]bool{"new": true, "": true})
 	allowed := func(authGroup string) bool {
-		for _, g := range tiers {
-			if authGroup == g {
+		for _, t := range tiers {
+			if t[authGroup] {
 				return true
 			}
 		}
@@ -176,10 +167,12 @@ func (p *Pool) Acquire(ctx context.Context, provider, clientToken, clientGroup, 
 	if s.authID != "" && s.kind == KindOAuth && !excluded[s.authID] {
 		if a := p.findOAuthLocked(s.authID); a != nil && allowed(a.Group) && NormalizeProvider(a.Provider) == provider && p.oauthUsableLocked(a, now) {
 			// Upgrade sticky pick to the client's own group when one becomes
-			// available. Covers both sticky=public and sticky="new" cases —
-			// we always prefer the client's dedicated pool when it has slots.
-			upgrade := clientGroup != "" && a.Group != clientGroup &&
-				p.pickOAuthLocked(now, excluded, clientGroup, provider) != nil
+			// available. Covers sticky=public and sticky=NEW both — they
+			// live in the shared tier, so a group-scoped client prefers
+			// its dedicated pool whenever it has slots. No upgrade for
+			// clients already in the shared tier.
+			upgrade := clientGroup != "" && clientGroup != "new" && a.Group != clientGroup &&
+				p.pickOAuthLocked(now, excluded, map[string]bool{clientGroup: true}, provider) != nil
 			if !upgrade {
 				// Reusing an assignment we already hold a slot for: counts us
 				// only once because activeCountLocked scans distinct sessions.
@@ -234,7 +227,7 @@ func (p *Pool) Acquire(ctx context.Context, provider, clientToken, clientGroup, 
 			if NormalizeProvider(k.Provider) != provider {
 				continue
 			}
-			if k.Group != tier {
+			if !tier[k.Group] {
 				continue
 			}
 			if excluded[k.ID] {
@@ -335,14 +328,14 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 // spreads load toward credentials doing less real work — cache-heavy
 // clients don't starve a credential out just by racking up near-free
 // cache_read volume.
-func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group, provider string) *Auth {
+func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, allowedGroups map[string]bool, provider string) *Auth {
 	type cand struct {
 		a    *Auth
 		load int64 // weighted tokens consumed in the recent load-balancing window (0 if unknown)
 	}
 	var cands []cand
 	for _, a := range p.oauths {
-		if a.Group != group {
+		if !allowedGroups[a.Group] {
 			continue
 		}
 		if NormalizeProvider(a.Provider) != provider {
@@ -460,22 +453,13 @@ func MaskToken(t string) string {
 func (p *Pool) HasAPIKeyFor(provider, clientGroup, model string) bool {
 	provider = NormalizeProvider(provider)
 	clientGroup = NormalizeGroup(clientGroup)
-	// Same tiering policy as Acquire — client's group (if any), built-in
-	// shared "new", then public.
-	var tiers []string
-	seen := make(map[string]bool, 3)
-	addTier := func(g string) {
-		if seen[g] {
-			return
-		}
-		seen[g] = true
-		tiers = append(tiers, g)
+	// Same tiering policy as Acquire — client's named group (if any),
+	// then the shared tier = NEW ∪ public.
+	var tiers []map[string]bool
+	if clientGroup != "" && clientGroup != "new" {
+		tiers = append(tiers, map[string]bool{clientGroup: true})
 	}
-	if clientGroup != "" {
-		addTier(clientGroup)
-	}
-	addTier("new")
-	addTier("")
+	tiers = append(tiers, map[string]bool{"new": true, "": true})
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -484,7 +468,7 @@ func (p *Pool) HasAPIKeyFor(provider, clientGroup, model string) bool {
 			if NormalizeProvider(k.Provider) != provider {
 				continue
 			}
-			if k.Group != tier {
+			if !tier[k.Group] {
 				continue
 			}
 			if k.Disabled || k.IsHardFailed() || k.IsQuotaExceeded(now) {
