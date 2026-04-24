@@ -644,6 +644,13 @@ func (h *Handler) handleClearFailure(c *gin.Context) {
 }
 
 type uploadBody struct {
+	// Provider scopes the upload to the tab the operator was on when they
+	// opened the modal. When the parsed file omits a `provider` field (or
+	// a recognizable `type`), this fills it in. When both are present and
+	// disagree, the request is rejected — we don't want a Claude OAuth
+	// silently persisted into the Codex tab just because the file didn't
+	// declare itself.
+	Provider      string          `json:"provider"`
 	Filename      string          `json:"filename"`
 	Content       json.RawMessage `json:"content"`
 	Label         string          `json:"label"`
@@ -672,6 +679,26 @@ func (h *Handler) handleUpload(c *gin.Context) {
 	if merged == nil {
 		merged = make(map[string]any)
 	}
+	// Reconcile the operator's tab-scoped provider choice with whatever the
+	// uploaded JSON declares. Four cases:
+	//   1. body.Provider empty, merged has no provider  → fall through, let
+	//      parseFile infer from `type` (defaults to anthropic).
+	//   2. body.Provider empty, merged has provider     → respect the file.
+	//   3. body.Provider set, merged has no provider    → stamp it in.
+	//   4. both set but mismatch                        → reject loudly.
+	wantProv := auth.NormalizeProvider(body.Provider)
+	if body.Provider != "" {
+		if existing, _ := merged["provider"].(string); existing != "" {
+			if auth.NormalizeProvider(existing) != wantProv {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+					"error": fmt.Sprintf("uploaded file declares provider=%q but the %s tab was active — open the matching tab and try again", existing, wantProv),
+				})
+				return
+			}
+		} else {
+			merged["provider"] = wantProv
+		}
+	}
 	if body.Label != "" {
 		merged["label"] = body.Label
 	}
@@ -688,14 +715,21 @@ func (h *Handler) handleUpload(c *gin.Context) {
 		merged["group"] = g
 	}
 
-	// Derive target filename.
+	// Derive target filename. Prefix with provider so the auths/ directory
+	// is self-documenting when inspected directly on disk.
+	finalProv, _ := merged["provider"].(string)
+	finalProv = auth.NormalizeProvider(finalProv)
+	prefix := "claude"
+	if finalProv == auth.ProviderOpenAI {
+		prefix = "codex"
+	}
 	name := sanitizeFilename(body.Filename)
 	if name == "" {
 		email, _ := merged["email"].(string)
 		if email != "" {
-			name = sanitizeFilename(email) + ".json"
+			name = prefix + "-" + sanitizeFilename(email) + ".json"
 		} else {
-			name = fmt.Sprintf("claude-%d.json", time.Now().Unix())
+			name = fmt.Sprintf("%s-%d.json", prefix, time.Now().Unix())
 		}
 	}
 	if !strings.HasSuffix(strings.ToLower(name), ".json") {

@@ -84,7 +84,10 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [data, setData] = useState<Summary | null>(null);
   const [err, setErr] = useState("");
   const [editing, setEditing] = useState<AuthRow | null>(null);
-  const [uploading, setUploading] = useState(false);
+  // Like oauthing/apikeying: track which provider tab initiated the upload
+  // so the modal can adjust its copy + stamp the right `provider` on the
+  // uploaded file. null = modal closed.
+  const [uploading, setUploading] = useState<Provider | null>(null);
   // Track which provider the user is adding — the OAuth and API-key
   // modals differ per upstream (URLs, placeholder text). null = closed.
   const [oauthing, setOauthing] = useState<Provider | null>(null);
@@ -367,7 +370,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
               onEdit={setEditing}
               onAddOAuth={(p) => setOauthing(p)}
               onAddAPIKey={(p) => setAPIKeying(p)}
-              onUpload={() => setUploading(true)}
+              onUpload={(p) => setUploading(p)}
             />
           )}
           {tab === "tokens" && (
@@ -486,9 +489,10 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
       )}
       {uploading && (
         <UploadModal
-          onClose={() => setUploading(false)}
+          provider={uploading}
+          onClose={() => setUploading(null)}
           onSaved={() => {
-            setUploading(false);
+            setUploading(null);
             refresh();
           }}
         />

@@ -1,8 +1,10 @@
 import { useState, useRef } from "react";
 import { api } from "@/lib/api";
+import type { Provider } from "@/lib/types";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -13,11 +15,35 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
 interface Props {
+  provider: Provider;
   onClose: () => void;
   onSaved: () => void;
 }
 
-export function UploadModal({ onClose, onSaved }: Props) {
+// Per-provider UX copy. Matches the sign-in and API-key modals in tone so
+// the three buttons on each tab feel like one family.
+const COPY: Record<Provider, {
+  title: string;
+  help: string;
+  placeholder: string;
+  fileHint: string;
+}> = {
+  anthropic: {
+    title: "Upload Claude credential",
+    help: "Paste or select a JSON file. Accepts OAuth credentials from `claude setup-token` / the vendor Claude CLI, or an Anthropic API-key wrapper.",
+    placeholder: '{\n  "type": "claude",\n  "access_token": "...",\n  "refresh_token": "...",\n  "email": "you@example.com",\n  "expired": "2026-06-01T00:00:00Z"\n}',
+    fileHint: "typical filename: claude-<email>.json",
+  },
+  openai: {
+    title: "Upload Codex credential",
+    help: "Paste or select a JSON file. Accepts OAuth credentials from the ChatGPT Codex CLI, or an OpenAI API-key wrapper.",
+    placeholder: '{\n  "type": "codex",\n  "access_token": "...",\n  "refresh_token": "...",\n  "id_token": "...",\n  "email": "you@example.com",\n  "account_id": "...",\n  "plan_type": "pro",\n  "expired": "2026-06-01T00:00:00Z"\n}',
+    fileHint: "typical filename: codex-<email>[-<plan>].json",
+  },
+};
+
+export function UploadModal({ provider, onClose, onSaved }: Props) {
+  const copy = COPY[provider];
   const [filename, setFilename] = useState("");
   const [content, setContent] = useState("");
   const [label, setLabel] = useState("");
@@ -34,14 +60,33 @@ export function UploadModal({ onClose, onSaved }: Props) {
     setFilename(f.name);
     setContent(await f.text());
   };
+
   const save = async () => {
     setBusy(true);
     setErr("");
     try {
-      const parsed = JSON.parse(content);
+      // Parse locally so we can surface JSON errors immediately instead of
+      // round-tripping an opaque server 400.
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch (x: any) {
+        throw new Error("invalid JSON: " + (x?.message || String(x)));
+      }
+      // Client-side provider mismatch check — matches the server guard but
+      // gives a friendlier message without the round-trip.
+      if (parsed && typeof parsed === "object") {
+        const declared = (parsed as Record<string, unknown>).provider;
+        if (typeof declared === "string" && declared && declared !== provider) {
+          throw new Error(
+            `this file declares provider="${declared}" — switch to the matching tab to upload it`,
+          );
+        }
+      }
       await api("/admin/api/auths/upload", {
         method: "POST",
         body: JSON.stringify({
+          provider,
           filename,
           content: parsed,
           label,
@@ -62,7 +107,8 @@ export function UploadModal({ onClose, onSaved }: Props) {
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Upload credential JSON</DialogTitle>
+          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogDescription>{copy.help}</DialogDescription>
         </DialogHeader>
         <input
           type="file"
@@ -77,7 +123,7 @@ export function UploadModal({ onClose, onSaved }: Props) {
           </Button>
           <Input
             className="flex-1 mono"
-            placeholder="filename (optional)"
+            placeholder={copy.fileHint}
             value={filename}
             onChange={(e) => setFilename(e.currentTarget.value)}
           />
@@ -85,8 +131,8 @@ export function UploadModal({ onClose, onSaved }: Props) {
         <div className="space-y-1.5">
           <Label>or paste JSON</Label>
           <Textarea
-            className="mono h-40"
-            placeholder='{"type":"claude" | "codex" | "apikey" | "openai_api_key", "provider":"anthropic" | "openai", "access_token":"...", ...}'
+            className="mono h-40 text-sm"
+            placeholder={copy.placeholder}
             value={content}
             onChange={(e) => setContent(e.currentTarget.value)}
           />

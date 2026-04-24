@@ -12,7 +12,7 @@ interface Props {
   onEdit: (a: AuthRow) => void;
   onAddOAuth: (provider: Provider) => void;
   onAddAPIKey: (provider: Provider) => void;
-  onUpload: () => void;
+  onUpload: (provider: Provider) => void;
 }
 
 // Sub-tab per upstream provider. The user explicitly asked for strict
@@ -77,9 +77,9 @@ export function CredentialsPanel({
             <KeyRound className="h-4 w-4" />
             API key
           </Button>
-          <Button variant="outline" onClick={onUpload} className="gap-2">
+          <Button variant="outline" onClick={() => onUpload(provider)} className="gap-2">
             <FileJson className="h-4 w-4" />
-            Upload JSON
+            Upload {current.label === "Claude" ? "Claude" : "Codex"} JSON
           </Button>
         </div>
       </header>
