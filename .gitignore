@@ -12,3 +12,4 @@
 /internal/admin/web/node_modules/
 /internal/admin/web/dist/*
 !/internal/admin/web/dist/.gitkeep
+.claude/
