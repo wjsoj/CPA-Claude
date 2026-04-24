@@ -336,6 +336,15 @@ func (a *Auth) Credentials() (accessToken string, kind Kind) {
 	return a.AccessToken, a.Kind
 }
 
+// CodexIdentity returns the Codex/OpenAI-specific identity fields
+// (account_id + plan_type) under the read lock. Empty strings for
+// Anthropic auths.
+func (a *Auth) CodexIdentity() (accountID, planType string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.AccountID, a.PlanType
+}
+
 // IsHardFailed reports whether the credential has been flagged sticky-
 // unhealthy and must be manually cleared before traffic resumes.
 func (a *Auth) IsHardFailed() bool {

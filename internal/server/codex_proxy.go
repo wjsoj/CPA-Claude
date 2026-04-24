@@ -36,53 +36,107 @@ func (s *Server) handleCodexResponses(c *gin.Context) {
 	s.forward(c, auth.ProviderOpenAI, "/v1/responses")
 }
 
-// handleCodexModels returns the /v1/models listing. For BYOK API-key users
-// we transparently forward to the upstream so they see whatever their key
-// is entitled to; for OAuth users the plan-tier catalog is synthesized in
-// phase 5. No credentials → empty list (client can still hit /healthz).
+// handleCodexModels returns the union of models exposed by the loaded
+// OpenAI credentials: OAuth creds contribute their plan-tier catalog
+// (see auth.CodexModelsForPlan) and API-key creds contribute the
+// upstream's authoritative /v1/models listing. Returned shape matches
+// OpenAI's: {"object":"list","data":[{id, object, owned_by}, ...]}.
 func (s *Server) handleCodexModels(c *gin.Context) {
-	// Pick any openai API-key to probe upstream. Acquire normally does
-	// session stickiness + OAuth-first; here we just want a key.
-	var apiKey *auth.Auth
+	seen := map[string]bool{}
+	var data []gin.H
+
+	// OAuth: synthesize from plan_type claims so subscribers see exactly
+	// the models their tier is entitled to (matches Codex CLI behavior).
+	var apiKeyCred *auth.Auth
 	for _, st := range s.pool.Status() {
 		if auth.NormalizeProvider(st.Auth.Provider) != auth.ProviderOpenAI {
-			continue
-		}
-		if st.Auth.Kind != auth.KindAPIKey {
 			continue
 		}
 		if st.Auth.Disabled {
 			continue
 		}
-		apiKey = s.pool.FindByID(st.Auth.ID)
-		break
+		live := s.pool.FindByID(st.Auth.ID)
+		if live == nil {
+			continue
+		}
+		if st.Auth.Kind == auth.KindOAuth {
+			_, plan := live.CodexIdentity()
+			for _, m := range auth.CodexModelsForPlan(plan) {
+				if seen[m] {
+					continue
+				}
+				seen[m] = true
+				data = append(data, gin.H{"id": m, "object": "model", "owned_by": "openai"})
+			}
+			continue
+		}
+		if apiKeyCred == nil {
+			apiKeyCred = live
+		}
 	}
-	if apiKey == nil {
-		c.JSON(200, gin.H{"object": "list", "data": []any{}})
-		return
+
+	// API-key: transparent forward to upstream so BYOK users see whatever
+	// their key is entitled to. Merge into `seen` so a model shared across
+	// credentials isn't listed twice.
+	if apiKeyCred != nil {
+		if upstream, err := s.fetchCodexAPIKeyModels(c.Request.Context(), apiKeyCred); err == nil {
+			for _, m := range upstream {
+				if seen[m.id] {
+					continue
+				}
+				seen[m.id] = true
+				data = append(data, gin.H{"id": m.id, "object": "model", "owned_by": m.ownedBy})
+			}
+		} else {
+			log.Warnf("codex: /v1/models upstream probe via %s failed: %v", apiKeyCred.ID, err)
+		}
 	}
-	baseURL := strings.TrimRight(apiKey.Snapshot().BaseURL, "/")
+
+	if data == nil {
+		data = []gin.H{}
+	}
+	c.JSON(200, gin.H{"object": "list", "data": data})
+}
+
+type codexUpstreamModel struct{ id, ownedBy string }
+
+func (s *Server) fetchCodexAPIKeyModels(ctx context.Context, a *auth.Auth) ([]codexUpstreamModel, error) {
+	snap := a.Snapshot()
+	baseURL := strings.TrimRight(snap.BaseURL, "/")
 	if baseURL == "" {
 		baseURL = strings.TrimRight(s.cfg.OpenAIBaseURL, "/")
 	}
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, baseURL+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/models", nil)
 	if err != nil {
-		c.AbortWithStatusJSON(502, gin.H{"error": err.Error()})
-		return
+		return nil, err
 	}
-	access, _ := apiKey.Credentials()
+	access, _ := a.Credentials()
 	req.Header.Set("Authorization", "Bearer "+access)
 	req.Header.Set("Accept", "application/json")
-	client := auth.ClientFor(apiKey.Snapshot().ProxyURL, false)
+	client := auth.ClientFor(snap.ProxyURL, false)
 	resp, err := client.Do(req)
 	if err != nil {
-		c.AbortWithStatusJSON(502, gin.H{"error": err.Error()})
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	writeResponseHeaders(c, resp)
-	c.Writer.Write(body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.New(truncate(body, 200))
+	}
+	var wrap struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return nil, err
+	}
+	out := make([]codexUpstreamModel, 0, len(wrap.Data))
+	for _, m := range wrap.Data {
+		out = append(out, codexUpstreamModel{id: m.ID, ownedBy: m.OwnedBy})
+	}
+	return out, nil
 }
 
 // doForwardCodex performs one upstream attempt against an OpenAI-style
@@ -229,21 +283,6 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	if resp.StatusCode < 400 {
 		a.MarkSuccess()
 	}
-	return false, true
-}
-
-// doForwardCodexOAuth is the ChatGPT-backend proxy path. Phase 5 lands the
-// full implementation (session_id headers, /backend-api/codex/responses
-// request shaping). Until then, OAuth Codex credentials return 501.
-func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry, done bool) {
-	c.AbortWithStatusJSON(501, gin.H{"error": "codex oauth proxy not yet implemented (phase 5)"})
-	s.emitLog(requestlog.Record{
-		Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
-		AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
-		Stream: stream, Path: path, Status: 501, Attempts: attempts,
-		DurationMs: time.Since(start).Milliseconds(),
-		Error:      "codex oauth proxy unimplemented",
-	})
 	return false, true
 }
 
