@@ -147,6 +147,7 @@ while [ $# -gt 0 ]; do
     --prefix)  PREFIX="$2";  shift 2 ;;
     --bin-dir) BIN_DIR="$2"; shift 2 ;;
     --mirror)  MIRROR="$2";  shift 2 ;;
+    --force)   CPA_FORCE=1;  shift ;;
     -h|--help)
       sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -214,6 +215,31 @@ else
 fi
 msg "installing $REPO@$TAG -> $BIN_DIR/$BIN_NAME ($OS_TAG/$ARCH_TAG)"
 [ -n "$MIRROR" ] && msg "using mirror: $MIRROR"
+
+# Short-circuit: if the binary on disk is already at $TAG, skip the
+# download/extract/install sequence and just restart the service (when
+# one exists). Users re-running the installer as a quick "restart the
+# running service after config changes" shortcut get that behavior for
+# free. Set CPA_FORCE=1 (or pass --force) to bypass and reinstall.
+# --version format: "cpa-claude vX.Y.Z (commit=... built=...)"
+if [ "${CPA_FORCE:-}" != "1" ] && [ -x "$BIN_DIR/$BIN_NAME" ]; then
+  CURRENT_TAG="$("$BIN_DIR/$BIN_NAME" --version 2>/dev/null \
+    | awk '{print $2}' | head -n1 || true)"
+  if [ -n "$CURRENT_TAG" ] && [ "$CURRENT_TAG" = "$TAG" ]; then
+    msg "already at $TAG — skipping download"
+    if [ "$OS_TAG" = "linux" ] && command -v systemctl >/dev/null 2>&1 \
+         && [ -f "/etc/systemd/system/cpa-claude.service" ]; then
+      msg "restarting cpa-claude.service"
+      run_privileged systemctl restart cpa-claude.service \
+        || warn "restart failed; check: systemctl status cpa-claude.service"
+      run_privileged systemctl --no-pager --lines=0 status cpa-claude.service \
+        || true
+    else
+      msg "no systemd unit found — nothing to restart"
+    fi
+    exit 0
+  fi
+fi
 
 # Tag is like "v0.1.0"; GoReleaser archive strips the leading "v".
 TRIMMED="${TAG#v}"
