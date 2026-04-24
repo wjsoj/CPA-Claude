@@ -86,9 +86,9 @@ apply_default_mirror() {
 
 download() {
   local out="$1" url="$2"
-  local target="${MIRROR}${url#https://}"
-  [ -z "$MIRROR" ] && target="$url"
-  auth_curl -fsSL --connect-timeout 15 --max-time 300 -o "$out" "$target"
+  # url is already mirror-prefixed by gh_url at the call site — do not
+  # re-apply MIRROR here (that would produce gh-proxy.com/gh-proxy.com/...).
+  auth_curl -fsSL --connect-timeout 15 --max-time 300 -o "$out" "$url"
 }
 
 # Prompt the user interactively (reads from /dev/tty for curl-pipe compat).
