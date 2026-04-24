@@ -53,7 +53,14 @@ func ClientFor(proxyURL string, useUTLS bool) *http.Client {
 // hosts that proved unreliable under the shared/pooled transport in ClientFor
 // (notably chatgpt.com/backend-api/codex), where stale h2 reuse surfaces as
 // spurious "connection reset by peer". SOCKS5/HTTP(S) proxies are honored.
-func NewPlainHTTPClient(proxyURL string) *http.Client {
+//
+// If useUTLS is true, a fresh utlsTransport (Chrome_Auto fingerprint) is used
+// — required for chatgpt.com where Cloudflare JA3/JA4-fingerprints crypto/tls
+// default ClientHello and returns 403.
+func NewPlainHTTPClient(proxyURL string, useUTLS bool) *http.Client {
+	if useUTLS {
+		return &http.Client{Transport: newUTLSTransport(proxyURL)}
+	}
 	tr, _ := http.DefaultTransport.(*http.Transport)
 	if tr == nil {
 		tr = &http.Transport{}

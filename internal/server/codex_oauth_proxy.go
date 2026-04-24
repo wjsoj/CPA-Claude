@@ -254,6 +254,10 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// Upstream is always streamed; aggregation happens on our side when the
 	// client asked for a non-streaming response.
 	upReq.Header.Set("Accept", "text/event-stream")
+	// Force plaintext upstream bodies. Otherwise CF may respond with br/gzip
+	// which (a) breaks SSE streaming and (b) makes 4xx error bodies unreadable
+	// in our logs. Identity keeps everything human-readable end-to-end.
+	upReq.Header.Set("Accept-Encoding", "identity")
 	upReq.Header.Set("Connection", "Keep-Alive")
 	upReq.Header.Set("Session_id", newRequestUUID())
 	upReq.Header.Set("Originator", codexBackendOriginator)
@@ -264,7 +268,9 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		upReq.Header.Set("Chatgpt-Account-Id", accountID)
 	}
 
-	client := auth.NewPlainHTTPClient(snap.ProxyURL)
+	// chatgpt.com sits behind Cloudflare which fingerprints Go's default TLS
+	// ClientHello and 403s us. Use uTLS Chrome_Auto here to match browser JA3.
+	client := auth.NewPlainHTTPClient(snap.ProxyURL, true)
 	resp, err := client.Do(upReq)
 	if err != nil {
 		if isClientDisconnect(ctx, err) {

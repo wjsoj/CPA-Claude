@@ -113,7 +113,7 @@ func (s *Server) fetchCodexAPIKeyModels(ctx context.Context, a *auth.Auth) ([]co
 	access, _ := a.Credentials()
 	req.Header.Set("Authorization", "Bearer "+access)
 	req.Header.Set("Accept", "application/json")
-	client := auth.NewPlainHTTPClient(snap.ProxyURL)
+	client := auth.NewPlainHTTPClient(snap.ProxyURL, false)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 
 	// Fresh transport per request — shared pool exhibited stale h2 reuse against
 	// chatgpt.com-style backends. api.openai.com et al. don't care either way.
-	client := auth.NewPlainHTTPClient(snap.ProxyURL)
+	client := auth.NewPlainHTTPClient(snap.ProxyURL, false)
 	resp, err := client.Do(upReq)
 	if err != nil {
 		if isClientDisconnect(ctx, err) {
