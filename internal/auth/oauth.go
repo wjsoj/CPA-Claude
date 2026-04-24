@@ -423,19 +423,38 @@ func (a *Auth) needsRefresh(leeway time.Duration) bool {
 }
 
 // EnsureFresh refreshes the access token if it's within `leeway` of expiry.
+// The effective leeway is max(leeway, MinRefreshLeeway()) — providers with
+// long-lived tokens (e.g. Codex at ~30 days) want to refresh days early so a
+// brief upstream outage near expiry doesn't leave zero recovery window.
 // Concurrent callers are deduplicated via a per-auth refresh mutex so the
 // rotating refresh_token is never burned by parallel exchanges.
 func (a *Auth) EnsureFresh(ctx context.Context, leeway time.Duration, useUTLS bool) error {
+	if min := a.MinRefreshLeeway(); min > leeway {
+		leeway = min
+	}
 	if !a.needsRefresh(leeway) {
 		return nil
 	}
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
-	// Double-check: another goroutine may have refreshed while we waited.
 	if !a.needsRefresh(leeway) {
 		return nil
 	}
 	return a.doRefreshLocked(ctx, useUTLS)
+}
+
+// MinRefreshLeeway returns the per-provider minimum refresh lead time.
+// Anthropic access tokens live ~8 hours — 5 minutes of lead is fine.
+// OpenAI / Codex access tokens live ~30 days — refresh 5 days ahead to
+// match the Codex CLI's RefreshLead, so a transient outage near expiry
+// has a 5-day window to recover before the token actually dies.
+func (a *Auth) MinRefreshLeeway() time.Duration {
+	switch NormalizeProvider(a.Provider) {
+	case ProviderOpenAI:
+		return 5 * 24 * time.Hour
+	default:
+		return 5 * time.Minute
+	}
 }
 
 // doRefreshLocked performs the HTTP exchange. Caller must hold a.refreshMu.

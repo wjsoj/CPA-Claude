@@ -1,23 +1,43 @@
 # CPA-Claude
 
-A native Claude (Anthropic) API proxy focused on one job: fan out client
-requests across multiple Claude OAuth credentials and API keys, with per-user
-sticky slot allocation, per-credential proxies, persistent usage tracking, and
-automatic API-key fallback.
+A native Claude (Anthropic) + OpenAI Codex API proxy. Fans out client
+requests across multiple upstream credentials (OAuth + API keys) on
+**two independent HTTP endpoints** — one per provider, shared pool
+infrastructure — with per-user sticky slot allocation, per-credential
+proxies, persistent usage tracking, and automatic API-key fallback.
+Admin panel, client tokens, request log, pricing, and stats are shared
+across providers; credentials are strictly separated per upstream.
 
-> **Credit.** This project is a heavily simplified and refocused derivative of
-> [**CLIProxyAPI**](https://github.com/router-for-me/CLIProxyAPI) (MIT). The
-> original supports many AI providers (Gemini, Codex/OpenAI, Qwen, Kimi,
-> iFlow, Antigravity, Vertex, Claude, …) and ships a management UI, TUI,
-> translator layer, and multi-protocol entry points. CPA-Claude keeps **only**
-> the Claude passthrough, adds slot-based concurrency, per-credential
-> SOCKS/HTTP proxies, and persistent usage tracking, and drops everything
-> else. The Anthropic OAuth refresh flow and the uTLS Chrome transport were
-> borrowed from the upstream project — huge thanks to its authors.
+> **Codex OAuth validation pending.** The ChatGPT-backend proxy
+> (`/v1/responses` path) is implemented end-to-end — header set, body
+> sanitization, usage extraction, plan-tier model listing — mirroring
+> CLIProxyAPI's upstream implementation. It has **not yet been
+> validated in production with a real ChatGPT Plus/Pro subscription
+> token**; the auth-layer test paths (token exchange, refresh, JWT
+> parsing) are exercised, but full request/response parity against
+> chatgpt.com/backend-api is pending a real-token smoke. If you hit
+> an unexpected 400, please open an issue with the error body.
+
+> **Credit.** This project is a derivative of
+> [**CLIProxyAPI**](https://github.com/router-for-me/CLIProxyAPI) (MIT).
+> The original supports many AI providers (Gemini, Codex/OpenAI, Qwen,
+> Kimi, iFlow, Antigravity, Vertex, Claude, …) and ships a management
+> UI, TUI, translator layer, and multi-protocol entry points.
+> CPA-Claude keeps the Claude + Codex passthroughs and adds slot-based
+> concurrency, per-credential SOCKS/HTTP proxies, persistent usage
+> tracking, and per-provider endpoint routing. The Anthropic OAuth
+> refresh flow, the Codex OAuth flow + JWT parsing, and the uTLS
+> Chrome transport were borrowed from the upstream project — huge
+> thanks to its authors.
 
 ## Features
 
-- **Native Claude only** — no protocol translation, pure passthrough to
+- **Two endpoints, one fleet** — Claude on `:8317` (`/v1/messages`) and
+  Codex on `:8318` (`/v1/chat/completions`, `/v1/responses`). Each can
+  be enabled/disabled independently; the admin panel mounts on
+  whichever is "primary" (Claude by default).
+- **Native Claude passthrough** — no protocol translation for the
+  Anthropic path, pure passthrough to
   `api.anthropic.com/v1/messages` (SSE streaming preserved).
 - **Slot-based concurrency per OAuth file** — each OAuth credential has a
   `max_concurrent` cap. A client session that makes a request within the last
@@ -29,10 +49,18 @@ automatic API-key fallback.
   counts per credential survive restarts in `state.json`.
 - **API-key fallback** — when every OAuth credential is saturated, quota-
   exceeded, or dead, requests fall through to the unlimited API-key pool.
+- **Codex passthrough** — OpenAI-format `/v1/chat/completions` and
+  `/v1/responses` on the Codex endpoint. API-key credentials forward to
+  `api.openai.com`; OAuth (ChatGPT Plus/Pro/Team) credentials forward to
+  `chatgpt.com/backend-api/codex/responses` with the session/account
+  headers the Codex CLI sends. `/v1/models` synthesizes the plan-tier
+  catalog per subscription.
 - **Per-client weekly budgets** — each access token can have a `weekly_usd`
-  cap. Spend is tracked by ISO week and costed with a built-in pricing
-  table covering Haiku 4.5, Opus 4.6 and Sonnet 4.6 (cache-read and
-  cache-create priced separately). Exceeded → 429 until the next Monday.
+  cap that applies across **both** providers. Spend is tracked by ISO
+  week and costed with a built-in pricing table covering Claude
+  (Haiku 4.5, Opus 4.6/4.7, Sonnet 4.6) and OpenAI (gpt-5, gpt-5-mini,
+  gpt-5-nano, gpt-5.x codex tiers, gpt-4o/mini) — cache-read and
+  cache-create priced separately. Exceeded → 429 until the next Monday.
 - **Per-request JSONL log** — one line per terminal request (who, which
   credential, model, tokens, cost, status, duration). Daily-rotated file,
   default 30-day retention.

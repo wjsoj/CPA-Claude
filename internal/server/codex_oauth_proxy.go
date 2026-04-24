@@ -40,8 +40,10 @@ func codexOAuthPath(stream bool) string {
 }
 
 // sanitizeCodexRequestBody strips the request body of fields the backend
-// rejects and forces stream=true for streaming clients. Also backfills a
-// synthetic `instructions` string when absent so the backend doesn't 400.
+// rejects and forces stream=true for streaming clients. It also
+// backfills an empty `instructions` field when the client omitted it —
+// the ChatGPT Codex backend 400s on missing/null instructions (matches
+// CLIProxyAPI's normalizeCodexInstructions).
 func sanitizeCodexRequestBody(body []byte, stream bool) ([]byte, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -52,6 +54,9 @@ func sanitizeCodexRequestBody(body []byte, stream bool) ([]byte, error) {
 	}
 	for _, k := range []string{"previous_response_id", "prompt_cache_retention", "safety_identifier", "stream_options"} {
 		delete(raw, k)
+	}
+	if v, ok := raw["instructions"]; !ok || v == nil {
+		raw["instructions"] = ""
 	}
 	return json.Marshal(raw)
 }
