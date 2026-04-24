@@ -120,6 +120,14 @@ func NewCatalog(c Config) *Catalog {
 func (c *Catalog) Lookup(provider, model string) ModelPrice {
 	prov := canonicalProvider(provider)
 	m := strings.ToLower(strings.TrimSpace(model))
+	// Strip a trailing "(value)" thinking suffix — CLIProxyAPI's convention
+	// for encoding reasoning effort in the model name. "gpt-5.3-codex(high)"
+	// bills the same as "gpt-5.3-codex".
+	if strings.HasSuffix(m, ")") {
+		if i := strings.LastIndex(m, "("); i > 0 {
+			m = strings.TrimSpace(m[:i])
+		}
+	}
 	if m != "" {
 		full := prov + "/" + m
 		if p, ok := c.models[full]; ok {

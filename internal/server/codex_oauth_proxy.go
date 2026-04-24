@@ -39,18 +39,31 @@ func codexOAuthPath(stream bool) string {
 	return "/responses/compact"
 }
 
-// sanitizeCodexRequestBody strips the request body of fields the backend
-// rejects and forces stream=true for streaming clients. It also
-// backfills an empty `instructions` field when the client omitted it —
-// the ChatGPT Codex backend 400s on missing/null instructions (matches
-// CLIProxyAPI's normalizeCodexInstructions).
+// sanitizeCodexRequestBody shapes the client's /v1/responses body into what
+// the ChatGPT Codex backend expects. Behavior is modeled directly on
+// CLIProxyAPI's Execute / executeCompact bodies (codex_executor.go:176-183,
+// 327-330): strip the thinking suffix off `model`, force-enable streaming
+// on the /responses path, force-disable on /responses/compact, drop four
+// upstream-private fields, backfill empty `instructions`, and ensure an
+// image_generation tool is registered (skipped for *-spark models the
+// backend rejects it on).
 func sanitizeCodexRequestBody(body []byte, stream bool) ([]byte, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return body, err
 	}
+	// Strip thinking suffix from model. CLIProxyAPI uses "model-name(value)"
+	// convention (e.g. gpt-5.3-codex(high)); the backend wants just the
+	// base model name. Plain model names are passed through untouched.
+	baseModel := ""
+	if m, ok := raw["model"].(string); ok {
+		baseModel = stripThinkingSuffix(m)
+		raw["model"] = baseModel
+	}
 	if stream {
 		raw["stream"] = true
+	} else {
+		delete(raw, "stream")
 	}
 	for _, k := range []string{"previous_response_id", "prompt_cache_retention", "safety_identifier", "stream_options"} {
 		delete(raw, k)
@@ -58,7 +71,49 @@ func sanitizeCodexRequestBody(body []byte, stream bool) ([]byte, error) {
 	if v, ok := raw["instructions"]; !ok || v == nil {
 		raw["instructions"] = ""
 	}
+	raw["tools"] = ensureImageGenerationTool(raw["tools"], baseModel)
 	return json.Marshal(raw)
+}
+
+// stripThinkingSuffix mirrors thinking.ParseSuffix from CLIProxyAPI: a
+// trailing "(value)" group (e.g. "gpt-5.3-codex(high)") is removed and the
+// bare model name returned. Names without the suffix form are untouched.
+func stripThinkingSuffix(model string) string {
+	if !strings.HasSuffix(model, ")") {
+		return model
+	}
+	i := strings.LastIndex(model, "(")
+	if i <= 0 {
+		return model
+	}
+	return model[:i]
+}
+
+// ensureImageGenerationTool guarantees the tools array has an entry of
+// type=image_generation. The ChatGPT backend injects this server-side on
+// the vendor CLI's requests; if we strip it (or the client omits it)
+// responses with image-generation prompts fail. Skipped for "*-spark"
+// models the backend rejects the tool on (matches CLIProxyAPI).
+func ensureImageGenerationTool(current any, baseModel string) any {
+	if strings.HasSuffix(baseModel, "spark") {
+		if current == nil {
+			return []any{}
+		}
+		return current
+	}
+	imageTool := map[string]any{"type": "image_generation", "output_format": "png"}
+	arr, ok := current.([]any)
+	if !ok || arr == nil {
+		return []any{imageTool}
+	}
+	for _, t := range arr {
+		if tm, _ := t.(map[string]any); tm != nil {
+			if typ, _ := tm["type"].(string); typ == "image_generation" {
+				return arr
+			}
+		}
+	}
+	return append(arr, imageTool)
 }
 
 // doForwardCodexOAuth forwards the client's /v1/responses request to the
