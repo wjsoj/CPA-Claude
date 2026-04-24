@@ -84,41 +84,11 @@ apply_default_mirror() {
   esac
 }
 
-# Try the chosen mirror first; on failure, fall through to the other known
-# mirror, then to a direct GitHub fetch. Used for the main release download
-# so one vendor outage doesn't kill the install.
-download_with_fallback() {
+download() {
   local out="$1" url="$2"
-  local candidates=()
-  if [ -n "$MIRROR" ]; then
-    candidates+=("$MIRROR")
-  fi
-  # Secondary mirrors (skip whichever one is already primary) plus direct.
-  for alt in "https://gh-proxy.com/" "https://ghfast.top/"; do
-    case "$MIRROR" in "$alt") continue ;; esac
-    candidates+=("$alt")
-  done
-  candidates+=("") # direct github.com as last resort
-  local first=1
-  for m in "${candidates[@]}"; do
-    # Mirrors want the schemeless form (see gh_url). Direct fetch (m=="")
-    # uses the URL as-is.
-    local target="${m}${url#https://}"
-    [ -z "$m" ] && target="$url"
-    if [ $first -eq 1 ]; then
-      first=0
-    else
-      warn "download failed, retrying via ${m:-direct github.com}"
-    fi
-    if auth_curl -fsSL --connect-timeout 15 --max-time 300 \
-         -o "$out" "$target" 2>/dev/null; then
-      # Remember the working mirror so subsequent fetches (checksums, example
-      # config) go through the same path.
-      MIRROR="$m"
-      return 0
-    fi
-  done
-  return 1
+  local target="${MIRROR}${url#https://}"
+  [ -z "$MIRROR" ] && target="$url"
+  auth_curl -fsSL --connect-timeout 15 --max-time 300 -o "$out" "$target"
 }
 
 # Prompt the user interactively (reads from /dev/tty for curl-pipe compat).
@@ -231,13 +201,10 @@ auth_curl() {
 if [ "$VERSION" = "latest" ]; then
   msg "resolving latest release..."
   API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-  TAG="$(auth_curl -fsSL "$API_URL" \
+  TAG_SRC="$API_URL"
+  [ -n "$MIRROR" ] && TAG_SRC="${MIRROR}${API_URL}"
+  TAG="$(auth_curl -fsSL "$TAG_SRC" \
     | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
-  if [ -z "$TAG" ] && [ -n "$MIRROR" ]; then
-    warn "api.github.com failed, retrying via mirror"
-    TAG="$(auth_curl -fsSL "${MIRROR}${API_URL}" \
-      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
-  fi
   [ -n "$TAG" ] || err "could not resolve latest tag (try --version vX.Y.Z)"
 else
   TAG="$VERSION"
@@ -255,8 +222,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 msg "downloading $URL"
-download_with_fallback "$TMP/$ASSET" "$URL" \
-  || err "download failed; check tag/asset name, or try --mirror https://gh-proxy.com/"
+download "$TMP/$ASSET" "$URL" \
+  || err "download failed; check tag/asset name, or try --mirror direct"
 
 msg "verifying checksum"
 if auth_curl -fsSL --connect-timeout 15 --max-time 60 \
