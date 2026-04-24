@@ -123,17 +123,12 @@ func ensureImageGenerationTool(current any, baseModel string) any {
 // Originator that the backend fingerprints on.
 func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry, done bool) {
 	if path != "/v1/responses" {
-		c.AbortWithStatusJSON(http.StatusNotImplemented, gin.H{
-			"error": "codex OAuth backend only supports /v1/responses (clients using chat/completions must use an API-key credential)",
-		})
-		s.emitLog(requestlog.Record{
-			Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
-			AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
-			Stream: stream, Path: path, Status: http.StatusNotImplemented, Attempts: attempts,
-			DurationMs: time.Since(start).Milliseconds(),
-			Error:      "codex oauth path not supported",
-		})
-		return false, true
+		// The ChatGPT backend only hosts /codex/responses; OAuth creds can't
+		// serve /v1/chat/completions. Ask the retry loop to try a different
+		// credential (API-key creds handle chat/completions fine). Don't
+		// MarkFailure — this credential isn't broken, just the wrong kind.
+		log.Debugf("codex oauth: %s skipping %s (OAuth path supports /v1/responses only)", a.ID, path)
+		return true, false
 	}
 
 	snap := a.Snapshot()
