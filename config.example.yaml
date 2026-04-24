@@ -57,6 +57,13 @@ active_window_minutes: 5
 # precedence. This cap is *global* across both endpoints.
 client_max_concurrent: 15
 
+# Default sliding 60-second requests-per-minute cap per client token.
+# Complements client_max_concurrent: concurrent limits fast bursts while
+# this limits sustained volume. 0 = unlimited. Per-token overrides (set
+# via admin panel) take precedence. 60 is tuned for heavy Claude Code
+# Max 20× use (parallel subagents + tool loops fit comfortably).
+client_rpm: 60
+
 # Use uTLS (Chrome fingerprint) for all upstream calls. Recommended —
 # Anthropic edge fingerprint-checks non-browser clients.
 use_utls: true

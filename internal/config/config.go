@@ -106,6 +106,10 @@ type Config struct {
 	// 0 = unlimited. Per-token overrides take precedence.
 	ClientMaxConcurrent int `yaml:"client_max_concurrent"`
 
+	// Default sliding-window requests-per-minute cap per client token.
+	// 0 = unlimited. Per-token overrides take precedence.
+	ClientRPM int `yaml:"client_rpm"`
+
 	// Days to retain rotated request logs. 0 = disable GC (keep forever).
 	LogRetentionDays int `yaml:"log_retention_days,omitempty"`
 
@@ -161,6 +165,9 @@ func applyDefaults(c *Config, path string) {
 	}
 	if c.ClientMaxConcurrent == 0 {
 		c.ClientMaxConcurrent = 15
+	}
+	if c.ClientRPM == 0 {
+		c.ClientRPM = 60
 	}
 	if c.AnthropicBaseURL == "" {
 		c.AnthropicBaseURL = "https://api.anthropic.com"

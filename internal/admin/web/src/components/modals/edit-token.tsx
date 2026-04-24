@@ -26,6 +26,7 @@ interface Props {
 export function EditTokenModal({ row, onClose, onSaved }: Props) {
   const [name, setName] = useState(row.label || "");
   const [weekly, setWeekly] = useState(row.weekly_limit > 0 ? String(row.weekly_limit) : "");
+  const [rpm, setRpm] = useState(row.rpm && row.rpm > 0 ? String(row.rpm) : "");
   const [group, setGroup] = useState(row.group || "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -60,6 +61,8 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
       const body: Record<string, unknown> = { name, group };
       const w = parseFloat(weekly);
       body.weekly_usd = !isNaN(w) && w > 0 ? w : 0;
+      const r = parseInt(rpm, 10);
+      body.rpm = !isNaN(r) && r > 0 ? r : 0;
       await api(`/admin/api/tokens/${encodeURIComponent(row.full_token)}`, {
         method: "PATCH",
         body: JSON.stringify(body),
@@ -169,6 +172,18 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
                 placeholder="0 = unlimited"
                 value={weekly}
                 onChange={(e) => setWeekly(e.currentTarget.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>RPM limit</Label>
+              <Input
+                type="number"
+                min={0}
+                step={1}
+                className="mono text-sm"
+                placeholder="0 = use global default (60)"
+                value={rpm}
+                onChange={(e) => setRpm(e.currentTarget.value)}
               />
             </div>
             <div className="space-y-1.5">

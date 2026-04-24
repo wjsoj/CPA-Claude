@@ -63,6 +63,8 @@ export interface ClientRow {
   weekly_usd: number;
   weekly_limit: number;
   blocked: boolean;
+  // Per-token RPM override. 0 / absent = fall back to global default.
+  rpm?: number;
   total: { cost_usd: number; requests: number };
   last_used?: string;
   managed?: boolean;

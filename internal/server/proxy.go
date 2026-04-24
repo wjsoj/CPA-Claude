@@ -123,6 +123,34 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 		return
 	}
 
+	// Rate limit (RPM) per client token. Sliding 60s window; scoped
+	// per-provider to match the inflight budget so Claude and Codex don't
+	// share one cap. Checked before the concurrency gate so a burst of
+	// 429s doesn't briefly occupy slots.
+	rpmKey := auth.NormalizeProvider(provider) + "|" + clientToken
+	if limit := s.clientRPM(clientToken); limit > 0 {
+		if ok, retry := s.rpm.allow(rpmKey, limit); !ok {
+			c.Header("Retry-After", strconv.Itoa(retry))
+			c.AbortWithStatusJSON(429, gin.H{
+				"error":       "rate limit exceeded",
+				"rpm_limit":   limit,
+				"retry_after": retry,
+			})
+			s.emitLog(requestlog.Record{
+				Client:      clientName,
+				ClientToken: maskClientToken(clientToken),
+				Provider:    provider,
+				Model:       model,
+				Stream:      peek.Stream,
+				Path:        path,
+				Status:      429,
+				DurationMs:  time.Since(start).Milliseconds(),
+				Error:       "rpm limit exceeded",
+			})
+			return
+		}
+	}
+
 	// Concurrency limit per client token.
 	maxConc := s.clientMaxConcurrent(clientToken)
 	if maxConc > 0 {

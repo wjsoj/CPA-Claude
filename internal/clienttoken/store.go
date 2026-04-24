@@ -26,6 +26,7 @@ type Token struct {
 	Name          string    `json:"name"`
 	WeeklyUSD     float64   `json:"weekly_usd,omitempty"`
 	MaxConcurrent int       `json:"max_concurrent,omitempty"` // 0 = use global default
+	RPM           int       `json:"rpm,omitempty"`            // 0 = use global default
 	Group         string    `json:"group,omitempty"`          // credential group scope; empty = public
 	CreatedAt     time.Time `json:"created_at,omitempty"`
 }
@@ -36,6 +37,7 @@ type View struct {
 	Name          string    `json:"name"`
 	WeeklyUSD     float64   `json:"weekly_usd"`
 	MaxConcurrent int       `json:"max_concurrent,omitempty"`
+	RPM           int       `json:"rpm,omitempty"`
 	Group         string    `json:"group,omitempty"`
 	CreatedAt     time.Time `json:"created_at,omitempty"`
 }
@@ -90,6 +92,19 @@ func (s *Store) Lookup(tok string) (name string, weekly float64, maxConc int, gr
 	return "", 0, 0, "", false
 }
 
+// RPM returns the per-token RPM override if one is configured. Returns
+// (0, false) when the token is unknown or has no override set.
+func (s *Store) RPM(tok string) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, t := range s.tokens {
+		if t.Token == tok {
+			return t.RPM, true
+		}
+	}
+	return 0, false
+}
+
 // Empty reports whether the proxy should run in open mode.
 func (s *Store) Empty() bool {
 	s.mu.RLock()
@@ -106,7 +121,8 @@ func (s *Store) List() []View {
 	for _, t := range s.tokens {
 		out = append(out, View{
 			Token: t.Token, Name: t.Name, WeeklyUSD: t.WeeklyUSD,
-			MaxConcurrent: t.MaxConcurrent, Group: t.Group, CreatedAt: t.CreatedAt,
+			MaxConcurrent: t.MaxConcurrent, RPM: t.RPM,
+			Group: t.Group, CreatedAt: t.CreatedAt,
 		})
 	}
 	return out
@@ -138,7 +154,7 @@ func (s *Store) Add(t Token) error {
 }
 
 // Update patches an existing token. nil fields mean "no change".
-func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int, group *string) error {
+func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int, rpm *int, group *string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.tokens {
@@ -159,6 +175,13 @@ func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int
 					mc = 0
 				}
 				s.tokens[i].MaxConcurrent = mc
+			}
+			if rpm != nil {
+				r := *rpm
+				if r < 0 {
+					r = 0
+				}
+				s.tokens[i].RPM = r
 			}
 			if group != nil {
 				s.tokens[i].Group = auth.NormalizeGroup(*group)

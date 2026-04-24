@@ -43,6 +43,10 @@ type Server struct {
 	// Claude at cap doesn't block its Codex calls (and vice-versa). Matches
 	// the per-provider stickiness already used by Pool.Acquire.
 	inflight sync.Map
+	// rpm enforces a sliding-window requests-per-minute cap. Keyed by
+	// (provider | clientToken) — same scoping as inflight so Claude and
+	// Codex traffic don't share one budget.
+	rpm rpmLimiter
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -343,4 +347,14 @@ func (s *Server) clientMaxConcurrent(clientToken string) int {
 		return maxConc
 	}
 	return s.cfg.ClientMaxConcurrent
+}
+
+// clientRPM returns the effective requests-per-minute cap for this client.
+// Per-token override wins; otherwise the global default applies. Returns 0
+// when both are unset (no cap).
+func (s *Server) clientRPM(clientToken string) int {
+	if rpm, ok := s.tokens.RPM(clientToken); ok && rpm > 0 {
+		return rpm
+	}
+	return s.cfg.ClientRPM
 }

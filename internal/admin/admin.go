@@ -413,7 +413,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	currentWeek := h.usage.CurrentWeekKey()
 	clientRows := make([]clientRow, 0)
 	seen := make(map[string]bool)
-	addRow := func(token, label, group string, weeklyLimit float64, fromConfig, managed bool) {
+	addRow := func(token, label, group string, weeklyLimit float64, rpm int, fromConfig, managed bool) {
 		seen[token] = true
 		pc, hasData := clientSnap[token]
 		weekly := 0.0
@@ -440,6 +440,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			FromConfig:  fromConfig,
 			Managed:     managed,
 			Group:       group,
+			RPM:         rpm,
 			Total:       total,
 			Weekly:      weeks,
 			LastUsed:    last,
@@ -451,13 +452,13 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	}
 	// Rows for every configured or runtime-added access token.
 	for _, t := range h.tokens.List() {
-		addRow(t.Token, t.Name, t.Group, t.WeeklyUSD, false, true)
+		addRow(t.Token, t.Name, t.Group, t.WeeklyUSD, t.RPM, false, true)
 	}
 	// Rows for every client we've actually seen that isn't already listed
 	// (e.g. open-mode requests keyed by IP).
 	for tok, pc := range clientSnap {
 		if !seen[tok] {
-			addRow(tok, pc.Label, "", 0, false, false)
+			addRow(tok, pc.Label, "", 0, 0, false, false)
 		}
 	}
 
@@ -494,6 +495,8 @@ type clientRow struct {
 	FromConfig  bool              `json:"from_config,omitempty"`
 	Managed     bool              `json:"managed,omitempty"` // true = panel can edit/delete
 	Group       string            `json:"group,omitempty"`
+	// RPM is the per-token requests-per-minute override. 0 = use global default.
+	RPM         int               `json:"rpm,omitempty"`
 	Total       usage.ClientCost  `json:"total"`
 	Weekly      []usage.WeekEntry `json:"weekly,omitempty"`
 	LastUsed    *time.Time        `json:"last_used,omitempty"`
@@ -1293,6 +1296,7 @@ type tokenView struct {
 	Name          string     `json:"name"`
 	WeeklyUSD     float64    `json:"weekly_usd"`
 	MaxConcurrent int        `json:"max_concurrent,omitempty"`
+	RPM           int        `json:"rpm,omitempty"`
 	Group         string     `json:"group,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
 	// Live usage for the current ISO week, convenient for the panel row.
@@ -1309,6 +1313,7 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 			Name:          t.Name,
 			WeeklyUSD:     t.WeeklyUSD,
 			MaxConcurrent: t.MaxConcurrent,
+			RPM:           t.RPM,
 			Group:         t.Group,
 			WeeklyUsedUSD: h.usage.WeeklyCostUSD(t.Token),
 		}
@@ -1329,6 +1334,7 @@ type createTokenBody struct {
 	Name          string  `json:"name"`
 	WeeklyUSD     float64 `json:"weekly_usd"`
 	MaxConcurrent int     `json:"max_concurrent,omitempty"`
+	RPM           int     `json:"rpm,omitempty"`
 	Group         string  `json:"group,omitempty"`
 	Generate      bool    `json:"generate"` // if true and Token == "", mint a fresh sk-...
 }
@@ -1357,6 +1363,7 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 		Name:          body.Name,
 		WeeklyUSD:     body.WeeklyUSD,
 		MaxConcurrent: body.MaxConcurrent,
+		RPM:           body.RPM,
 		Group:         body.Group,
 	}
 	if err := h.tokens.Add(entry); err != nil {
@@ -1375,6 +1382,7 @@ type patchTokenBody struct {
 	Name          *string  `json:"name"`
 	WeeklyUSD     *float64 `json:"weekly_usd"`
 	MaxConcurrent *int     `json:"max_concurrent"`
+	RPM           *int     `json:"rpm"`
 	Group         *string  `json:"group"`
 }
 
@@ -1385,7 +1393,7 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.tokens.Update(tok, body.Name, body.WeeklyUSD, body.MaxConcurrent, body.Group); err != nil {
+	if err := h.tokens.Update(tok, body.Name, body.WeeklyUSD, body.MaxConcurrent, body.RPM, body.Group); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
