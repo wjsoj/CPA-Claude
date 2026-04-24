@@ -80,6 +80,7 @@ export interface PricingEntry {
 
 export interface Pricing {
   default: PricingEntry;
+  provider_defaults?: Record<string, PricingEntry>;
   models: Record<string, PricingEntry>;
 }
 

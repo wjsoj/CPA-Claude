@@ -475,8 +475,9 @@ func (h *Handler) handleSummary(c *gin.Context) {
 		"clients":               clientRows,
 		"current_week":          currentWeek,
 		"pricing": gin.H{
-			"default": h.pricing.Default(),
-			"models":  priceView,
+			"default":           h.pricing.Default(),
+			"provider_defaults": h.pricing.ProviderDefaults(),
+			"models":            priceView,
 		},
 	})
 }
