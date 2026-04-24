@@ -29,8 +29,13 @@ const (
 )
 
 // LoginSession holds the short-lived state for a browser-initiated OAuth flow.
+// Provider selects between the Anthropic (claude.ai) and OpenAI (ChatGPT
+// Codex) endpoints, since the two differ in authorize URL, scopes, client
+// id, redirect uri, token-exchange body shape, and the JWT claims parsed
+// out of the response.
 type LoginSession struct {
 	ID           string
+	Provider     string
 	State        string
 	CodeVerifier string
 	ProxyURL     string
@@ -86,13 +91,14 @@ func pkceChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
-// StartLogin creates a new login session and returns the browser URL the
-// user must visit. proxyURL (optional) is used for the token-exchange call
-// at FinishLogin; it does not affect the user's browser navigation to
-// claude.ai.
-func StartLogin(proxyURL, label string) (*LoginSession, string, error) {
+// StartLogin creates a new login session for the given provider and returns
+// the browser URL the user must visit. proxyURL (optional) is used for the
+// token-exchange call at FinishLogin; it does not affect the user's
+// browser navigation.
+func StartLogin(provider, proxyURL, label string) (*LoginSession, string, error) {
+	provider = NormalizeProvider(provider)
 	// 96 bytes → 128-char base64url verifier. Matches upstream CLIProxyAPI
-	// and Anthropic's official Claude Code CLI.
+	// and the vendor CLIs on both providers.
 	verifier, err := randomURLSafe(96)
 	if err != nil {
 		return nil, "", err
@@ -107,6 +113,7 @@ func StartLogin(proxyURL, label string) (*LoginSession, string, error) {
 	}
 	sess := &LoginSession{
 		ID:           hex.EncodeToString(idBytes),
+		Provider:     provider,
 		State:        state,
 		CodeVerifier: verifier,
 		ProxyURL:     strings.TrimSpace(proxyURL),
@@ -115,6 +122,17 @@ func StartLogin(proxyURL, label string) (*LoginSession, string, error) {
 	}
 	globalLoginStore.put(sess)
 
+	var authURL string
+	switch provider {
+	case ProviderOpenAI:
+		authURL = buildCodexAuthURL(state, verifier)
+	default:
+		authURL = buildAnthropicAuthURL(state, verifier)
+	}
+	return sess, authURL, nil
+}
+
+func buildAnthropicAuthURL(state, verifier string) string {
 	params := url.Values{
 		"code":                  {"true"},
 		"client_id":             {anthropicClientID},
@@ -125,8 +143,19 @@ func StartLogin(proxyURL, label string) (*LoginSession, string, error) {
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
 	}
-	authURL := anthropicAuthURL + "?" + params.Encode()
-	return sess, authURL, nil
+	return anthropicAuthURL + "?" + params.Encode()
+}
+
+// RedirectURIFor returns the redirect URI a given provider will send the
+// user back to after the consent screen. Admin UI surfaces this so users
+// can set up an SSH tunnel on remote installs.
+func RedirectURIFor(provider string) string {
+	switch NormalizeProvider(provider) {
+	case ProviderOpenAI:
+		return openaiRedirectURI
+	default:
+		return anthropicRedirectURI
+	}
 }
 
 // ParseCallback extracts code+state from any of: a raw `code#state` string
@@ -183,7 +212,8 @@ type exchangeResponse struct {
 
 // FinishLogin exchanges the authorization code for tokens, writes the new
 // credential to authDir, and returns the parsed Auth ready to add to a Pool.
-// If useUTLS is true the token-exchange call uses Chrome uTLS fingerprint.
+// The exchange URL, client_id, redirect_uri, and response shape all come
+// from the session's Provider — registered by StartLogin.
 func FinishLogin(
 	ctx context.Context,
 	sessionID, code, state, authDir string,
@@ -202,6 +232,25 @@ func FinishLogin(
 		return nil, fmt.Errorf("state mismatch")
 	}
 
+	switch NormalizeProvider(sess.Provider) {
+	case ProviderOpenAI:
+		return finishCodexLogin(ctx, sess, code, authDir, maxConcurrent, useUTLS, group)
+	default:
+		return finishAnthropicLogin(ctx, sess, code, authDir, maxConcurrent, useUTLS, group)
+	}
+}
+
+// finishAnthropicLogin exchanges the code for Claude tokens and persists
+// the resulting credential. Extracted from FinishLogin when the codex
+// variant was added; behavior is unchanged.
+func finishAnthropicLogin(
+	ctx context.Context,
+	sess *LoginSession,
+	code, authDir string,
+	maxConcurrent int,
+	useUTLS bool,
+	group string,
+) (*Auth, error) {
 	body := map[string]any{
 		"code":          code,
 		"state":         sess.State,
@@ -242,15 +291,15 @@ func FinishLogin(
 	if label == "" {
 		label = email
 	}
-	filename := sanitizeLoginFilename(email, sess.ID)
+	filename := sanitizeLoginFilename("", email, sess.ID)
 
-	// Build the JSON file on disk first (matches format of manual uploads).
 	if err := os.MkdirAll(authDir, 0700); err != nil {
 		return nil, err
 	}
 	full := filepath.Join(authDir, filename)
 	raw := map[string]any{
 		"type":           "claude",
+		"provider":       ProviderAnthropic,
 		"access_token":   tr.AccessToken,
 		"refresh_token":  tr.RefreshToken,
 		"email":          email,
@@ -272,7 +321,6 @@ func FinishLogin(
 	if err := os.WriteFile(full, out, 0600); err != nil {
 		return nil, err
 	}
-
 	a, err := parseFile(full, out)
 	if err != nil {
 		return nil, fmt.Errorf("parse newly written file: %w", err)
@@ -281,13 +329,22 @@ func FinishLogin(
 	return a, nil
 }
 
-func sanitizeLoginFilename(email, sessionID string) string {
+// sanitizeLoginFilename builds an on-disk filename for a newly-persisted
+// OAuth credential. `tag` is an optional prefix used on non-Anthropic
+// providers (e.g. "codex") to keep the auths/ directory self-documenting.
+func sanitizeLoginFilename(tag, email, sessionID string) string {
 	s := strings.TrimSpace(email)
 	s = strings.ReplaceAll(s, "/", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
 	s = strings.ReplaceAll(s, "..", "")
 	if s == "" {
-		s = "claude-" + sessionID
+		if tag != "" {
+			s = tag + "-" + sessionID
+		} else {
+			s = "claude-" + sessionID
+		}
+	} else if tag != "" {
+		s = tag + "-" + s
 	}
 	if !strings.HasSuffix(strings.ToLower(s), ".json") {
 		s += ".json"

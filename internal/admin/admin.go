@@ -717,6 +717,7 @@ func (h *Handler) handleUpload(c *gin.Context) {
 }
 
 type oauthStartBody struct {
+	Provider string `json:"provider"` // "anthropic" | "openai"; empty = anthropic (back-compat)
 	ProxyURL string `json:"proxy_url"`
 	Label    string `json:"label"`
 }
@@ -724,15 +725,17 @@ type oauthStartBody struct {
 func (h *Handler) handleOAuthStart(c *gin.Context) {
 	var body oauthStartBody
 	_ = c.ShouldBindJSON(&body)
-	sess, authURL, err := auth.StartLogin(body.ProxyURL, body.Label)
+	provider := auth.NormalizeProvider(body.Provider)
+	sess, authURL, err := auth.StartLogin(provider, body.ProxyURL, body.Label)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"session_id":   sess.ID,
+		"provider":     provider,
 		"auth_url":     authURL,
-		"redirect_uri": "http://localhost:54545/callback",
+		"redirect_uri": auth.RedirectURIFor(provider),
 	})
 }
 
@@ -782,6 +785,7 @@ func (h *Handler) handleOAuthFinish(c *gin.Context) {
 // ---- API key CRUD ----
 
 type createAPIKeyBody struct {
+	Provider string            `json:"provider"` // "anthropic" | "openai"; empty = anthropic
 	APIKey   string            `json:"api_key"`
 	Label    string            `json:"label"`
 	ProxyURL string            `json:"proxy_url"`
@@ -819,9 +823,15 @@ func (h *Handler) handleCreateAPIKey(c *gin.Context) {
 		return
 	}
 	full := filepath.Join(h.cfg.AuthDir, name)
+	provider := auth.NormalizeProvider(body.Provider)
+	typ := "apikey"
+	if provider == auth.ProviderOpenAI {
+		typ = "openai_api_key"
+	}
 	raw := map[string]any{
-		"type":    "apikey",
-		"api_key": key,
+		"type":     typ,
+		"provider": provider,
+		"api_key":  key,
 	}
 	if label != "" {
 		raw["label"] = label
