@@ -261,8 +261,20 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	upReq.Header.Set("Connection", "Keep-Alive")
 	upReq.Header.Set("Session_id", newRequestUUID())
 	upReq.Header.Set("Originator", codexBackendOriginator)
-	if ua := upReq.Header.Get("User-Agent"); ua == "" {
-		upReq.Header.Set("User-Agent", codexBackendUserAgent)
+	// Always overwrite UA — forwarding client's UA (e.g. "curl/X.Y") makes
+	// Cloudflare's edge rules 403 the request before it reaches the OpenAI
+	// backend. We must look like the Codex CLI.
+	upReq.Header.Set("User-Agent", codexBackendUserAgent)
+	// Strip client-side forwarded headers that CF may scrutinize on its
+	// internal hops. None of these belong on a request *originating* from
+	// the Codex CLI; forwarding them from our upstream client leaks context
+	// and can trip WAF rules.
+	for _, h := range []string{
+		"X-Forwarded-For", "X-Real-Ip", "X-Forwarded-Proto", "X-Forwarded-Host",
+		"Forwarded", "Via", "Cf-Connecting-Ip", "Cf-Ipcountry", "Cf-Ray", "Cf-Visitor",
+		"Cookie", "Referer", "Origin",
+	} {
+		upReq.Header.Del(h)
 	}
 	if accountID, _ := a.CodexIdentity(); accountID != "" {
 		upReq.Header.Set("Chatgpt-Account-Id", accountID)
