@@ -28,13 +28,15 @@ type Pool struct {
 	activeWindow time.Duration
 	useUTLS      bool
 	defaultProxy string
-	// usage24h, when set, returns a cost-weighted token count for the given
-	// OAuth auth over the last ~24h (see usage.Counts.WeightedTotal — input
-	// 1×, cache_create 1.25×, cache_read 0.1×, output 5×). Drives OAuth
-	// selection in pickOAuthLocked: the candidate with the lowest weighted
-	// usage wins, so cache-heavy credentials aren't penalized by the near-
-	// free cache_read stream and the scarce output tokens dominate.
-	usage24h func(authID string) int64
+	// usageLoad, when set, returns a cost-weighted token count for the given
+	// OAuth auth over the recent rolling window used for load balancing —
+	// currently the last ~5h to align with Anthropic's 5-hour quota window
+	// (see usage.Counts.WeightedTotal — input 1×, cache_create 1.25×,
+	// cache_read 0.1×, output 5×). Drives OAuth selection in
+	// pickOAuthLocked: the candidate with the lowest weighted usage wins,
+	// so cache-heavy credentials aren't penalized by the near-free
+	// cache_read stream and the scarce output tokens dominate.
+	usageLoad func(authID string) int64
 }
 
 type session struct {
@@ -65,13 +67,15 @@ func NewPool(oauths, apikeys []*Auth, activeWindow time.Duration, useUTLS bool, 
 func (p *Pool) UseUTLS() bool               { return p.useUTLS }
 func (p *Pool) ActiveWindow() time.Duration { return p.activeWindow }
 
-// SetUsage24hFunc installs a callback used as the load-balancing tiebreaker
-// when picking an OAuth credential. fn must be safe for concurrent use and
-// should not call back into the pool.
-func (p *Pool) SetUsage24hFunc(fn func(authID string) int64) {
+// SetUsageLoadFunc installs a callback used as the load-balancing tiebreaker
+// when picking an OAuth credential. fn should return weighted token usage
+// over the rolling window being used to approximate Anthropic's quota
+// window (currently 5h). fn must be safe for concurrent use and should not
+// call back into the pool.
+func (p *Pool) SetUsageLoadFunc(fn func(authID string) int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.usage24h = fn
+	p.usageLoad = fn
 }
 
 // gcLocked expires stale sessions whose lastSeen is older than activeWindow.
@@ -279,20 +283,22 @@ func (p *Pool) oauthUsableLocked(a *Auth, now time.Time) bool {
 }
 
 // pickOAuthLocked returns the OAuth in the requested group with the lowest
-// cost-weighted 24h token consumption that still has a free slot and isn't
+// cost-weighted recent token consumption (default: last ~5h, to match
+// Anthropic's rolling quota window) that still has a free slot and isn't
 // on the exclude list, or nil if none available. Unlimited credentials
 // (cap=0) always have room. excluded may be nil. group is an exact match;
 // "" is the public tier.
 //
 // Selection is purely least-used-first (not spare-slot-first): as long as a
 // credential has any free slot, it's a valid candidate, and ties break on
-// weighted 24h usage (see usage.Counts.WeightedTotal). This spreads load
-// toward credentials doing less real work — cache-heavy clients don't
-// starve a credential out just by racking up near-free cache_read volume.
+// weighted recent-window usage (see usage.Counts.WeightedTotal). This
+// spreads load toward credentials doing less real work — cache-heavy
+// clients don't starve a credential out just by racking up near-free
+// cache_read volume.
 func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group string) *Auth {
 	type cand struct {
-		a      *Auth
-		used24 int64 // weighted tokens consumed in the last ~24h (0 if unknown)
+		a    *Auth
+		load int64 // weighted tokens consumed in the recent load-balancing window (0 if unknown)
 	}
 	var cands []cand
 	for _, a := range p.oauths {
@@ -311,17 +317,17 @@ func (p *Pool) pickOAuthLocked(now time.Time, excluded map[string]bool, group st
 			continue
 		}
 		var used int64
-		if p.usage24h != nil {
-			used = p.usage24h(a.ID)
+		if p.usageLoad != nil {
+			used = p.usageLoad(a.ID)
 		}
-		cands = append(cands, cand{a: a, used24: used})
+		cands = append(cands, cand{a: a, load: used})
 	}
 	if len(cands) == 0 {
 		return nil
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
-		if cands[i].used24 != cands[j].used24 {
-			return cands[i].used24 < cands[j].used24
+		if cands[i].load != cands[j].load {
+			return cands[i].load < cands[j].load
 		}
 		return cands[i].a.ID < cands[j].a.ID
 	})

@@ -111,8 +111,8 @@ func main() {
 	pool := auth.NewPool(oauths, apikeys,
 		time.Duration(cfg.ActiveWindowMinutes)*time.Minute,
 		cfg.UseUTLS, cfg.DefaultProxyURL)
-	pool.SetUsage24hFunc(func(authID string) int64 {
-		return store.Sum24h(authID).WeightedTotal()
+	pool.SetUsageLoadFunc(func(authID string) int64 {
+		return store.Sum5h(authID).WeightedTotal()
 	})
 
 	// Background OAuth refresher: keeps access tokens fresh even when the

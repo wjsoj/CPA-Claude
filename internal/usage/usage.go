@@ -19,6 +19,13 @@ import (
 // each Record() so state.json stays bounded.
 const dailyRetentionDays = 90
 
+// How many hourly buckets to keep. Sized to comfortably cover the 5h
+// rolling window used by the OAuth load balancer (plus headroom).
+const hourlyRetentionHours = 24
+
+// hourKeyFormat is the UTC layout used for Hourly bucket keys.
+const hourKeyFormat = "2006-01-02T15"
+
 // How many ISO weeks of per-client history to keep.
 const weeklyRetentionWeeks = 26
 
@@ -61,14 +68,15 @@ type DayEntry struct {
 
 // PerAuth tracks per-credential usage. Lifetime totals now come from the
 // request log (see admin.handleSummary / requestlog.AggregateByAuth), so
-// this struct only holds what we need on hot paths: Daily buckets for the
-// OAuth load balancer (see Sum24h) and the 14-day UI sparkline, plus
-// LastUsed for the panel's "updated X ago" display.
+// this struct only holds what we need on hot paths: Hourly buckets for the
+// OAuth load balancer (see Sum5h), Daily buckets for the 14-day UI sparkline,
+// plus LastUsed for the panel's "updated X ago" display.
 type PerAuth struct {
 	AuthID   string            `json:"auth_id"`
 	Label    string            `json:"label,omitempty"`
 	LastUsed time.Time         `json:"last_used,omitempty"`
-	Daily    map[string]Counts `json:"daily,omitempty"` // key = "YYYY-MM-DD" (UTC)
+	Daily    map[string]Counts `json:"daily,omitempty"`  // key = "YYYY-MM-DD" (UTC)
+	Hourly   map[string]Counts `json:"hourly,omitempty"` // key = "YYYY-MM-DDTHH" (UTC)
 }
 
 // DailyOrdered returns the Daily map as a slice sorted by date ascending.
@@ -277,17 +285,38 @@ func (s *Store) Record(authID, label string, c Counts) {
 	if p.Daily == nil {
 		p.Daily = make(map[string]Counts)
 	}
+	if p.Hourly == nil {
+		p.Hourly = make(map[string]Counts)
+	}
 	if label != "" {
 		p.Label = label
 	}
 	now := s.now()
 	p.LastUsed = now
-	day := now.UTC().Format("2006-01-02")
+	utc := now.UTC()
+	day := utc.Format("2006-01-02")
 	cur := p.Daily[day]
 	cur.Add(c)
 	p.Daily[day] = cur
+	hk := utc.Format(hourKeyFormat)
+	hcur := p.Hourly[hk]
+	hcur.Add(c)
+	p.Hourly[hk] = hcur
 	s.trimDailyLocked(p, now)
+	s.trimHourlyLocked(p, now)
 	s.dirty = true
+}
+
+func (s *Store) trimHourlyLocked(p *PerAuth, now time.Time) {
+	if len(p.Hourly) <= hourlyRetentionHours {
+		return
+	}
+	cutoff := now.UTC().Add(-time.Duration(hourlyRetentionHours) * time.Hour).Format(hourKeyFormat)
+	for k := range p.Hourly {
+		if k < cutoff {
+			delete(p.Hourly, k)
+		}
+	}
 }
 
 func (s *Store) trimDailyLocked(p *PerAuth, now time.Time) {
@@ -314,6 +343,12 @@ func (s *Store) Snapshot() map[string]PerAuth {
 			cp.Daily = make(map[string]Counts, len(v.Daily))
 			for dk, dv := range v.Daily {
 				cp.Daily[dk] = dv
+			}
+		}
+		if v.Hourly != nil {
+			cp.Hourly = make(map[string]Counts, len(v.Hourly))
+			for hk, hv := range v.Hourly {
+				cp.Hourly[hk] = hv
 			}
 		}
 		out[k] = cp
@@ -511,6 +546,30 @@ func (s *Store) SnapshotClients() map[string]PerClient {
 // to label UI cards).
 func (s *Store) CurrentWeekKey() string {
 	return isoWeekKey(s.now())
+}
+
+// Sum5h returns the total counts over the last ~5 hours (UTC), summing
+// hourly buckets whose start hour falls within [now-5h, now]. This matches
+// Anthropic's 5-hour rolling quota window closely enough to drive OAuth
+// load balancing: the current partial hour plus up to five prior hours are
+// included, so the returned window spans 5–6 hours depending on when in
+// the hour the call happens.
+func (s *Store) Sum5h(authID string) Counts {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.state.Auths[authID]
+	if !ok || len(p.Hourly) == 0 {
+		return Counts{}
+	}
+	now := s.now().UTC()
+	cutoff := now.Add(-5 * time.Hour).Truncate(time.Hour).Format(hourKeyFormat)
+	var sum Counts
+	for k, v := range p.Hourly {
+		if k >= cutoff {
+			sum.Add(v)
+		}
+	}
+	return sum
 }
 
 // Sum24h returns the total counts over the last 24 hours (UTC), using the
