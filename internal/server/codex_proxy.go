@@ -114,7 +114,7 @@ func (s *Server) fetchCodexAPIKeyModels(ctx context.Context, a *auth.Auth) ([]co
 	access, _ := a.Credentials()
 	req.Header.Set("Authorization", "Bearer "+access)
 	req.Header.Set("Accept", "application/json")
-	client := auth.ClientFor(snap.ProxyURL, false)
+	client := auth.ClientFor(snap.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		upReq.Header.Set("Accept", "application/json")
 	}
 
-	client := auth.ClientFor(snap.ProxyURL, false)
+	client := auth.ClientFor(snap.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(upReq)
 	if err != nil {
 		if isClientDisconnect(ctx, err) {
@@ -391,18 +391,18 @@ func extractOpenAIUsageFromJSON(body []byte) usage.Counts {
 
 type openaiUsage struct {
 	// chat/completions names
-	PromptTokens         int64 `json:"prompt_tokens"`
-	CompletionTokens     int64 `json:"completion_tokens"`
-	PromptTokensDetails  struct {
+	PromptTokens        int64 `json:"prompt_tokens"`
+	CompletionTokens    int64 `json:"completion_tokens"`
+	PromptTokensDetails struct {
 		CachedTokens int64 `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
 	CompletionTokensDetails struct {
 		ReasoningTokens int64 `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details"`
 	// /v1/responses names
-	InputTokens         int64 `json:"input_tokens"`
-	OutputTokens        int64 `json:"output_tokens"`
-	InputTokensDetails  struct {
+	InputTokens        int64 `json:"input_tokens"`
+	OutputTokens       int64 `json:"output_tokens"`
+	InputTokensDetails struct {
 		CachedTokens int64 `json:"cached_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails struct {
@@ -485,4 +485,3 @@ func isTransientNetErr(err error) bool {
 		strings.Contains(s, "unexpected EOF") ||
 		strings.Contains(s, "http2: server sent GOAWAY")
 }
-

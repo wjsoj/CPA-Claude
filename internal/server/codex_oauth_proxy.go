@@ -277,7 +277,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// carries many requests so we stay under the limit. ClientFor's transport
 	// has HTTP/2 PING health checks (utls.go) so stale reused conns are
 	// detected and re-dialed transparently.
-	client := auth.ClientFor(snap.ProxyURL, false)
+	client := auth.ClientFor(snap.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(upReq)
 	// Network-error retry once on the SAME credential. These errors
 	// (`connection reset by peer`, `broken pipe`, `EOF`) are almost always
