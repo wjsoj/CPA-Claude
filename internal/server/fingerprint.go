@@ -10,21 +10,47 @@ import (
 	"sync"
 )
 
-// Header values pinned to Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0.
-// Keep in sync with upstream CLIProxyAPI's helps/claude_device_profile.go.
+// Header values pinned to Claude Code 2.1.92 / @anthropic-ai/sdk 0.70.0.
+// Aligned with sub2api (DefaultHeaders) and Parrot (cc_mimicry.py) — the
+// reference implementations whose values come from real CLI 2.1.9x captures.
+// CLICurrentVersion below MUST match the version baked into claudeCLIUserAgent;
+// any drift will cause the cc_version=X.Y.Z.{fp} billing block to disagree
+// with the User-Agent and trigger Anthropic's third-party detection.
 const (
-	claudeCLIUserAgent      = "claude-cli/2.1.63 (external, cli)"
+	CLICurrentVersion       = "2.1.92"
+	claudeCLIUserAgent      = "claude-cli/2.1.92 (external, cli)"
 	claudeStainlessLang     = "js"
 	claudeStainlessRuntime  = "node"
-	claudeStainlessRuntimeV = "v24.3.0"
-	claudeStainlessPackageV = "0.74.0"
-	claudeStainlessOS       = "MacOS"
+	claudeStainlessRuntimeV = "v24.13.0"
+	claudeStainlessPackageV = "0.70.0"
+	claudeStainlessOS       = "Linux"
 	claudeStainlessArch     = "arm64"
 	claudeStainlessTimeout  = "600"
 	claudeStainlessRetryCnt = "0"
 	claudeAnthropicVersion  = "2023-06-01"
-	claudeAnthropicBetaFull = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+	// Beta list mirrors sub2api FullClaudeCodeMimicryBetas() — order matters,
+	// upstream uses the full set as a cheap third-party signal. Any beta we
+	// drop that real CLI sends will downgrade us to "extra usage" billing.
+	claudeAnthropicBetaFull = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,redact-thinking-2026-02-12,context-management-2025-06-27,extended-cache-ttl-2025-04-11"
 )
+
+// Default cache_control TTL for cache breakpoints we inject. Real CLI uses
+// "1h"; we follow sub2api's "5m" policy to avoid burning 1h cache slots when
+// the client didn't ask for them.
+const claudeDefaultCacheTTL = "5m"
+
+// Claude Code system prompt — first system block on every real CLI request.
+const claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
+
+// claudeCodePromptPrefixes detects requests whose system field already looks
+// like a Claude Code request — we leave those alone (don't double-inject).
+// Mirrors sub2api/internal/service/gateway_service.go.
+var claudeCodePromptPrefixes = []string{
+	"You are Claude Code, Anthropic's official CLI for Claude",
+	"You are a Claude agent, built on Anthropic's Claude Agent SDK",
+	"You are a file search specialist for Claude Code",
+	"You are a helpful AI assistant tasked with summarizing conversations",
+}
 
 // sessionIDCache assigns one stable UUID per credential ID. Matches the
 // X-Claude-Code-Session-Id behavior of the real Claude Code CLI, which keeps
