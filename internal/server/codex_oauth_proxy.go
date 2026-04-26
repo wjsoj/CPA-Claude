@@ -28,14 +28,22 @@ const (
 	codexBackendOriginator = "codex-tui"
 )
 
-// codexOAuthPath is the ChatGPT backend suffix for the /v1/responses route.
-// The backend only hosts a streaming /responses endpoint — non-streaming
-// client requests are satisfied by running a streamed upstream and
-// aggregating the SSE into a single JSON object on our side (see
-// aggregateCodexResponseStream). There is a /responses/compact endpoint but
-// it's reserved for Codex's conversation-compaction flow and rejects
-// normal inference payloads; we do not route through it.
-func codexOAuthPath() string { return "/responses" }
+// codexOAuthPath maps a client-facing path under /v1 to the corresponding
+// suffix on the ChatGPT Codex backend (mounted under /codex). The backend
+// hosts:
+//   - /responses           — streaming inference (non-streaming clients are
+//                            satisfied via aggregateCodexResponseStream).
+//   - /responses/compact   — Codex CLI's conversation-compaction endpoint;
+//                            body shape is the same /v1/responses payload,
+//                            so the same sanitize/transport path applies.
+func codexOAuthPath(clientPath string) string {
+	switch clientPath {
+	case "/v1/responses/compact":
+		return "/responses/compact"
+	default:
+		return "/responses"
+	}
+}
 
 // sanitizeCodexRequestBody shapes the client's /v1/responses body into what
 // the ChatGPT Codex backend expects. Behavior is modeled directly on
@@ -216,13 +224,14 @@ func ensureImageGenerationTool(current any, baseModel string) any {
 // fresh per-request session UUID, and the `codex-tui` User-Agent /
 // Originator that the backend fingerprints on.
 func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry, done bool) {
-	if path != "/v1/responses" {
-		// The ChatGPT backend only hosts /codex/responses; OAuth creds can't
-		// serve /v1/chat/completions. Ask the retry loop to try a different
-		// credential (API-key creds handle chat/completions fine). Don't
-		// MarkFailure — this credential isn't broken, just the wrong kind.
-		// forward() has already fast-failed if no API-key alternatives exist.
-		log.Debugf("codex oauth: %s skipping %s (OAuth path supports /v1/responses only)", a.ID, path)
+	if path != "/v1/responses" && path != "/v1/responses/compact" {
+		// The ChatGPT backend only hosts /codex/responses{,/compact}; OAuth
+		// creds can't serve /v1/chat/completions. Ask the retry loop to try a
+		// different credential (API-key creds handle chat/completions fine).
+		// Don't MarkFailure — this credential isn't broken, just the wrong
+		// kind. forward() has already fast-failed if no API-key alternatives
+		// exist.
+		log.Debugf("codex oauth: %s skipping %s (OAuth path supports /v1/responses{,/compact} only)", a.ID, path)
 		return true, false
 	}
 
@@ -232,7 +241,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	if ab := strings.TrimRight(snap.BaseURL, "/"); ab != "" {
 		baseURL = ab
 	}
-	upURL := baseURL + codexOAuthPath()
+	upURL := baseURL + codexOAuthPath(path)
 
 	upstreamBody, _, err := sanitizeCodexRequestBody(body)
 	if err != nil {
@@ -279,26 +288,37 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// detected and re-dialed transparently.
 	client := auth.ClientFor(snap.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(upReq)
-	// Network-error retry once on the SAME credential. These errors
-	// (`connection reset by peer`, `broken pipe`, `EOF`) are almost always
-	// transient infra flaps (CF new-conn rate limit, proxy hiccup, stale h2
-	// conn racing a server close) — not a problem with the credential. A
-	// single retry at ~400ms dodges the CF rate-limit window without
-	// burning the cred via MarkFailure / the pool's cross-cred retry loop,
-	// which is what was surfacing as 503 "all upstream credentials
-	// exhausted" in single-cred deployments.
-	if err != nil && !isClientDisconnect(ctx, err) && isTransientNetErr(err) {
-		log.Debugf("codex oauth: transient network error via %s (%v); retrying once on same cred", a.ID, err)
-		time.Sleep(400 * time.Millisecond)
-		retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(upstreamBody))
-		if rerr == nil {
-			retryReq.Header = upReq.Header.Clone()
-			if resp2, err2 := client.Do(retryReq); err2 == nil {
-				resp, err = resp2, nil
-			} else {
-				err = err2
-			}
+	// Network-error retry on the SAME credential. These errors
+	// (`connection reset by peer`, `broken pipe`, `EOF`, h2 GOAWAY) are
+	// almost always transient infra flaps (CF new-conn rate limit, proxy
+	// hiccup, stale h2 conn racing a server close) — not a problem with the
+	// credential. We retry several times with increasing backoff so the
+	// flap recovers without burning the cred via MarkFailure or surfacing as
+	// "degraded" in the admin panel. The client's request context bounds the
+	// loop — if the user gives up, we stop.
+	const transientRetryBackoffsMs = 400
+	transientBackoffs := []int{transientRetryBackoffsMs, 800, 1500, 2500}
+	for attempt := 0; err != nil && attempt < len(transientBackoffs); attempt++ {
+		if isClientDisconnect(ctx, err) || !isTransientNetErr(err) {
+			break
 		}
+		log.Infof("codex oauth: transient net error via %s (attempt %d, will retry): %v", a.ID, attempt+1, err)
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-time.After(time.Duration(transientBackoffs[attempt]) * time.Millisecond):
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(upstreamBody))
+		if rerr != nil {
+			err = rerr
+			break
+		}
+		retryReq.Header = upReq.Header.Clone()
+		resp2, err2 := client.Do(retryReq)
+		resp, err = resp2, err2
 	}
 	if err != nil {
 		if isClientDisconnect(ctx, err) {
@@ -311,6 +331,15 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 				Error:      "client canceled",
 			})
 			return false, true
+		}
+		// Transient infra failure that survived the same-cred retry loop:
+		// don't MarkFailure (would degrade the credential / show as unhealthy
+		// in the admin panel), don't emit a request log row. Just ask the
+		// outer loop to try another credential — and if that one is also the
+		// only one, it'll come right back here for another round of retries.
+		if isTransientNetErr(err) {
+			log.Infof("codex oauth: transient net error survived same-cred retries via %s: %v (deferring to outer loop without MarkFailure)", a.ID, err)
+			return true, false
 		}
 		a.MarkFailure(err.Error())
 		log.Warnf("codex oauth: upstream error via %s: %v", a.ID, err)

@@ -279,15 +279,11 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		}
 	}
 
-	// Body-layer Claude Code mimicry — only meaningful for OAuth credentials
-	// hitting the first-party Anthropic endpoint. API-key credentials (relay
-	// vendors, direct API access) shouldn't be rewritten because the relay
-	// won't expect a Claude-Code-shaped system prompt and api.anthropic.com
-	// API-key billing isn't third-party-checked. Skips Haiku and requests
-	// that already look like Claude Code internally.
-	if _, kind := a.Credentials(); kind == auth.KindOAuth && isAnthropicBase && path == "/v1/messages" {
-		upstreamBody = applyClaudeCodeBodyMimicry(upstreamBody, model, a.ID)
-	}
+	// Body-layer Claude Code mimicry is intentionally disabled: rewriting the
+	// client's system prompt / messages to mimic the official CLI is unsafe
+	// (it changes what the model is told and can corrupt user instructions).
+	// Header-layer mimicry (UA, X-Stainless, anthropic-beta) still runs in
+	// applyAnthropicHeaders — those don't touch the prompt.
 
 	ctx := c.Request.Context()
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(upstreamBody))

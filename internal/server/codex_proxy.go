@@ -37,6 +37,15 @@ func (s *Server) handleCodexResponses(c *gin.Context) {
 	s.forward(c, auth.ProviderOpenAI, "/v1/responses")
 }
 
+// handleCodexResponsesCompact forwards the Codex CLI's conversation-compaction
+// request. Same /v1/responses body shape, different upstream path
+// (/codex/responses/compact on the ChatGPT backend; /v1/responses/compact
+// on API-key relays). Routed to the same forward() machinery — the path is
+// translated at the upstream-call layer.
+func (s *Server) handleCodexResponsesCompact(c *gin.Context) {
+	s.forward(c, auth.ProviderOpenAI, "/v1/responses/compact")
+}
+
 // handleCodexModels returns the union of models exposed by the loaded
 // OpenAI credentials: OAuth creds contribute their plan-tier catalog
 // (see auth.CodexModelsForPlan) and API-key creds contribute the
@@ -203,6 +212,33 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 
 	client := auth.ClientFor(snap.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(upReq)
+	// Transient-error retry on the same credential — same rationale as the
+	// OAuth path (codex_oauth_proxy.go): connection-reset / EOF / GOAWAY are
+	// infra flaps, not credential faults. Retry several times before giving
+	// up so the flap doesn't show as "degraded" in the admin panel.
+	transientBackoffs := []int{400, 800, 1500, 2500}
+	for retryIdx := 0; err != nil && retryIdx < len(transientBackoffs); retryIdx++ {
+		if isClientDisconnect(ctx, err) || !isTransientNetErr(err) {
+			break
+		}
+		log.Infof("codex proxy: transient net error via %s (attempt %d, will retry): %v", a.ID, retryIdx+1, err)
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-time.After(time.Duration(transientBackoffs[retryIdx]) * time.Millisecond):
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(upstreamBody))
+		if rerr != nil {
+			err = rerr
+			break
+		}
+		retryReq.Header = upReq.Header.Clone()
+		resp2, err2 := client.Do(retryReq)
+		resp, err = resp2, err2
+	}
 	if err != nil {
 		if isClientDisconnect(ctx, err) {
 			a.MarkClientCancel(err.Error())
@@ -223,6 +259,13 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 				Error:       "client canceled",
 			})
 			return false, true
+		}
+		// Transient infra failure that survived the same-cred retry loop:
+		// don't MarkFailure (avoid surfacing as degraded). Defer to the outer
+		// retry loop without burning the cred.
+		if isTransientNetErr(err) {
+			log.Infof("codex proxy: transient net error survived same-cred retries via %s: %v (deferring to outer loop without MarkFailure)", a.ID, err)
+			return true, false
 		}
 		a.MarkFailure(err.Error())
 		log.Warnf("codex proxy: upstream error via %s: %v", a.ID, err)

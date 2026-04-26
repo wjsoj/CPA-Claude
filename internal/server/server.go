@@ -215,6 +215,7 @@ func (s *Server) buildCodexEngine(adminH *admin.Handler, primary bool) *gin.Engi
 		// Stubs — implemented in Phase 3 (see codex_proxy.go).
 		v1.POST("/chat/completions", s.handleCodexChatCompletions)
 		v1.POST("/responses", s.handleCodexResponses)
+		v1.POST("/responses/compact", s.handleCodexResponsesCompact)
 		v1.GET("/models", s.handleCodexModels)
 	}
 
