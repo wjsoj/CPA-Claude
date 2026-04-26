@@ -169,14 +169,28 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	}
 	upURL := baseURL + path
 
+	// /v1/responses/compact has a stricter schema than /v1/responses —
+	// the only fields the upstream accepts are model/input/instructions/
+	// previous_response_id. Drop everything else so that bodies forwarded
+	// by Codex CLI (which carries `include`, `context_management`, etc.)
+	// don't trigger `Unknown parameter` 400s on relays that proxy through
+	// to ChatGPT's compact endpoint. Mirrors sub2api's
+	// normalizeOpenAICompactRequestBody.
+	upstreamBody := body
+	if path == "/v1/responses/compact" {
+		if normalized, _, sErr := sanitizeCodexCompactRequestBody(body); sErr == nil {
+			upstreamBody = normalized
+		} else {
+			log.Warnf("codex proxy: compact body normalize failed via %s: %v", a.ID, sErr)
+		}
+	}
 	// Per-key model rewrite for third-party OpenAI-compatible relays (same
 	// mechanism the Anthropic side uses). Routing has already filtered to
 	// credentials that accept this client-facing model — here we just
 	// substitute the body's "model" field when the map calls for it.
-	upstreamBody := body
 	rewriteClientModel := ""
 	if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
-		if rewritten, err := rewriteModelField(body, upstreamModel); err == nil {
+		if rewritten, err := rewriteModelField(upstreamBody, upstreamModel); err == nil {
 			upstreamBody = rewritten
 			rewriteClientModel = model // rewrite the response back for the client
 		} else {

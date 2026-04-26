@@ -53,7 +53,17 @@ func codexOAuthPath(clientPath string) string {
 // required fields, delete the ones that get rejected, and normalize the
 // payload shape. Upstream is always streamed — the `stream` bool on the
 // client request does not change the body we send.
-func sanitizeCodexRequestBody(body []byte) ([]byte, string, error) {
+//
+// clientPath selects the schema variant: /v1/responses/compact is a much
+// stricter endpoint that only accepts {model, input, instructions,
+// previous_response_id} — anything else (notably `include`,
+// `context_management`, `tools`, `store`, `stream`) gets rejected with
+// `Unknown parameter`. We mirror sub2api's normalizeOpenAICompactRequestBody
+// for that path.
+func sanitizeCodexRequestBody(body []byte, clientPath string) ([]byte, string, error) {
+	if clientPath == "/v1/responses/compact" {
+		return sanitizeCodexCompactRequestBody(body)
+	}
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return body, "", err
@@ -137,6 +147,41 @@ func sanitizeCodexRequestBody(body []byte) ([]byte, string, error) {
 
 	out, err := json.Marshal(raw)
 	return out, baseModel, err
+}
+
+// sanitizeCodexCompactRequestBody is the strict whitelist for the
+// /codex/responses/compact endpoint. Mirrors sub2api's
+// normalizeOpenAICompactRequestBody: the backend rejects everything except
+// these four fields, so we drop the rest entirely (in particular
+// `include`, `context_management`, `tools`, `store`, `stream`,
+// `parallel_tool_calls` — all of which sanitizeCodexRequestBody force-
+// injects for the regular /responses path and which would 400 here).
+//
+// The model field still has its CLIProxyAPI thinking-suffix stripped so
+// `gpt-5.3-codex(high)` → `gpt-5.3-codex` for billing/upstream consistency.
+func sanitizeCodexCompactRequestBody(body []byte) ([]byte, string, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body, "", err
+	}
+	baseModel := ""
+	if m, ok := raw["model"].(string); ok {
+		baseModel = stripThinkingSuffix(m)
+	}
+	out := map[string]any{}
+	for _, k := range []string{"model", "input", "instructions", "previous_response_id"} {
+		v, ok := raw[k]
+		if !ok {
+			continue
+		}
+		if k == "model" && baseModel != "" {
+			out[k] = baseModel
+			continue
+		}
+		out[k] = v
+	}
+	encoded, err := json.Marshal(out)
+	return encoded, baseModel, err
 }
 
 // normalizeBuiltinToolsInPlace rewrites the legacy Codex built-in tool
@@ -243,7 +288,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	}
 	upURL := baseURL + codexOAuthPath(path)
 
-	upstreamBody, _, err := sanitizeCodexRequestBody(body)
+	upstreamBody, _, err := sanitizeCodexRequestBody(body, path)
 	if err != nil {
 		log.Warnf("codex oauth: body sanitize failed via %s: %v", a.ID, err)
 		upstreamBody = body
