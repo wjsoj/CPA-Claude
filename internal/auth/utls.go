@@ -1,9 +1,11 @@
 package auth
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -164,14 +166,36 @@ func socks5DialContext(u *url.URL) func(context.Context, string, string) (net.Co
 }
 
 // utlsTransport implements http.RoundTripper using uTLS Chrome fingerprint.
+//
+// ALPN is negotiated honestly: we offer both "h2" and "http/1.1" and dispatch
+// on what the server actually picked. The earlier code hardcoded NextProtos to
+// ["h2"] and unconditionally fed the conn into http2.Transport — when a relay
+// vendor's edge spoke HTTP/1.1 (TLS handshake completes without ALPN match,
+// then the server replies with "HTTP/1.1 200 OK..."), the http2 reader saw
+// ASCII bytes and surfaced "frame header looked like an HTTP/1.1 header".
+//
+// h2 connections are pooled per addr; h1 fallbacks are single-shot (rare path,
+// only triggers for third-party relays that don't speak h2).
 type utlsTransport struct {
 	proxyURL string
 	mu       sync.Mutex
-	conns    map[string]*http2.ClientConn
+	h2Conns  map[string]*http2.ClientConn
+	h2Tr     *http2.Transport
 }
 
 func newUTLSTransport(proxyURL string) *utlsTransport {
-	return &utlsTransport{proxyURL: proxyURL, conns: make(map[string]*http2.ClientConn)}
+	return &utlsTransport{
+		proxyURL: proxyURL,
+		h2Conns:  make(map[string]*http2.ClientConn),
+		// PING-based health checks: stale h2 conns (idle SOCKS5 tunnels,
+		// silent stream drops) get noticed before the next RoundTrip writes
+		// on a half-dead socket. Mirrors what newStdTransport does via
+		// http2.ConfigureTransports.
+		h2Tr: &http2.Transport{
+			ReadIdleTimeout: 30 * time.Second,
+			PingTimeout:     15 * time.Second,
+		},
+	}
 }
 
 func (t *utlsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -183,33 +207,49 @@ func (t *utlsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	addr := net.JoinHostPort(host, port)
 
 	t.mu.Lock()
-	h2, ok := t.conns[addr]
-	if ok && h2.CanTakeNewRequest() {
-		t.mu.Unlock()
-		resp, err := h2.RoundTrip(req)
-		if err != nil {
-			t.mu.Lock()
-			if c, exists := t.conns[addr]; exists && c == h2 {
-				delete(t.conns, addr)
-			}
+	if h2, ok := t.h2Conns[addr]; ok {
+		if h2.CanTakeNewRequest() {
 			t.mu.Unlock()
-			return nil, err
+			resp, err := h2.RoundTrip(req)
+			if err != nil {
+				t.mu.Lock()
+				if c, exists := t.h2Conns[addr]; exists && c == h2 {
+					delete(t.h2Conns, addr)
+				}
+				t.mu.Unlock()
+				return nil, err
+			}
+			return resp, nil
 		}
-		return resp, nil
+		delete(t.h2Conns, addr)
 	}
 	t.mu.Unlock()
 
-	h2, err := t.dial(req.Context(), host, addr)
+	uc, err := t.dialTLS(req.Context(), host, addr)
 	if err != nil {
 		return nil, err
 	}
-	t.mu.Lock()
-	t.conns[addr] = h2
-	t.mu.Unlock()
-	return h2.RoundTrip(req)
+	proto := uc.ConnectionState().NegotiatedProtocol
+	if proto == "h2" {
+		h2, err := t.h2Tr.NewClientConn(uc)
+		if err != nil {
+			_ = uc.Close()
+			return nil, err
+		}
+		t.mu.Lock()
+		t.h2Conns[addr] = h2
+		t.mu.Unlock()
+		return h2.RoundTrip(req)
+	}
+	// ALPN agreed on http/1.1 (or no ALPN — most servers then default to h1
+	// over TLS). One-shot: write request, read response, conn closes when
+	// the body Close()s. No pooling, since this path is rare and pooling h1
+	// over utls correctly (with proper Connection: keep-alive bookkeeping,
+	// CONNECT-style proxies, and 100-continue) is more code than it's worth.
+	return roundTripHTTP1(uc, req)
 }
 
-func (t *utlsTransport) dial(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
+func (t *utlsTransport) dialTLS(ctx context.Context, host, addr string) (*utls.UConn, error) {
 	var rawConn net.Conn
 	var err error
 	if t.proxyURL != "" {
@@ -221,19 +261,56 @@ func (t *utlsTransport) dial(ctx context.Context, host, addr string) (*http2.Cli
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
-	tlsCfg := &utls.Config{ServerName: host, NextProtos: []string{"h2"}}
+	tlsCfg := &utls.Config{ServerName: host, NextProtos: []string{"h2", "http/1.1"}}
 	uc := utls.UClient(rawConn, tlsCfg, utls.HelloChrome_Auto)
 	if err := uc.HandshakeContext(ctx); err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("utls handshake %s: %w", host, err)
 	}
-	tr := &http2.Transport{}
-	h2, err := tr.NewClientConn(uc)
+	return uc, nil
+}
+
+// roundTripHTTP1 sends one request over an already-handshaken utls conn and
+// returns the response. The conn is owned by the response body — closing the
+// body closes the conn. We force Connection: close so the server doesn't try
+// to keep it alive (we wouldn't pool it either way).
+func roundTripHTTP1(uc *utls.UConn, req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.Header.Set("Connection", "close")
+	if err := r.Write(uc); err != nil {
+		_ = uc.Close()
+		return nil, err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(uc), r)
 	if err != nil {
 		_ = uc.Close()
 		return nil, err
 	}
-	return h2, nil
+	resp.Body = &connBoundBody{ReadCloser: resp.Body, conn: uc}
+	return resp, nil
+}
+
+// connBoundBody ties the lifetime of an underlying net.Conn to the response
+// body. Used by the HTTP/1.1 utls fallback path.
+type connBoundBody struct {
+	io.ReadCloser
+	conn   net.Conn
+	closed bool
+	mu     sync.Mutex
+}
+
+func (b *connBoundBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	err := b.ReadCloser.Close()
+	if cerr := b.conn.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // dialViaProxy supports http:// and socks5:// proxies for HTTPS CONNECT.
