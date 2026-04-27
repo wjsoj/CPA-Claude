@@ -256,6 +256,9 @@ func maskClientToken(t string) string {
 //	done=true   → response was delivered successfully (status < 400 or
 //	              non-retryable error already written to client)
 func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry bool, done bool) {
+	if a.Kind == auth.KindAPIKey {
+		return s.doForwardAnthropicAPIKey(c, a, path, body, stream, model, clientToken, clientName, start, attempts)
+	}
 	baseURL := s.cfg.AnthropicBaseURL
 	// Per-credential base URL override (used for relay/midstream vendors on
 	// API-key credentials).
@@ -442,6 +445,116 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		AuthID:      a.ID,
 		AuthLabel:   a.Label,
 		AuthKind:    authKind,
+		Model:       model,
+		Input:       counts.InputTokens,
+		Output:      counts.OutputTokens,
+		CacheRead:   counts.CacheReadTokens,
+		CacheCreate: counts.CacheCreateTokens,
+		CostUSD:     costUSD,
+		Status:      resp.StatusCode,
+		DurationMs:  time.Since(start).Milliseconds(),
+		Stream:      stream,
+		Path:        path,
+		Attempts:    attempts,
+	})
+	return false, true
+}
+
+// doForwardAnthropicAPIKey is the API-key passthrough for Anthropic-shaped
+// upstreams (api.anthropic.com or third-party relays). Unlike the OAuth path,
+// we do not inject any Claude Code mimicry headers, do not use uTLS, and do
+// not interpret upstream errors. Whatever the upstream returns is forwarded
+// to the client verbatim — credential cooldowns, ban detection, and cross-
+// credential retries are intentionally skipped. The only request-side change
+// allowed is the per-credential model rewrite (and the matching response-side
+// rewrite) so model_map'd relay vendors keep working.
+func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry bool, done bool) {
+	baseURL := s.cfg.AnthropicBaseURL
+	if ab := strings.TrimRight(a.Snapshot().BaseURL, "/"); ab != "" {
+		baseURL = ab
+	}
+	upURL := baseURL + path
+
+	upstreamBody := body
+	rewriteClientModel := ""
+	if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
+		if rewritten, err := rewriteModelField(body, upstreamModel); err == nil {
+			upstreamBody = rewritten
+			rewriteClientModel = model
+		} else {
+			log.Warnf("proxy(apikey): model rewrite (%s -> %s) failed via %s: %v", model, upstreamModel, a.ID, err)
+		}
+	}
+
+	ctx := c.Request.Context()
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(upstreamBody))
+	if err != nil {
+		c.AbortWithStatusJSON(500, gin.H{"error": err.Error()})
+		return false, true
+	}
+	copyForwardableHeaders(c.Request.Header, upReq.Header)
+	stripIngressHeaders(upReq.Header)
+	token, _ := a.Credentials()
+	upReq.Header.Set("x-api-key", token)
+
+	client := auth.ClientFor(a.ProxyURL, false)
+	resp, err := client.Do(upReq)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			log.Infof("proxy(apikey): client canceled via %s: %v", a.ID, err)
+			s.emitLog(requestlog.Record{
+				Client: clientName, ClientToken: maskClientToken(clientToken),
+				Provider: auth.NormalizeProvider(a.Provider), AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
+				Model: model, Stream: stream, Path: path, Status: 499,
+				DurationMs: time.Since(start).Milliseconds(), Attempts: attempts, Error: "client canceled",
+			})
+			return false, true
+		}
+		log.Warnf("proxy(apikey): upstream transport error via %s: %v", a.ID, err)
+		c.AbortWithStatusJSON(502, gin.H{"error": err.Error()})
+		s.emitLog(requestlog.Record{
+			Client: clientName, ClientToken: maskClientToken(clientToken),
+			Provider: auth.NormalizeProvider(a.Provider), AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
+			Model: model, Stream: stream, Path: path, Status: 502,
+			DurationMs: time.Since(start).Milliseconds(), Attempts: attempts, Error: err.Error(),
+		})
+		return false, true
+	}
+
+	writeResponseHeaders(c, resp)
+	var counts usage.Counts
+	if resp.StatusCode < 400 {
+		counts.Requests = 1
+	}
+	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		streamSSE(c, resp, &counts, rewriteClientModel)
+	} else {
+		respBody, _ := io.ReadAll(resp.Body)
+		if rewriteClientModel != "" && resp.StatusCode < 400 {
+			respBody = rewriteResponseModel(respBody, rewriteClientModel)
+		}
+		c.Writer.Write(respBody)
+		if resp.StatusCode < 400 {
+			counts.Add(extractUsageFromJSON(respBody))
+		}
+	}
+	_ = resp.Body.Close()
+
+	var costUSD float64
+	if resp.StatusCode < 400 {
+		s.usage.Record(a.ID, a.Label, counts)
+		if counts.Requests > 0 && clientToken != "" {
+			costUSD = s.pricing.Cost(auth.NormalizeProvider(a.Provider), model, counts)
+			s.usage.RecordClient(clientToken, clientName, counts, costUSD)
+		}
+	}
+	s.emitLog(requestlog.Record{
+		Client:      clientName,
+		ClientToken: maskClientToken(clientToken),
+		Provider:    auth.NormalizeProvider(a.Provider),
+		AuthID:      a.ID,
+		AuthLabel:   a.Label,
+		AuthKind:    "apikey",
 		Model:       model,
 		Input:       counts.InputTokens,
 		Output:      counts.OutputTokens,

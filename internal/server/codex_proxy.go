@@ -162,6 +162,13 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		return s.doForwardCodexOAuth(c, a, path, body, stream, model, clientToken, clientName, start, attempts)
 	}
 
+	// API-key passthrough. We do not inject any Codex-CLI mimicry, do not
+	// use uTLS, do not normalize the request body (compact whitelist /
+	// stream_options injection), and do not interpret upstream errors.
+	// Whatever the upstream returns is forwarded to the client verbatim.
+	// The only allowed request-side change is the per-credential model
+	// rewrite (and matching response-side rewrite) so model_map'd relay
+	// vendors keep working.
 	snap := a.Snapshot()
 	baseURL := strings.TrimRight(snap.BaseURL, "/")
 	if baseURL == "" {
@@ -169,41 +176,14 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	}
 	upURL := baseURL + path
 
-	// /v1/responses/compact has a stricter schema than /v1/responses —
-	// the only fields the upstream accepts are model/input/instructions/
-	// previous_response_id. Drop everything else so that bodies forwarded
-	// by Codex CLI (which carries `include`, `context_management`, etc.)
-	// don't trigger `Unknown parameter` 400s on relays that proxy through
-	// to ChatGPT's compact endpoint. Mirrors sub2api's
-	// normalizeOpenAICompactRequestBody.
 	upstreamBody := body
-	if path == "/v1/responses/compact" {
-		if normalized, _, sErr := sanitizeCodexCompactRequestBody(body); sErr == nil {
-			upstreamBody = normalized
-		} else {
-			log.Warnf("codex proxy: compact body normalize failed via %s: %v", a.ID, sErr)
-		}
-	}
-	// Per-key model rewrite for third-party OpenAI-compatible relays (same
-	// mechanism the Anthropic side uses). Routing has already filtered to
-	// credentials that accept this client-facing model — here we just
-	// substitute the body's "model" field when the map calls for it.
 	rewriteClientModel := ""
 	if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
 		if rewritten, err := rewriteModelField(upstreamBody, upstreamModel); err == nil {
 			upstreamBody = rewritten
-			rewriteClientModel = model // rewrite the response back for the client
+			rewriteClientModel = model
 		} else {
-			log.Warnf("codex proxy: model rewrite (%s -> %s) failed via %s: %v", model, upstreamModel, a.ID, err)
-		}
-	}
-
-	// Auto-inject stream_options.include_usage so streaming responses carry
-	// usage data in the final chunk. Caller-provided value wins (if the
-	// client explicitly set false, we don't override).
-	if stream {
-		if withUsage, err := ensureStreamOptionsIncludeUsage(upstreamBody); err == nil {
-			upstreamBody = withUsage
+			log.Warnf("codex proxy(apikey): model rewrite (%s -> %s) failed via %s: %v", model, upstreamModel, a.ID, err)
 		}
 	}
 
@@ -217,108 +197,54 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	stripIngressHeaders(upReq.Header)
 	accessToken, _ := a.Credentials()
 	upReq.Header.Set("Authorization", "Bearer "+accessToken)
-	upReq.Header.Set("Content-Type", "application/json")
-	if stream {
-		upReq.Header.Set("Accept", "text/event-stream")
-	} else {
-		upReq.Header.Set("Accept", "application/json")
-	}
 
-	client := auth.ClientFor(snap.ProxyURL, s.cfg.UseUTLS)
+	client := auth.ClientFor(snap.ProxyURL, false)
 	resp, err := client.Do(upReq)
-	// Transient-error retry on the same credential — same rationale as the
-	// OAuth path (codex_oauth_proxy.go): connection-reset / EOF / GOAWAY are
-	// infra flaps, not credential faults. Retry several times before giving
-	// up so the flap doesn't show as "degraded" in the admin panel.
-	transientBackoffs := []int{400, 800, 1500, 2500}
-	for retryIdx := 0; err != nil && retryIdx < len(transientBackoffs); retryIdx++ {
-		if isClientDisconnect(ctx, err) || !isTransientNetErr(err) {
-			break
-		}
-		log.Infof("codex proxy: transient net error via %s (attempt %d, will retry): %v", a.ID, retryIdx+1, err)
-		select {
-		case <-ctx.Done():
-			err = ctx.Err()
-		case <-time.After(time.Duration(transientBackoffs[retryIdx]) * time.Millisecond):
-		}
-		if ctx.Err() != nil {
-			break
-		}
-		retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(upstreamBody))
-		if rerr != nil {
-			err = rerr
-			break
-		}
-		retryReq.Header = upReq.Header.Clone()
-		resp2, err2 := client.Do(retryReq)
-		resp, err = resp2, err2
-	}
 	if err != nil {
 		if isClientDisconnect(ctx, err) {
-			a.MarkClientCancel(err.Error())
-			log.Infof("codex proxy: client canceled via %s: %v", a.ID, err)
+			log.Infof("codex proxy(apikey): client canceled via %s: %v", a.ID, err)
 			s.emitLog(requestlog.Record{
-				Client:      clientName,
-				ClientToken: maskClientToken(clientToken),
-				Provider:    auth.ProviderOpenAI,
-				AuthID:      a.ID,
-				AuthLabel:   a.Label,
-				AuthKind:    "apikey",
-				Model:       model,
-				Stream:      stream,
-				Path:        path,
-				Status:      499,
-				DurationMs:  time.Since(start).Milliseconds(),
-				Attempts:    attempts,
-				Error:       "client canceled",
+				Client: clientName, ClientToken: maskClientToken(clientToken),
+				Provider: auth.ProviderOpenAI, AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
+				Model: model, Stream: stream, Path: path, Status: 499,
+				DurationMs: time.Since(start).Milliseconds(), Attempts: attempts, Error: "client canceled",
 			})
 			return false, true
 		}
-		// Transient infra failure that survived the same-cred retry loop:
-		// don't MarkFailure (avoid surfacing as degraded). Defer to the outer
-		// retry loop without burning the cred.
-		if isTransientNetErr(err) {
-			log.Infof("codex proxy: transient net error survived same-cred retries via %s: %v (deferring to outer loop without MarkFailure)", a.ID, err)
-			return true, false
-		}
-		a.MarkFailure(err.Error())
-		log.Warnf("codex proxy: upstream error via %s: %v", a.ID, err)
-		return true, false
+		log.Warnf("codex proxy(apikey): upstream transport error via %s: %v", a.ID, err)
+		c.AbortWithStatusJSON(502, gin.H{"error": err.Error()})
+		s.emitLog(requestlog.Record{
+			Client: clientName, ClientToken: maskClientToken(clientToken),
+			Provider: auth.ProviderOpenAI, AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
+			Model: model, Stream: stream, Path: path, Status: 502,
+			DurationMs: time.Since(start).Milliseconds(), Attempts: attempts, Error: err.Error(),
+		})
+		return false, true
 	}
 
-	// Auth / rate-limit errors: cooldown + retry another credential.
-	switch resp.StatusCode {
-	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusForbidden:
-		errBody, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		resetAt := parseRetryAfter(resp.Header)
-		s.pool.ReportUpstreamError(a, resp.StatusCode, resetAt)
-		log.Warnf("codex proxy: credential %s received %d: %s", a.ID, resp.StatusCode, truncate(errBody, 240))
-		// Retry another credential on 429/401; 403 usually means the key
-		// can't serve the requested org — also retry.
-		return true, false
-	}
-
-	// Success path: stream or buffer.
 	writeResponseHeaders(c, resp)
 	var counts usage.Counts
 	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		streamSSEOpenAI(c, resp, &counts, rewriteClientModel)
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
-		if rewriteClientModel != "" {
+		if rewriteClientModel != "" && resp.StatusCode < 400 {
 			respBody = rewriteResponseModel(respBody, rewriteClientModel)
 		}
 		c.Writer.Write(respBody)
-		counts.Add(extractOpenAIUsageFromJSON(respBody))
+		if resp.StatusCode < 400 {
+			counts.Add(extractOpenAIUsageFromJSON(respBody))
+		}
 	}
 	_ = resp.Body.Close()
 
-	s.usage.Record(a.ID, a.Label, counts)
 	var costUSD float64
-	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
-		costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, counts)
-		s.usage.RecordClient(clientToken, clientName, counts, costUSD)
+	if resp.StatusCode < 400 {
+		s.usage.Record(a.ID, a.Label, counts)
+		if counts.Requests > 0 && clientToken != "" {
+			costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, counts)
+			s.usage.RecordClient(clientToken, clientName, counts, costUSD)
+		}
 	}
 	s.emitLog(requestlog.Record{
 		Client:      clientName,
@@ -339,9 +265,6 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		Path:        path,
 		Attempts:    attempts,
 	})
-	if resp.StatusCode < 400 {
-		a.MarkSuccess()
-	}
 	return false, true
 }
 
