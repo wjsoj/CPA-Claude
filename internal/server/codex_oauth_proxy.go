@@ -20,12 +20,16 @@ import (
 )
 
 // The ChatGPT Codex backend expects the OpenAI /v1/responses schema with a
-// handful of upstream-private fields stripped. These names mirror the
-// headers and behavior of the vendor Codex CLI (version 0.118.0 at the
-// time of writing) — not copying them will get the request rejected.
+// handful of upstream-private fields stripped. These mirror the headers
+// the Rust Codex CLI sends today — aligned with sub2api, which is the
+// fingerprint Cloudflare's edge currently passes through. The earlier
+// codex-tui/iTerm.app combo gets challenged by CF under uTLS and returns
+// 4xx fast (the symptom: a burst of 503s as the retry loop burns every
+// credential in <300ms).
 const (
-	codexBackendUserAgent  = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
-	codexBackendOriginator = "codex-tui"
+	codexCLIVersion        = "0.125.0"
+	codexBackendUserAgent  = "codex_cli_rs/" + codexCLIVersion
+	codexBackendOriginator = "codex_cli_rs"
 )
 
 // codexOAuthPath maps a client-facing path under /v1 to the corresponding
@@ -87,9 +91,12 @@ func sanitizeCodexRequestBody(body []byte, clientPath string) ([]byte, string, e
 	raw["include"] = []any{"reasoning.encrypted_content"}
 
 	// Fields the backend rejects or that leak through from openai.com-
-	// compatible SDKs but don't belong on the Codex backend.
+	// compatible SDKs but don't belong on the Codex backend. Note:
+	// `previous_response_id` is intentionally NOT stripped — Codex CLI
+	// chains multi-turn conversations on this field, and sub2api preserves
+	// it for the same reason. Stripping it makes every turn a cold start
+	// and may correlate with CF rate-limit bursts.
 	for _, k := range []string{
-		"previous_response_id",
 		"prompt_cache_retention",
 		"safety_identifier",
 		"stream_options",
@@ -305,9 +312,17 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	accessToken, _ := a.Credentials()
 	upReq.Header.Set("Authorization", "Bearer "+accessToken)
 	upReq.Header.Set("Content-Type", "application/json")
-	// Upstream is always streamed; aggregation happens on our side when the
-	// client asked for a non-streaming response.
-	upReq.Header.Set("Accept", "text/event-stream")
+	isCompactPath := path == "/v1/responses/compact"
+	// /codex/responses streams SSE; /codex/responses/compact returns JSON.
+	// Match sub2api: distinct Accept per endpoint, plus the `version` header
+	// the compact endpoint reads.
+	if isCompactPath {
+		upReq.Header.Set("Accept", "application/json")
+		upReq.Header.Set("Version", codexCLIVersion)
+	} else {
+		upReq.Header.Set("Accept", "text/event-stream")
+	}
+	upReq.Header.Set("OpenAI-Beta", "responses=experimental")
 	// Force plaintext upstream bodies. Otherwise CF may respond with br/gzip
 	// which (a) breaks SSE streaming and (b) makes 4xx error bodies unreadable
 	// in our logs. Identity keeps everything human-readable end-to-end.
@@ -432,7 +447,39 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	}
 
 	var counts usage.Counts
-	if stream {
+	if isCompactPath {
+		// /codex/responses/compact returns a single JSON object — no SSE.
+		// Read it once, extract usage, pass through verbatim. Matches sub2api's
+		// handleNonStreamingResponsePassthrough behavior on this path.
+		payload, rerr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if rerr != nil {
+			log.Warnf("codex oauth: read compact body via %s: %v", a.ID, rerr)
+			c.AbortWithStatusJSON(502, gin.H{"error": "codex upstream: " + rerr.Error()})
+			s.emitLog(requestlog.Record{
+				Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
+				AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
+				Stream: stream, Path: path, Status: 502, Attempts: attempts,
+				DurationMs: time.Since(start).Milliseconds(),
+				Error:      rerr.Error(),
+			})
+			return false, true
+		}
+		counts.Add(extractCodexBackendUsageFromJSON(payload))
+		// Drop hop-by-hop / encoding headers; we've already consumed and may
+		// be sending different bytes than the upstream advertised.
+		for k, v := range resp.Header {
+			if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") || strings.EqualFold(k, "Content-Encoding") {
+				continue
+			}
+			for _, val := range v {
+				c.Writer.Header().Add(k, val)
+			}
+		}
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.WriteHeader(resp.StatusCode)
+		c.Writer.Write(payload)
+	} else if stream {
 		// Streaming client: passthrough SSE verbatim.
 		writeResponseHeaders(c, resp)
 		streamSSECodexBackend(c, resp, &counts)
