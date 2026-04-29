@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -164,11 +165,16 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 
 	// API-key passthrough. We do not inject any Codex-CLI mimicry, do not
 	// use uTLS, do not normalize the request body (compact whitelist /
-	// stream_options injection), and do not interpret upstream errors.
+	// stream_options injection), and do not retry across credentials.
 	// Whatever the upstream returns is forwarded to the client verbatim.
 	// The only allowed request-side change is the per-credential model
 	// rewrite (and matching response-side rewrite) so model_map'd relay
 	// vendors keep working.
+	//
+	// Health tracking is intentionally minimal: success → MarkSuccess,
+	// 401/403 → MarkHardFailure (sticky Unhealthy in admin). Transient
+	// 5xx / 429 / network errors are NOT recorded — we don't want a brief
+	// upstream flap to flip the credential into a "degraded" yellow state.
 	snap := a.Snapshot()
 	baseURL := strings.TrimRight(snap.BaseURL, "/")
 	if baseURL == "" {
@@ -237,6 +243,13 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		}
 	}
 	_ = resp.Body.Close()
+
+	switch {
+	case resp.StatusCode < 400:
+		a.MarkSuccess()
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		a.MarkHardFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
+	}
 
 	var costUSD float64
 	if resp.StatusCode < 400 {

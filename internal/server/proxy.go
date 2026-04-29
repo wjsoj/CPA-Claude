@@ -463,11 +463,16 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 // doForwardAnthropicAPIKey is the API-key passthrough for Anthropic-shaped
 // upstreams (api.anthropic.com or third-party relays). Unlike the OAuth path,
 // we do not inject any Claude Code mimicry headers, do not use uTLS, and do
-// not interpret upstream errors. Whatever the upstream returns is forwarded
-// to the client verbatim — credential cooldowns, ban detection, and cross-
-// credential retries are intentionally skipped. The only request-side change
-// allowed is the per-credential model rewrite (and the matching response-side
-// rewrite) so model_map'd relay vendors keep working.
+// not retry across credentials. Whatever the upstream returns is forwarded
+// to the client verbatim — credential cooldowns and cross-credential retries
+// are intentionally skipped. The only request-side change allowed is the
+// per-credential model rewrite (and the matching response-side rewrite) so
+// model_map'd relay vendors keep working.
+//
+// Health tracking is intentionally minimal: success → MarkSuccess, 401/403
+// → MarkHardFailure (sticky Unhealthy in admin). Transient 5xx / 429 /
+// network errors are NOT recorded — we don't want a brief upstream flap to
+// flip the credential into a "degraded" yellow state.
 func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry bool, done bool) {
 	baseURL := s.cfg.AnthropicBaseURL
 	if ab := strings.TrimRight(a.Snapshot().BaseURL, "/"); ab != "" {
@@ -539,6 +544,13 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		}
 	}
 	_ = resp.Body.Close()
+
+	switch {
+	case resp.StatusCode < 400:
+		a.MarkSuccess()
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		a.MarkHardFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
+	}
 
 	var costUSD float64
 	if resp.StatusCode < 400 {
