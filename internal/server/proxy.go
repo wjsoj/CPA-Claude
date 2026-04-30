@@ -740,7 +740,7 @@ func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, rewrit
 					}
 				}
 				if curEvent == "message_start" || curEvent == "message_delta" {
-					counts.Add(extractUsageFromSSE(payload))
+					mergeSSEUsage(counts, payload)
 				}
 			}
 			c.Writer.Write(outLine)
@@ -780,29 +780,56 @@ func extractUsageFromJSON(body []byte) usage.Counts {
 	return wrap.Usage.toCounts()
 }
 
-// extractUsageFromSSE parses a single SSE data payload.
-// message_start:    {type: "message_start", message: {usage: {...}}}
-// message_delta:    {type: "message_delta", usage: {...}}
-func extractUsageFromSSE(payload []byte) usage.Counts {
+// mergeSSEUsage overlays usage fields from a single Anthropic SSE data
+// payload onto dst, using overwrite-if-positive semantics. This is NOT
+// additive: Anthropic's stream sends the input/cache token baseline in
+// message_start and the cumulative final usage (often repeating the same
+// input/cache values plus the real output count) in message_delta, so
+// summing the two events would double-count input and cache tokens.
+//
+// Shapes handled:
+//
+//	message_start:  {type: "message_start", message: {usage: {...}}}
+//	message_delta:  {type: "message_delta", usage: {...}}
+//
+// Zero values from a later event don't clobber a prior non-zero value —
+// matches the protocol where message_delta sometimes omits the input
+// fields (e.g. emits input_tokens=0).
+func mergeSSEUsage(dst *usage.Counts, payload []byte) {
+	if dst == nil {
+		return
+	}
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &probe); err != nil {
-		return usage.Counts{}
+		return
 	}
+	var u usageJSON
 	if raw, ok := probe["usage"]; ok {
-		var u usageJSON
-		if err := json.Unmarshal(raw, &u); err == nil {
-			return u.toCounts()
-		}
-	}
-	if raw, ok := probe["message"]; ok {
+		_ = json.Unmarshal(raw, &u)
+	} else if raw, ok := probe["message"]; ok {
 		var nested struct {
 			Usage usageJSON `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &nested); err == nil {
-			return nested.Usage.toCounts()
+			u = nested.Usage
+		} else {
+			return
 		}
+	} else {
+		return
 	}
-	return usage.Counts{}
+	if u.InputTokens > 0 {
+		dst.InputTokens = u.InputTokens
+	}
+	if u.OutputTokens > 0 {
+		dst.OutputTokens = u.OutputTokens
+	}
+	if u.CacheCreationInputTokens > 0 {
+		dst.CacheCreateTokens = u.CacheCreationInputTokens
+	}
+	if u.CacheReadInputTokens > 0 {
+		dst.CacheReadTokens = u.CacheReadInputTokens
+	}
 }
 
 func parseRetryAfter(h http.Header) time.Time {
