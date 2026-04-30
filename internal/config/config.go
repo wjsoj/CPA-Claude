@@ -46,11 +46,6 @@ type EndpointsConfig struct {
 }
 
 type Config struct {
-	// Legacy top-level host/port. When endpoints.claude is unset these are
-	// migrated into endpoints.claude.{host,port} by applyDefaults so old
-	// configs keep working unchanged.
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
 	LogLevel string `yaml:"log_level"`
 
 	// Endpoints configures per-provider HTTP listeners. See the struct doc
@@ -132,21 +127,11 @@ func Load(path string) (*Config, error) {
 }
 
 func applyDefaults(c *Config, path string) {
-	if c.Host == "" {
-		c.Host = "0.0.0.0"
-	}
-	if c.Port == 0 {
-		c.Port = 8317
-	}
-	// Migrate legacy top-level host/port into endpoints.claude when the
-	// user hasn't written an explicit endpoints section. Users who only
-	// ever configured the old `host: / port:` layout keep working with no
-	// yaml changes.
 	if c.Endpoints.Claude.Port == 0 {
-		c.Endpoints.Claude.Port = c.Port
+		c.Endpoints.Claude.Port = 8317
 	}
 	if c.Endpoints.Claude.Host == "" {
-		c.Endpoints.Claude.Host = c.Host
+		c.Endpoints.Claude.Host = "0.0.0.0"
 	}
 	if c.Endpoints.Codex.Port == 0 {
 		// Codex endpoint defaults to configured-but-disabled so merely

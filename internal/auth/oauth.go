@@ -246,8 +246,7 @@ func parseModelMap(v any) map[string]string {
 }
 
 // LoadAuthDir reads every *.json under dir and splits the parsed auths into
-// OAuth and API-key slices. Deprecated alias LoadOAuthDir is preserved for
-// callers that only expect OAuth.
+// OAuth and API-key slices.
 func LoadAuthDir(dir string) (oauths, apikeys []*Auth, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -278,12 +277,6 @@ func LoadAuthDir(dir string) (oauths, apikeys []*Auth, err error) {
 		}
 	}
 	return oauths, apikeys, nil
-}
-
-// LoadOAuthDir retained for backward compatibility. Returns only OAuth auths.
-func LoadOAuthDir(dir string) ([]*Auth, error) {
-	oauths, _, err := LoadAuthDir(dir)
-	return oauths, err
 }
 
 var saveMu sync.Mutex
