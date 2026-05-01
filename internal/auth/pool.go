@@ -626,6 +626,64 @@ func (p *Pool) RunRefresher(ctx context.Context, interval, leeway time.Duration)
 	}
 }
 
+// ResetUnhealthyAnthropicAPIKeys clears hard-failure / transient-failure /
+// quota-cooldown state on every Anthropic API-key credential that is
+// currently unhealthy (excluding admin-disabled creds — those are an
+// explicit operator action). Returns the number of credentials reset.
+//
+// Intended to be invoked at local midnight by RunDailyAnthropicAPIKeyReset
+// so a credential the proxy has parked after consecutive upstream errors
+// gets a fresh shot the next day without manual admin intervention. OAuth
+// credentials and OpenAI API keys are intentionally left alone.
+func (p *Pool) ResetUnhealthyAnthropicAPIKeys() int {
+	p.mu.Lock()
+	keys := make([]*Auth, 0, len(p.apikeys))
+	for _, a := range p.apikeys {
+		if NormalizeProvider(a.Provider) != ProviderAnthropic {
+			continue
+		}
+		keys = append(keys, a)
+	}
+	p.mu.Unlock()
+	n := 0
+	for _, a := range keys {
+		a.mu.RLock()
+		disabled := a.Disabled
+		a.mu.RUnlock()
+		if disabled {
+			continue
+		}
+		if a.IsHealthy() {
+			continue
+		}
+		a.ClearFailure()
+		a.ClearQuota()
+		log.Infof("auth: midnight reset cleared unhealthy Anthropic api-key %s", a.ID)
+		n++
+	}
+	return n
+}
+
+// RunDailyAnthropicAPIKeyReset wakes at the next local-midnight boundary
+// and calls ResetUnhealthyAnthropicAPIKeys, then repeats every 24h. Returns
+// when ctx is cancelled. Intended to run in its own goroutine.
+func (p *Pool) RunDailyAnthropicAPIKeyReset(ctx context.Context) {
+	for {
+		now := time.Now()
+		next := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Add(24 * time.Hour)
+		timer := time.NewTimer(next.Sub(now))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			if n := p.ResetUnhealthyAnthropicAPIKeys(); n > 0 {
+				log.Infof("auth: midnight reset cleared %d unhealthy Anthropic api-key credential(s)", n)
+			}
+		}
+	}
+}
+
 // ReportUpstreamError inspects an upstream HTTP error status and marks the
 // credential as temporarily unavailable (so Acquire picks a different auth
 // on the next attempt). Only hard quota / auth errors set a cooldown; transient

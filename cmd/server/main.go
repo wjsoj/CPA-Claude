@@ -124,6 +124,12 @@ func main() {
 	refresherCtx, refresherCancel := context.WithCancel(context.Background())
 	go pool.RunRefresher(refresherCtx, time.Minute, 10*time.Minute)
 
+	// Daily 00:00 reset for unhealthy Anthropic API-key credentials.
+	// Consecutive upstream errors auto-promote those creds to a sticky
+	// hard-failure (see doForwardAnthropicAPIKey); without this job the
+	// admin would have to clear them manually after every transient outage.
+	go pool.RunDailyAnthropicAPIKeyReset(refresherCtx)
+
 	tokensPath := filepath.Join(filepath.Dir(cfg.StateFile), "tokens.json")
 	tokens, err := clienttoken.Open(tokensPath)
 	if err != nil {

@@ -469,10 +469,15 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 // per-credential model rewrite (and the matching response-side rewrite) so
 // model_map'd relay vendors keep working.
 //
-// Health tracking is intentionally minimal: success → MarkSuccess, 401/403
-// → MarkHardFailure (sticky Unhealthy in admin). Transient 5xx / 429 /
-// network errors are NOT recorded — we don't want a brief upstream flap to
-// flip the credential into a "degraded" yellow state.
+// Health tracking: success → MarkSuccess; 401/402/403 → immediate
+// MarkHardFailure (token revoked, balance depleted, or forbidden — all
+// terminal signals that won't self-heal); other upstream errors
+// (4xx/5xx/429) and transport errors → MarkFailure, which counts toward
+// the consecutive-failure threshold and auto-promotes to a sticky
+// hard-failure once the upstream proves persistently broken. A background
+// midnight job (Pool.RunDailyAnthropicAPIKeyReset) wipes the hard-failure
+// flag once a day so transient overnight outages don't pin a credential
+// offline forever.
 func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry bool, done bool) {
 	baseURL := s.cfg.AnthropicBaseURL
 	if ab := strings.TrimRight(a.Snapshot().BaseURL, "/"); ab != "" {
@@ -516,6 +521,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 			return false, true
 		}
 		log.Warnf("proxy(apikey): upstream transport error via %s: %v", a.ID, err)
+		a.MarkFailure(fmt.Sprintf("transport: %v", err))
 		c.AbortWithStatusJSON(502, gin.H{"error": err.Error()})
 		s.emitLog(requestlog.Record{
 			Client: clientName, ClientToken: maskClientToken(clientToken),
@@ -548,8 +554,12 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	switch {
 	case resp.StatusCode < 400:
 		a.MarkSuccess()
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusUnauthorized ||
+		resp.StatusCode == http.StatusPaymentRequired ||
+		resp.StatusCode == http.StatusForbidden:
 		a.MarkHardFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
+	default:
+		a.MarkFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
 	}
 
 	var costUSD float64
