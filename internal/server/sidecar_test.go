@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -345,6 +346,67 @@ func TestHeartbeatBodyShape(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("heartbeat body missing %s\n%s", want, s)
 		}
+	}
+}
+
+// TestStartupHeartbeatBatchShape asserts the fat first-launch event_logging
+// batch matches the captured row 14 invariants: ~80 events, multiple
+// distinct event_names with the right relative volume (skill_loaded
+// dominant, plugin_enabled secondary, plus singletons), shared session_id
+// and identity across every event.
+func TestStartupHeartbeatBatchShape(t *testing.T) {
+	a := newTestAuth("auth-1", "alice@example.com")
+	body, err := buildStartupHeartbeatBody(a, "00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+	var parsed struct {
+		Events []struct {
+			EventType string `json:"event_type"`
+			EventData struct {
+				EventName string `json:"event_name"`
+				SessionID string `json:"session_id"`
+				EventID   string `json:"event_id"`
+				Auth      struct {
+					AccountUUID string `json:"account_uuid"`
+				} `json:"auth"`
+			} `json:"event_data"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal failed: %v\n%s", err, body)
+	}
+	if n := len(parsed.Events); n < 60 || n > 100 {
+		t.Errorf("startup batch should be ~80 events (close to row-14's 99), got %d", n)
+	}
+	counts := map[string]int{}
+	seenIDs := map[string]bool{}
+	for _, e := range parsed.Events {
+		if e.EventType != "ClaudeCodeInternalEvent" {
+			t.Errorf("wrong event_type %q", e.EventType)
+		}
+		if e.EventData.SessionID != "00000000-0000-0000-0000-000000000000" {
+			t.Errorf("event missing/wrong session_id: %q", e.EventData.SessionID)
+		}
+		if e.EventData.Auth.AccountUUID != "acct-uuid-auth-1" {
+			t.Errorf("event missing account_uuid")
+		}
+		if e.EventData.EventID == "" {
+			t.Errorf("event missing event_id")
+		}
+		if seenIDs[e.EventData.EventID] {
+			t.Errorf("duplicate event_id %s — every event should have a unique id", e.EventData.EventID)
+		}
+		seenIDs[e.EventData.EventID] = true
+		counts[e.EventData.EventName]++
+	}
+	// Distribution sanity: skill_loaded dominates, plugin_enabled
+	// secondary, plus a long tail of singletons.
+	if counts["tengu_skill_loaded"] < 20 {
+		t.Errorf("expected tengu_skill_loaded to dominate (>=20), got %d", counts["tengu_skill_loaded"])
+	}
+	if len(counts) < 15 {
+		t.Errorf("expected at least 15 distinct event_names in startup batch, got %d", len(counts))
 	}
 }
 

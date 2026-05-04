@@ -545,8 +545,12 @@ func buildQuotaProbeBody(a *auth.Auth, sessionID string) ([]byte, error) {
 // Event logging heartbeat — Phase C
 // =============================================================================
 
-// runHeartbeat emits one ClaudeCodeInternalEvent batch per tick to
-// /api/event_logging/v2/batch. Stops when:
+// runHeartbeat emits ClaudeCodeInternalEvent batches to
+// /api/event_logging/v2/batch. The very first batch is a "startup dump"
+// shaped like crack/oauth/rows/14 (~99 events covering skill loading,
+// plugin enabling, mcp connections, version lock, etc.). Subsequent
+// batches contain a single tengu_dir_search event matching the steady-
+// state cadence. Stops when:
 //   - parent ctx is cancelled (session evicted, server shutdown), OR
 //   - the session has been idle past heartbeatActiveWindow.
 func (m *sidecarMgr) runHeartbeat(ctx context.Context, a *auth.Auth, sess *sidecarSession) {
@@ -560,13 +564,15 @@ func (m *sidecarMgr) runHeartbeat(ctx context.Context, a *auth.Auth, sess *sidec
 	case <-time.After(8 * time.Second):
 	}
 
+	first := true
 	for {
 		if isHeartbeatIdle(sess) {
 			return
 		}
-		if err := m.sendHeartbeat(ctx, a, sess.bootstrapSessionID); err != nil {
+		if err := m.sendHeartbeat(ctx, a, sess.bootstrapSessionID, first); err != nil {
 			log.Debugf("sidecar: heartbeat via %s failed: %v", a.ID, err)
 		}
+		first = false
 		wait := jitteredHeartbeatInterval()
 		select {
 		case <-ctx.Done():
@@ -593,12 +599,18 @@ func jitteredHeartbeatInterval() time.Duration {
 // sendHeartbeat POSTs one ClaudeCodeInternalEvent batch. Body and headers
 // match crack/oauth/rows/14 (event_logging/v2/batch with
 // User-Agent: claude-code/<ver>, beta: oauth-2025-04-20,
-// x-service-name: claude-code).
-func (m *sidecarMgr) sendHeartbeat(parent context.Context, a *auth.Auth, sessionID string) error {
+// x-service-name: claude-code). When startup=true the batch is a fat
+// ~80-event dump covering CC's first-launch telemetry; otherwise it's a
+// steady-state single tengu_dir_search event.
+func (m *sidecarMgr) sendHeartbeat(parent context.Context, a *auth.Auth, sessionID string, startup bool) error {
 	ctx, cancel := context.WithTimeout(parent, sidecarRequestTimeout)
 	defer cancel()
 
-	body, err := buildHeartbeatBody(a, sessionID)
+	build := buildHeartbeatBody
+	if startup {
+		build = buildStartupHeartbeatBody
+	}
+	body, err := build(a, sessionID)
 	if err != nil {
 		return fmt.Errorf("build body: %w", err)
 	}
@@ -642,16 +654,97 @@ func (m *sidecarMgr) sendHeartbeat(parent context.Context, a *auth.Auth, session
 // during normal use (file-completion lookups), so it blends in with the
 // rest of an active session's telemetry.
 func buildHeartbeatBody(a *auth.Auth, sessionID string) ([]byte, error) {
-	now := time.Now().UTC()
+	event, err := buildHeartbeatEvent(a, sessionID, "tengu_dir_search", time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"events": []any{event}})
+}
+
+// startupEventNames is the event_name distribution captured in
+// crack/oauth/rows/14 (real CC's first event_logging batch). Total = 80;
+// matching the captured 99-event volume to within ~20% so we don't
+// undershoot the "fat startup batch" signal Anthropic almost certainly
+// uses to distinguish real CC from third-party clients.
+var startupEventNames = []string{}
+
+func init() {
+	startupCounts := []struct {
+		name  string
+		count int
+	}{
+		{"tengu_skill_loaded", 35},
+		{"tengu_plugin_enabled_for_session", 9},
+		{"tengu_dir_search", 7},
+		{"tengu_mcp_server_connection_succeeded", 3},
+		{"tengu_mcp_tools_listed", 3},
+		{"tengu_frontmatter_shadow_unknown_key", 2},
+		{"tengu_prompt_suggestion_init", 2},
+		{"tengu_version_lock_acquired", 1},
+		{"tengu_started", 1},
+		{"tengu_init", 1},
+		{"tengu_continue", 1},
+		{"tengu_resume_consistency_delta", 1},
+		{"tengu_startup_telemetry", 1},
+		{"tengu_startup_manual_model_config", 1},
+		{"tengu_cli_flags", 1},
+		{"tengu_shell_set_cwd", 1},
+		{"tengu_ripgrep_availability", 1},
+		{"tengu_claudemd__initial_load", 1},
+		{"tengu_file_suggestions_git_ls_files", 1},
+		{"tengu_plugins_loaded", 1},
+		{"tengu_timer", 1},
+		{"tengu_claude_in_chrome_setup", 1},
+		{"tengu_mcp_server_connection_failed", 1},
+		{"tengu_exit", 1},
+	}
+	for _, sc := range startupCounts {
+		for i := 0; i < sc.count; i++ {
+			startupEventNames = append(startupEventNames, sc.name)
+		}
+	}
+}
+
+// buildStartupHeartbeatBody constructs the fat first-launch event batch
+// (~80 events) that real CC posts ~10s after process start. Closes the
+// "implementation drift" gap noted in audit/oauth-request-audit/reports —
+// our previous 1-event-per-tick heartbeat made a cold session look like a
+// non-CC client to anyone counting events in the first batch.
+//
+// Each event shares the same identity (session_id, device_id, account
+// uuids, env block); only event_name, event_id, and client_timestamp
+// vary. Event timestamps are spread across a small jitter window so they
+// look like they were emitted by different subsystems coming online.
+func buildStartupHeartbeatBody(a *auth.Auth, sessionID string) ([]byte, error) {
+	base := time.Now().UTC()
+	events := make([]any, 0, len(startupEventNames))
+	for i, name := range startupEventNames {
+		// Spread the events across a 0..400ms window — real CC's events
+		// in row 14 span the first few hundred ms of process start.
+		ts := base.Add(time.Duration(i*5) * time.Millisecond)
+		event, err := buildHeartbeatEvent(a, sessionID, name, ts)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return json.Marshal(map[string]any{"events": events})
+}
+
+// buildHeartbeatEvent constructs one ClaudeCodeInternalEvent with the
+// shared CC env / identity block plus per-event volatile fields. Pulled
+// out so the steady-state and startup-batch paths share one source of
+// truth for every field that's stable across event_names.
+func buildHeartbeatEvent(a *auth.Auth, sessionID, eventName string, ts time.Time) (map[string]any, error) {
 	deviceID := DeviceIDFor(a.AccountKey())
 
 	processMetrics := map[string]any{
-		"uptime":      time.Since(processStart).Seconds(),
-		"rss":         320_000_000,
-		"heapTotal":   40_000_000,
-		"heapUsed":    34_000_000,
-		"external":    13_000_000,
-		"arrayBuffers": 521,
+		"uptime":            time.Since(processStart).Seconds(),
+		"rss":               320_000_000,
+		"heapTotal":         40_000_000,
+		"heapUsed":          34_000_000,
+		"external":          13_000_000,
+		"arrayBuffers":      521,
 		"constrainedMemory": 1_590_133_555_2,
 		"cpuUsage": map[string]any{
 			"user":   500_000,
@@ -702,11 +795,11 @@ func buildHeartbeatBody(a *auth.Auth, sessionID string) ([]byte, error) {
 		"shell":                  "zsh",
 	}
 
-	event := map[string]any{
+	return map[string]any{
 		"event_type": "ClaudeCodeInternalEvent",
 		"event_data": map[string]any{
-			"event_name":          "tengu_dir_search",
-			"client_timestamp":    now.Format("2006-01-02T15:04:05.000Z"),
+			"event_name":          eventName,
+			"client_timestamp":    ts.Format("2006-01-02T15:04:05.000Z"),
 			"model":               "claude-opus-4-7[1m]",
 			"session_id":          sessionID,
 			"user_type":           "external",
@@ -725,9 +818,7 @@ func buildHeartbeatBody(a *auth.Auth, sessionID string) ([]byte, error) {
 			"device_id": deviceID,
 			"email":     strings.TrimSpace(a.Email),
 		},
-	}
-	body := map[string]any{"events": []any{event}}
-	return json.Marshal(body)
+	}, nil
 }
 
 // processStart snapshots when the proxy itself was started, so the
