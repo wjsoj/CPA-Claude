@@ -488,6 +488,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	writeResponseHeaders(c, resp)
 
 	var counts usage.Counts
+	var sub subUsage
 	counts.Requests = 1
 	a.MarkSuccess()
 
@@ -502,28 +503,41 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	}
 
 	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		streamSSE(c, resp, &counts, rewriteClientModel)
+		streamSSE(c, resp, &counts, &sub, rewriteClientModel)
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
 		if rewriteClientModel != "" {
 			respBody = rewriteResponseModel(respBody, rewriteClientModel)
 		}
 		c.Writer.Write(respBody)
-		counts.Add(extractUsageFromJSON(respBody))
+		counts.Add(extractUsageFromJSON(respBody, &sub))
 	}
 	_ = resp.Body.Close()
+	authKind := "oauth"
+	if a.Kind == auth.KindAPIKey {
+		authKind = "apikey"
+	}
 	s.usage.Record(a.ID, a.Label, counts)
 	// Charge the client for the tokens they actually consumed.
 	var costUSD float64
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
 		costUSD = s.pricing.Cost(auth.NormalizeProvider(a.Provider), model, counts)
-		// clientName already carries the store-resolved name (or "" in
-		// open-mode). No additional fallback needed.
-		s.usage.RecordClient(clientToken, clientName, counts, costUSD)
 	}
-	authKind := "oauth"
-	if a.Kind == auth.KindAPIKey {
-		authKind = "apikey"
+	// Advisor (server-side opus sub-call) is billed alongside the main
+	// request: same auth absorbs the load, same client is charged, but the
+	// requestlog gets a separate row per advisor model so by-model views
+	// don't conflate sonnet-orchestrator cost with opus-advisor cost.
+	advisorCost := s.recordSubUsage(a, authKind, clientToken, clientName, model, path, resp.StatusCode, sub)
+	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
+		// Single RecordClient call: weekly cost ledger should reflect the
+		// total dollar cost of this /v1/messages call, advisor included.
+		// Counts.Requests stays at 1 — advisor is a sub-call, not a request.
+		var clientCounts usage.Counts
+		clientCounts.Add(counts)
+		for _, sc := range sub.byModel {
+			clientCounts.Add(sc)
+		}
+		s.usage.RecordClient(clientToken, clientName, clientCounts, costUSD+advisorCost)
 	}
 	s.emitLog(requestlog.Record{
 		Client:      clientName,
@@ -621,11 +635,12 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 
 	writeResponseHeaders(c, resp)
 	var counts usage.Counts
+	var sub subUsage
 	if resp.StatusCode < 400 {
 		counts.Requests = 1
 	}
 	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		streamSSE(c, resp, &counts, rewriteClientModel)
+		streamSSE(c, resp, &counts, &sub, rewriteClientModel)
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
 		if rewriteClientModel != "" && resp.StatusCode < 400 {
@@ -633,7 +648,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		}
 		c.Writer.Write(respBody)
 		if resp.StatusCode < 400 {
-			counts.Add(extractUsageFromJSON(respBody))
+			counts.Add(extractUsageFromJSON(respBody, &sub))
 		}
 	}
 	_ = resp.Body.Close()
@@ -658,7 +673,15 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		s.usage.Record(a.ID, a.Label, counts)
 		if counts.Requests > 0 && clientToken != "" {
 			costUSD = s.pricing.Cost(auth.NormalizeProvider(a.Provider), model, counts)
-			s.usage.RecordClient(clientToken, clientName, counts, costUSD)
+		}
+		advisorCost := s.recordSubUsage(a, "apikey", clientToken, clientName, model, path, resp.StatusCode, sub)
+		if counts.Requests > 0 && clientToken != "" {
+			var clientCounts usage.Counts
+			clientCounts.Add(counts)
+			for _, sc := range sub.byModel {
+				clientCounts.Add(sc)
+			}
+			s.usage.RecordClient(clientToken, clientName, clientCounts, costUSD+advisorCost)
 		}
 	}
 	s.emitLog(requestlog.Record{
@@ -862,7 +885,7 @@ func (d *decompressedBody) Close() error {
 // message_delta events to accumulate usage. When rewriteClientModel is
 // non-empty, each data: JSON has its top-level "model" and nested
 // "message.model" fields rewritten to that value before being forwarded.
-func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, rewriteClientModel string) {
+func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, sub *subUsage, rewriteClientModel string) {
 	flusher, _ := c.Writer.(http.Flusher)
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
 	var curEvent string
@@ -887,7 +910,7 @@ func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, rewrit
 					}
 				}
 				if curEvent == "message_start" || curEvent == "message_delta" {
-					mergeSSEUsage(counts, payload)
+					mergeSSEUsage(counts, sub, payload)
 				}
 			}
 			c.Writer.Write(outLine)
@@ -902,10 +925,35 @@ func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, rewrit
 }
 
 type usageJSON struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	InputTokens              int64               `json:"input_tokens"`
+	OutputTokens             int64               `json:"output_tokens"`
+	CacheCreationInputTokens int64               `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64               `json:"cache_read_input_tokens"`
+	Iterations               []iterationUsageRaw `json:"iterations,omitempty"`
+}
+
+// iterationUsageRaw is the shape of one entry inside `usage.iterations[]`,
+// added by the `advisor-tool-2026-03-01` beta. Each entry is one billable
+// sub-call inside a single /v1/messages request:
+//
+//	type:"message"          → orchestrator (the model the client asked for).
+//	                          Top-level usage is the SUM of these — already
+//	                          accounted for; we ignore them here.
+//	type:"advisor_message"  → server-side advisor call, billed under its own
+//	                          model (typically claude-opus-4-7), NOT rolled
+//	                          into top-level totals.
+//
+// We only care about the second kind. cache_read/cache_create are typically
+// 0 for advisor (each call re-reads the transcript fresh) but we keep all
+// four counters so the price formula stays correct if Anthropic enables
+// caching for advisor later.
+type iterationUsageRaw struct {
+	Type                     string `json:"type"`
+	Model                    string `json:"model"`
+	InputTokens              int64  `json:"input_tokens"`
+	OutputTokens             int64  `json:"output_tokens"`
+	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64  `json:"cache_read_input_tokens"`
 }
 
 func (u usageJSON) toCounts() usage.Counts {
@@ -917,13 +965,111 @@ func (u usageJSON) toCounts() usage.Counts {
 	}
 }
 
+// subUsage carries advisor (and any future server-side sub-model) counts
+// alongside a request, keyed by upstream model name. A request with no
+// advisor invocation leaves it nil/empty.
+type subUsage struct {
+	// byModel sums per-model counts across all iterations of that model.
+	// Most requests have at most one entry ("claude-opus-4-7").
+	byModel map[string]usage.Counts
+}
+
+func (s *subUsage) merge(it iterationUsageRaw) {
+	if it.Type != "advisor_message" {
+		return
+	}
+	model := strings.TrimSpace(it.Model)
+	if model == "" {
+		// Defensive: should never happen, but if Anthropic ever emits an
+		// advisor iteration without a model field, charge it to a sentinel
+		// so it's visible in the admin UI rather than silently dropped.
+		model = "advisor-unknown"
+	}
+	if s.byModel == nil {
+		s.byModel = make(map[string]usage.Counts, 1)
+	}
+	cur := s.byModel[model]
+	cur.InputTokens += it.InputTokens
+	cur.OutputTokens += it.OutputTokens
+	cur.CacheCreateTokens += it.CacheCreationInputTokens
+	cur.CacheReadTokens += it.CacheReadInputTokens
+	s.byModel[model] = cur
+}
+
+// replaceFrom resets the per-model totals from a full iterations slice. SSE
+// emits cumulative `message_delta.usage.iterations` (the slice grows as
+// sub-calls complete), so we overwrite rather than append to avoid double-
+// counting when both message_start and message_delta are observed.
+func (s *subUsage) replaceFrom(its []iterationUsageRaw) {
+	if len(its) == 0 {
+		return
+	}
+	s.byModel = nil
+	for _, it := range its {
+		s.merge(it)
+	}
+}
+
+// recordSubUsage charges advisor (and any future server-side sub-model)
+// counts to the same auth that handled the parent request, and emits one
+// extra requestlog row per distinct sub-model so by-model aggregation in
+// the admin panel separates orchestrator cost from advisor cost.
+//
+// Returns the total advisor USD cost so the caller can fold it into the
+// per-client weekly ledger as a single sum (one /v1/messages call = one
+// weekly Requests bump regardless of how many sub-models ran).
+//
+// No-op when the response is an error (status >= 400) or there are no
+// advisor iterations. Auth-side load tracking only applies to successful
+// sub-calls — a failed parent rarely has billable advisor activity, and
+// double-counting would distort WeightedTotal-driven load balancing.
+func (s *Server) recordSubUsage(a *auth.Auth, authKind, clientToken, clientName, parentModel, path string, status int, sub subUsage) float64 {
+	if status >= 400 || len(sub.byModel) == 0 {
+		return 0
+	}
+	provider := auth.NormalizeProvider(a.Provider)
+	var total float64
+	for subModel, sc := range sub.byModel {
+		// Sub-calls bump the auth's daily/hourly bucket and WeightedTotal so
+		// the credential bears the full opus load. Requests stays 0: the
+		// parent already counted +1.
+		s.usage.Record(a.ID, a.Label, sc)
+		cost := s.pricing.Cost(provider, subModel, sc)
+		total += cost
+		s.emitLog(requestlog.Record{
+			Client:      clientName,
+			ClientToken: maskClientToken(clientToken),
+			Provider:    provider,
+			AuthID:      a.ID,
+			AuthLabel:   a.Label,
+			AuthKind:    authKind,
+			Model:       subModel,
+			Input:       sc.InputTokens,
+			Output:      sc.OutputTokens,
+			CacheRead:   sc.CacheReadTokens,
+			CacheCreate: sc.CacheCreateTokens,
+			CostUSD:     cost,
+			Status:      status,
+			// DurationMs/Stream/Attempts intentionally zero: this row is a
+			// sub-call summary, not an independent request — adding wall
+			// time would double-count it in admin's "total time" stats.
+			Path: path + "#advisor:" + subModel,
+		})
+	}
+	return total
+}
+
 // extractUsageFromJSON pulls the top-level "usage" from a non-streaming
-// /v1/messages response.
-func extractUsageFromJSON(body []byte) usage.Counts {
+// /v1/messages response. Advisor sub-billing iterations are folded into
+// `sub` if non-nil.
+func extractUsageFromJSON(body []byte, sub *subUsage) usage.Counts {
 	var wrap struct {
 		Usage usageJSON `json:"usage"`
 	}
 	_ = json.Unmarshal(body, &wrap)
+	if sub != nil {
+		sub.replaceFrom(wrap.Usage.Iterations)
+	}
 	return wrap.Usage.toCounts()
 }
 
@@ -942,7 +1088,7 @@ func extractUsageFromJSON(body []byte) usage.Counts {
 // Zero values from a later event don't clobber a prior non-zero value —
 // matches the protocol where message_delta sometimes omits the input
 // fields (e.g. emits input_tokens=0).
-func mergeSSEUsage(dst *usage.Counts, payload []byte) {
+func mergeSSEUsage(dst *usage.Counts, sub *subUsage, payload []byte) {
 	if dst == nil {
 		return
 	}
@@ -976,6 +1122,11 @@ func mergeSSEUsage(dst *usage.Counts, payload []byte) {
 	}
 	if u.CacheReadInputTokens > 0 {
 		dst.CacheReadTokens = u.CacheReadInputTokens
+	}
+	if sub != nil && len(u.Iterations) > 0 {
+		// message_delta.usage.iterations is cumulative — last non-empty
+		// observation wins, never append.
+		sub.replaceFrom(u.Iterations)
 	}
 }
 
