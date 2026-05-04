@@ -16,13 +16,13 @@ func TestMergeSSEUsageNoDoubleCount(t *testing.T) {
 	var c usage.Counts
 
 	// message_start carries the input baseline + initial output estimate.
-	mergeSSEUsage(&c, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":500,"cache_creation_input_tokens":200,"output_tokens":1}}}`))
+	mergeSSEUsage(&c, nil, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":500,"cache_creation_input_tokens":200,"output_tokens":1}}}`))
 	if c.InputTokens != 1000 || c.CacheReadTokens != 500 || c.CacheCreateTokens != 200 || c.OutputTokens != 1 {
 		t.Fatalf("after message_start: %+v", c)
 	}
 
 	// message_delta repeats input/cache and reports cumulative output.
-	mergeSSEUsage(&c, []byte(`{"type":"message_delta","usage":{"input_tokens":1000,"cache_read_input_tokens":500,"cache_creation_input_tokens":200,"output_tokens":250}}`))
+	mergeSSEUsage(&c, nil, []byte(`{"type":"message_delta","usage":{"input_tokens":1000,"cache_read_input_tokens":500,"cache_creation_input_tokens":200,"output_tokens":250}}`))
 	if c.InputTokens != 1000 {
 		t.Fatalf("input_tokens doubled: got %d want 1000", c.InputTokens)
 	}
@@ -42,8 +42,8 @@ func TestMergeSSEUsageNoDoubleCount(t *testing.T) {
 // cache fields — the baseline from message_start must survive.
 func TestMergeSSEUsageZerosDoNotClobber(t *testing.T) {
 	var c usage.Counts
-	mergeSSEUsage(&c, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":42,"cache_read_input_tokens":7,"cache_creation_input_tokens":3,"output_tokens":1}}}`))
-	mergeSSEUsage(&c, []byte(`{"type":"message_delta","usage":{"output_tokens":99}}`))
+	mergeSSEUsage(&c, nil, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":42,"cache_read_input_tokens":7,"cache_creation_input_tokens":3,"output_tokens":1}}}`))
+	mergeSSEUsage(&c, nil, []byte(`{"type":"message_delta","usage":{"output_tokens":99}}`))
 
 	if c.InputTokens != 42 {
 		t.Fatalf("input_tokens clobbered: got %d", c.InputTokens)
@@ -63,9 +63,9 @@ func TestMergeSSEUsageZerosDoNotClobber(t *testing.T) {
 // modify the destination.
 func TestMergeSSEUsageMalformed(t *testing.T) {
 	c := usage.Counts{InputTokens: 5, OutputTokens: 9}
-	mergeSSEUsage(&c, []byte(`not-json`))
-	mergeSSEUsage(&c, []byte(`{"type":"ping"}`))
-	mergeSSEUsage(&c, []byte(`{"type":"message_delta"}`))
+	mergeSSEUsage(&c, nil, []byte(`not-json`))
+	mergeSSEUsage(&c, nil, []byte(`{"type":"ping"}`))
+	mergeSSEUsage(&c, nil, []byte(`{"type":"message_delta"}`))
 	if c.InputTokens != 5 || c.OutputTokens != 9 {
 		t.Fatalf("counts mutated by malformed payloads: %+v", c)
 	}

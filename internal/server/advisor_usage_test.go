@@ -1,0 +1,107 @@
+package server
+
+import (
+	"testing"
+
+	"github.com/wjsoj/CPA-Claude/internal/usage"
+)
+
+// TestAdvisorIterationsParsing locks in the captured wire shape for the
+// advisor server-side tool: a single /v1/messages response carries an
+// `iterations` array where `type:"advisor_message"` entries are billed
+// under their own `model` (e.g. claude-opus-4-7), separate from the
+// orchestrator's top-level usage. Top-level usage is the sum of
+// `type:"message"` iterations only — never advisor.
+func TestAdvisorIterationsParsing(t *testing.T) {
+	var c usage.Counts
+	var sub subUsage
+
+	// Real shape captured from /v1/messages: 3 iterations, middle one is
+	// the advisor opus call.
+	payload := []byte(`{"type":"message_delta","usage":{
+		"input_tokens":2,
+		"output_tokens":503,
+		"cache_creation_input_tokens":5566,
+		"cache_read_input_tokens":80200,
+		"iterations":[
+			{"type":"message","input_tokens":1,"output_tokens":101,"cache_read_input_tokens":37916,"cache_creation_input_tokens":4368},
+			{"type":"advisor_message","input_tokens":58464,"output_tokens":3083,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"model":"claude-opus-4-7"},
+			{"type":"message","input_tokens":1,"output_tokens":402,"cache_read_input_tokens":42284,"cache_creation_input_tokens":1198}
+		]
+	}}`)
+	mergeSSEUsage(&c, &sub, payload)
+
+	// Top-level orchestrator counts unchanged — must NOT include advisor.
+	if c.InputTokens != 2 || c.OutputTokens != 503 ||
+		c.CacheCreateTokens != 5566 || c.CacheReadTokens != 80200 {
+		t.Fatalf("top-level counts wrong: %+v", c)
+	}
+	advisor, ok := sub.byModel["claude-opus-4-7"]
+	if !ok {
+		t.Fatalf("advisor counts missing; got %+v", sub.byModel)
+	}
+	if advisor.InputTokens != 58464 || advisor.OutputTokens != 3083 ||
+		advisor.CacheReadTokens != 0 || advisor.CacheCreateTokens != 0 {
+		t.Fatalf("advisor counts wrong: %+v", advisor)
+	}
+	if len(sub.byModel) != 1 {
+		t.Fatalf("expected exactly 1 advisor model, got %d", len(sub.byModel))
+	}
+}
+
+// TestAdvisorIterationsCumulative confirms that observing iterations twice
+// (e.g. message_start carries an empty/partial array followed by the full
+// one in message_delta) overwrites rather than appends — Anthropic's SSE
+// emits the full cumulative iterations slice on each event.
+func TestAdvisorIterationsCumulative(t *testing.T) {
+	var c usage.Counts
+	var sub subUsage
+
+	mergeSSEUsage(&c, &sub, []byte(`{"type":"message_delta","usage":{
+		"iterations":[{"type":"advisor_message","input_tokens":100,"output_tokens":50,"model":"claude-opus-4-7"}]
+	}}`))
+	mergeSSEUsage(&c, &sub, []byte(`{"type":"message_delta","usage":{
+		"iterations":[{"type":"advisor_message","input_tokens":300,"output_tokens":150,"model":"claude-opus-4-7"}]
+	}}`))
+
+	got := sub.byModel["claude-opus-4-7"]
+	if got.InputTokens != 300 || got.OutputTokens != 150 {
+		t.Fatalf("expected last-write-wins (300/150), got %+v", got)
+	}
+}
+
+// TestAdvisorIterationsNonStreaming covers extractUsageFromJSON for the
+// buffered (non-SSE) response path.
+func TestAdvisorIterationsNonStreaming(t *testing.T) {
+	var sub subUsage
+	body := []byte(`{"id":"msg_x","model":"claude-sonnet-4-6","usage":{
+		"input_tokens":2,"output_tokens":503,
+		"iterations":[
+			{"type":"message","input_tokens":1,"output_tokens":101},
+			{"type":"advisor_message","input_tokens":58464,"output_tokens":3083,"model":"claude-opus-4-7"},
+			{"type":"message","input_tokens":1,"output_tokens":402}
+		]
+	}}`)
+	c := extractUsageFromJSON(body, &sub)
+	if c.InputTokens != 2 || c.OutputTokens != 503 {
+		t.Fatalf("top-level: %+v", c)
+	}
+	got := sub.byModel["claude-opus-4-7"]
+	if got.InputTokens != 58464 || got.OutputTokens != 3083 {
+		t.Fatalf("advisor: %+v", got)
+	}
+}
+
+// TestAdvisorMissingModel: defensive — if Anthropic ever omits the model
+// field on an advisor iteration, we route it to a sentinel rather than
+// silently dropping the cost.
+func TestAdvisorMissingModel(t *testing.T) {
+	var c usage.Counts
+	var sub subUsage
+	mergeSSEUsage(&c, &sub, []byte(`{"type":"message_delta","usage":{
+		"iterations":[{"type":"advisor_message","input_tokens":10,"output_tokens":5}]
+	}}`))
+	if _, ok := sub.byModel["advisor-unknown"]; !ok {
+		t.Fatalf("expected sentinel bucket; got %+v", sub.byModel)
+	}
+}
