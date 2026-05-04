@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,10 +14,19 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Anthropic OAuth constants.
+// Anthropic OAuth constants. Mirror what `claude-cli/2.1.126` actually
+// hits — the token endpoint moved off `api.anthropic.com` to a dedicated
+// `platform.claude.com` host in late 2025. The client_id is the public
+// OAuth application UUID for "Claude Code" (matches the `application.uuid`
+// field returned by /api/oauth/profile).
 const (
-	anthropicTokenURL = "https://api.anthropic.com/v1/oauth/token"
+	anthropicTokenURL = "https://platform.claude.com/v1/oauth/token"
 	anthropicClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+	// User-Agent sent by real CC for the token-exchange + refresh requests.
+	// (Most other CC traffic uses claude-cli or claude-code or Bun, but
+	// these two specific axios calls use this exact string.)
+	anthropicOAuthUA = "axios/1.13.6"
 )
 
 // fileFormat is the JSON layout written by `claude setup-token` / our own
@@ -107,22 +115,52 @@ func parseFile(path string, data []byte) (*Auth, error) {
 		}
 	}
 
+	accountUUID, _ := raw["account_uuid"].(string)
+	orgUUID, _ := raw["organization_uuid"].(string)
+
 	a := &Auth{
-		ID:            filepath.Base(path),
-		Kind:          KindOAuth,
-		Provider:      provider,
-		Label:         label,
-		Email:         email,
-		AccessToken:   access,
-		RefreshToken:  refresh,
-		ExpiresAt:     exp,
-		ProxyURL:      proxyURL,
-		MaxConcurrent: maxConc,
-		FilePath:      path,
-		Disabled:      disabled,
-		Group:         NormalizeGroup(group),
+		ID:               filepath.Base(path),
+		Kind:             KindOAuth,
+		Provider:         provider,
+		Label:            label,
+		Email:            email,
+		AccessToken:      access,
+		RefreshToken:     refresh,
+		ExpiresAt:        exp,
+		ProxyURL:         proxyURL,
+		MaxConcurrent:    maxConc,
+		FilePath:         path,
+		Disabled:         disabled,
+		Group:            NormalizeGroup(group),
+		AccountUUID:      accountUUID,
+		OrganizationUUID: orgUUID,
 	}
 	return a, nil
+}
+
+// AccountKey returns the most stable per-account anchor available on this
+// credential, in priority order: AccountUUID (real value from the OAuth
+// token exchange) → Email → ID. Used by body mimicry to derive a device_id
+// that is constant for all requests routed through the same account, even
+// across credential file reissues, so multi-user routing onto a single
+// account presents as one device with multiple concurrent CC sessions.
+func (a *Auth) AccountKey() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if s := strings.TrimSpace(a.AccountUUID); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(a.Email); s != "" {
+		return s
+	}
+	return a.ID
+}
+
+// AccountUUIDValue returns the OAuth-issued account UUID if known, else "".
+func (a *Auth) AccountUUIDValue() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.AccountUUID
 }
 
 func parseAPIKeyFile(path string, raw map[string]any, provider string) (*Auth, error) {
@@ -472,27 +510,27 @@ func (a *Auth) refreshAnthropicLocked(ctx context.Context, useUTLS bool) error {
 		return fmt.Errorf("no refresh token")
 	}
 
-	body := map[string]any{
-		"client_id":     anthropicClientID,
-		"grant_type":    "refresh_token",
-		"refresh_token": refresh,
+	// Same wire shape as the initial token-exchange in login.go: ordered
+	// JSON body (grant_type, refresh_token, client_id) + axios/1.13.6 UA +
+	// gzip,br Accept-Encoding + Connection: close. Real CC reuses the same
+	// `platform.claude.com/v1/oauth/token` endpoint for refresh.
+	payload := struct {
+		GrantType    string `json:"grant_type"`
+		RefreshToken string `json:"refresh_token"`
+		ClientID     string `json:"client_id"`
+	}{
+		GrantType:    "refresh_token",
+		RefreshToken: refresh,
+		ClientID:     anthropicClientID,
 	}
-	buf, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicTokenURL, strings.NewReader(string(buf)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	buf, _ := json.Marshal(payload)
 
 	client := ClientFor(a.ProxyURL, useUTLS)
-	resp, err := client.Do(req)
+	resp, data, err := doAxiosOAuthRequest(ctx, client, http.MethodPost, anthropicTokenURL, buf)
 	if err != nil {
 		a.MarkFailure(fmt.Sprintf("refresh transport: %v", err))
 		return fmt.Errorf("oauth refresh %s: %w", a.ID, err)
 	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		bodyStr := string(data)
 		var errResp struct {

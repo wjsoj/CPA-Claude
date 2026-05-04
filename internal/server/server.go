@@ -47,6 +47,12 @@ type Server struct {
 	// (provider | clientToken) — same scoping as inflight so Claude and
 	// Codex traffic don't share one budget.
 	rpm rpmLimiter
+	// sidecar emulates the auxiliary traffic real Claude Code fires
+	// alongside /v1/messages (Phase A: quota probe at session start).
+	// Reduces the strongest stealth-detection signal — a healthy OAuth
+	// account whose request stream contains zero quota probes is
+	// trivially flagged as a third-party tool.
+	sidecar *sidecarMgr
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -57,6 +63,11 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	gin.SetMode(gin.ReleaseMode)
 	cat := pricing.NewCatalog(cfg.Pricing)
 	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens, reqLog: reqLog}
+	s.sidecar = newSidecarMgr(sidecarConfig{
+		enabled: true,
+		useUTLS: cfg.UseUTLS,
+		baseURL: cfg.AnthropicBaseURL,
+	})
 
 	primary := pickPrimary(cfg)
 	adminH := admin.New(cfg, pool, store, cat, tokens)
@@ -156,6 +167,7 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully stops every endpoint in parallel.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.sidecar.Stop()
 	var wg sync.WaitGroup
 	errs := make([]error, len(s.endpoints))
 	for i, ep := range s.endpoints {

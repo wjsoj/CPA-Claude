@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,12 +19,21 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Anthropic OAuth constants (Claude Code CLI client). Redirect URI is
-// fixed by Anthropic's OAuth app registration; we cannot change it.
+// Anthropic OAuth constants (Claude Code CLI client).
+//
+//   - The authorize page lives on `claude.com/cai/oauth/authorize` since
+//     late 2025 (the older `claude.ai/oauth/authorize` may still 30x but is
+//     no longer the canonical CC entrypoint).
+//   - `redirect_uri` is whatever the client picks at authorize time, so we
+//     pin our own admin-UI port (54545) here. The token-exchange POST must
+//     echo the same value back — keep these two consistent.
+//   - The scope list mirrors real CC byte-for-byte (6 items including
+//     `org:create_api_key`); the server will silently drop any scope the
+//     account isn't entitled to (Max account drops `org:create_api_key`).
 const (
-	anthropicAuthURL     = "https://claude.ai/oauth/authorize"
+	anthropicAuthURL     = "https://claude.com/cai/oauth/authorize"
 	anthropicRedirectURI = "http://localhost:54545/callback"
-	anthropicScopes      = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	anthropicScopes      = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 )
 
 // LoginSession holds the short-lived state for a browser-initiated OAuth flow.
@@ -97,13 +105,23 @@ func pkceChallenge(verifier string) string {
 // browser navigation.
 func StartLogin(provider, proxyURL, label string) (*LoginSession, string, error) {
 	provider = NormalizeProvider(provider)
-	// 96 bytes → 128-char base64url verifier. Matches upstream CLIProxyAPI
-	// and the vendor CLIs on both providers.
-	verifier, err := randomURLSafe(96)
+	// Real Claude Code 2.1.126 uses 32-byte verifier + 32-byte state, both
+	// emitted as 43-char base64url-no-padding. Match exactly so that any
+	// fingerprinting based on the length distribution of these two fields
+	// can't tell us apart from the vendor CLI. The Codex flow has its own
+	// length expectations and is handled separately below.
+	verifierLen := 32
+	stateLen := 32
+	if provider == ProviderOpenAI {
+		// Codex CLI uses longer verifiers; preserve prior behavior here.
+		verifierLen = 96
+		stateLen = 24
+	}
+	verifier, err := randomURLSafe(verifierLen)
 	if err != nil {
 		return nil, "", err
 	}
-	state, err := randomURLSafe(24)
+	state, err := randomURLSafe(stateLen)
 	if err != nil {
 		return nil, "", err
 	}
@@ -133,17 +151,32 @@ func StartLogin(provider, proxyURL, label string) (*LoginSession, string, error)
 }
 
 func buildAnthropicAuthURL(state, verifier string) string {
-	params := url.Values{
-		"code":                  {"true"},
-		"client_id":             {anthropicClientID},
-		"response_type":         {"code"},
-		"redirect_uri":          {anthropicRedirectURI},
-		"scope":                 {anthropicScopes},
-		"code_challenge":        {pkceChallenge(verifier)},
-		"code_challenge_method": {"S256"},
-		"state":                 {state},
+	// Real CC emits parameters in this exact insertion order (axios serializer
+	// preserves JS object insertion order). url.Values.Encode would alphabetize
+	// them — we hand-build the query so the wire form matches exactly.
+	pairs := [][2]string{
+		{"code", "true"},
+		{"client_id", anthropicClientID},
+		{"response_type", "code"},
+		{"redirect_uri", anthropicRedirectURI},
+		{"scope", anthropicScopes},
+		{"code_challenge", pkceChallenge(verifier)},
+		{"code_challenge_method", "S256"},
+		{"state", state},
 	}
-	return anthropicAuthURL + "?" + params.Encode()
+	var b strings.Builder
+	b.Grow(len(anthropicAuthURL) + 256)
+	b.WriteString(anthropicAuthURL)
+	b.WriteByte('?')
+	for i, kv := range pairs {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString(url.QueryEscape(kv[0]))
+		b.WriteByte('=')
+		b.WriteString(url.QueryEscape(kv[1]))
+	}
+	return b.String()
 }
 
 // RedirectURIFor returns the redirect URI a given provider will send the
@@ -251,29 +284,32 @@ func finishAnthropicLogin(
 	useUTLS bool,
 	group string,
 ) (*Auth, error) {
-	body := map[string]any{
-		"code":          code,
-		"state":         sess.State,
-		"grant_type":    "authorization_code",
-		"client_id":     anthropicClientID,
-		"redirect_uri":  anthropicRedirectURI,
-		"code_verifier": sess.CodeVerifier,
+	// Use a struct (not a map) so the JSON field order is fixed at:
+	//   grant_type, code, redirect_uri, client_id, code_verifier, state
+	// — exactly matching the wire form captured from real CC 2.1.126.
+	// Map[string]any goes through json.Marshal which alphabetizes keys.
+	payload := struct {
+		GrantType    string `json:"grant_type"`
+		Code         string `json:"code"`
+		RedirectURI  string `json:"redirect_uri"`
+		ClientID     string `json:"client_id"`
+		CodeVerifier string `json:"code_verifier"`
+		State        string `json:"state"`
+	}{
+		GrantType:    "authorization_code",
+		Code:         code,
+		RedirectURI:  anthropicRedirectURI,
+		ClientID:     anthropicClientID,
+		CodeVerifier: sess.CodeVerifier,
+		State:        sess.State,
 	}
-	buf, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicTokenURL, strings.NewReader(string(buf)))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	buf, _ := json.Marshal(payload)
 
 	client := ClientFor(sess.ProxyURL, useUTLS)
-	resp, err := client.Do(req)
+	resp, data, err := doAxiosOAuthRequest(ctx, client, http.MethodPost, anthropicTokenURL, buf)
 	if err != nil {
 		return nil, fmt.Errorf("token exchange: %w", err)
 	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("token exchange http %d: %s", resp.StatusCode, string(data))
 	}
@@ -307,6 +343,12 @@ func finishAnthropicLogin(
 		"last_refresh":   time.Now().UTC().Format(time.RFC3339),
 		"max_concurrent": maxConcurrent,
 		"label":          label,
+	}
+	if tr.Account.UUID != "" {
+		raw["account_uuid"] = tr.Account.UUID
+	}
+	if tr.Organization.UUID != "" {
+		raw["organization_uuid"] = tr.Organization.UUID
 	}
 	if sess.ProxyURL != "" {
 		raw["proxy_url"] = sess.ProxyURL

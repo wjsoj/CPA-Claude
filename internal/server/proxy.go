@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
@@ -282,11 +284,29 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		}
 	}
 
-	// Body-layer Claude Code mimicry is intentionally disabled: rewriting the
-	// client's system prompt / messages to mimic the official CLI is unsafe
-	// (it changes what the model is told and can corrupt user instructions).
-	// Header-layer mimicry (UA, X-Stainless, anthropic-beta) still runs in
-	// applyAnthropicHeaders — those don't touch the prompt.
+	// Body-layer Claude Code mimicry: rebuild system to match the real CC
+	// 4-block layout (billing block + "You are Claude Code..." + original
+	// system prompt with cache_control), inject metadata.user_id with a
+	// per-account device_id and a per-(account, clientToken, conversation)
+	// session_id, sign the cch billing hash. The client's prompt is
+	// preserved verbatim — only the surrounding wrapper is normalized.
+	// Only runs on /v1/messages (count_tokens isn't billed and shouldn't
+	// be modified). Haiku requests skip mimicry inside the function.
+	id := SimIdentity{
+		AccountKey:  a.AccountKey(),
+		AccountUUID: a.AccountUUIDValue(),
+		ClientToken: clientToken,
+	}
+
+	// Sidecar: dispatch the per-session quota probe the first time we see
+	// this (account, clientToken) pair. Async + best-effort, never blocks
+	// the user request. Real CC fires this exact request at bootstrap, so
+	// "active OAuth account / zero quota probes" is otherwise a single-
+	// signal third-party-tool detection.
+	s.sidecar.Notify(a, clientToken)
+	if path == "/v1/messages" {
+		upstreamBody = applyClaudeCodeBodyMimicry(upstreamBody, model, id)
+	}
 
 	ctx := c.Request.Context()
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(upstreamBody))
@@ -299,8 +319,9 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	copyForwardableHeaders(c.Request.Header, upReq.Header)
 	stripIngressHeaders(upReq.Header)
 
-	// Anthropic auth + Claude Code fingerprint headers.
-	applyAnthropicHeaders(upReq, a, stream, isAnthropicBase)
+	// Anthropic auth + Claude Code fingerprint headers. Pass the same
+	// SimIdentity so X-Claude-Code-Session-Id matches metadata.user_id.session_id.
+	applyAnthropicHeaders(upReq, a, stream, isAnthropicBase, id, upstreamBody)
 
 	client := auth.ClientFor(a.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(upReq)
@@ -339,6 +360,13 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		return true, false
 	}
 
+	// Decompress upstream gzip/br before reading anything — we asked for
+	// gzip,br to match the real CC fingerprint, but every internal path
+	// (usage parsing, SSE streamer, model rewrite, body forwarding) wants
+	// plain bytes. The Content-Encoding header is also stripped so the
+	// client receives identity even though upstream sent compressed.
+	maybeDecompressResponse(resp)
+
 	// Upstream error — log, do lightweight credential bookkeeping, and
 	// faithfully forward the original response to the client as-is.
 	if resp.StatusCode >= 400 {
@@ -362,7 +390,34 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		case resp.StatusCode == 429 && bytes.Contains(errBody, []byte("Extra usage is required")):
 			// Request-level rejection (long context), not a credential
 			// problem — no cooldown.
-		case resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403:
+		case resp.StatusCode == 429:
+			// Three flavors of 429 from Anthropic, treated differently:
+			//
+			//  1. Subscription usage limit ("Claude AI usage limit
+			//     reached|<unix-ts>"): the account is fine, just out
+			//     of 5h/weekly budget. Set a real cooldown to the
+			//     stamped reset time and DO NOT advance the
+			//     stealth-ban counter — that path is reserved for
+			//     suspicious 429s without any reset signal.
+			//  2. Stealth ban (no Retry-After, no anthropic-ratelimit-*
+			//     headers, body is the generic rate_limit_error blurb):
+			//     Anthropic occasionally serves bans this way. Hard-
+			//     fail immediately so the credential stops cycling
+			//     back into rotation every 30 seconds.
+			//  3. Ordinary RPM/TPM rate limit: short cooldown +
+			//     MarkRateLimited counter (15-strike escalation still
+			//     applies as a backstop).
+			if resetAt, ok := parseClaudeUsageLimitBody(errBody); ok {
+				a.MarkUsageLimitReached(resetAt)
+				log.Warnf("auth: %s subscription usage limit — cooldown until %s", a.ID, resetAt.Format(time.RFC3339))
+			} else if is429StealthBan(resp.Header, errBody) {
+				a.MarkHardFailure("account banned (stealth 429: no reset signal)")
+				log.Warnf("auth: %s hard-disabled — stealth-ban 429 (no Retry-After / ratelimit headers / known reset body)", a.ID)
+			} else {
+				resetAt := parseRetryAfter(resp.Header)
+				s.pool.ReportUpstreamError(a, resp.StatusCode, resetAt)
+			}
+		case resp.StatusCode == 401 || resp.StatusCode == 403:
 			resetAt := parseRetryAfter(resp.Header)
 			s.pool.ReportUpstreamError(a, resp.StatusCode, resetAt)
 		case resp.StatusCode == 529, resp.StatusCode >= 500:
@@ -558,6 +613,10 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		resp.StatusCode == http.StatusPaymentRequired ||
 		resp.StatusCode == http.StatusForbidden:
 		a.MarkHardFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// 429 has its own consecutive counter (stealth-ban detection);
+		// don't conflate it with the generic 5-strikes failure path.
+		a.MarkRateLimited(fmt.Sprintf("upstream %d", resp.StatusCode))
 	default:
 		a.MarkFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
 	}
@@ -657,7 +716,7 @@ func writeResponseHeaders(c *gin.Context, resp *http.Response) {
 //   - Accept-Encoding stays "identity" for both stream and non-stream because
 //     our response path streams raw bytes without decompression. Real Claude
 //     Code sends "gzip, deflate, br, zstd" on non-stream requests.
-func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream, isAnthropicBase bool) {
+func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream, isAnthropicBase bool, id SimIdentity, body []byte) {
 	token, kind := a.Credentials()
 
 	// Auth header — always overwrite whatever the client sent.
@@ -681,9 +740,10 @@ func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream, isAnthropicB
 	} else {
 		req.Header.Set("Anthropic-Beta", claudeAnthropicBetaFull)
 	}
-	// API-key mode hitting the first-party endpoint needs the browser-access
-	// flag; OAuth mode does not, and real Claude Code never sends it.
-	if kind == auth.KindAPIKey && isAnthropicBase {
+	// Real CC 2.1.126 OAuth captures show this header is sent on every
+	// /v1/messages, contradicting the older "OAuth never sends it" assumption.
+	// Set unconditionally when targeting the first-party endpoint.
+	if isAnthropicBase {
 		ensureHeader(req.Header, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 
@@ -699,7 +759,7 @@ func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream, isAnthropicB
 	ensureHeader(req.Header, "X-Stainless-Timeout", claudeStainlessTimeout)
 
 	// Stable per-credential session ID; new UUID per request.
-	ensureHeader(req.Header, "X-Claude-Code-Session-Id", sessionIDFor(a.ID))
+	ensureHeader(req.Header, "X-Claude-Code-Session-Id", SessionIDFor(id, body))
 	if isAnthropicBase {
 		ensureHeader(req.Header, "x-client-request-id", newRequestUUID())
 	}
@@ -713,12 +773,57 @@ func applyAnthropicHeaders(req *http.Request, a *auth.Auth, stream, isAnthropicB
 	}
 
 	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Accept-Encoding", "identity")
+	// Match real CC 2.1.126 — it advertises gzip,br on every request even
+	// for SSE (Anthropic's edge typically doesn't compress text/event-stream
+	// anyway, but the advertise is part of the fingerprint). Response-side
+	// decompression for non-stream paths is handled by maybeDecompressResponse.
+	req.Header.Set("Accept-Encoding", "gzip, br")
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 	} else {
 		ensureHeader(req.Header, "Accept", "application/json")
 	}
+}
+
+// maybeDecompressResponse swaps resp.Body for a transparent decoder when
+// upstream returned a gzip/br body, then strips Content-Encoding /
+// Content-Length so the response we forward to the client is plain text.
+// No-op when Content-Encoding is empty/identity (most SSE responses).
+func maybeDecompressResponse(resp *http.Response) {
+	enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if enc == "" || enc == "identity" {
+		return
+	}
+	switch enc {
+	case "gzip":
+		gz, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			log.Warnf("proxy: gzip decoder init failed: %v (forwarding compressed body)", err)
+			return
+		}
+		resp.Body = &decompressedBody{rc: gz, underlying: resp.Body}
+	case "br":
+		br := brotli.NewReader(resp.Body)
+		resp.Body = &decompressedBody{rc: io.NopCloser(br), underlying: resp.Body}
+	default:
+		// Unknown encoding (deflate, zstd, etc.) — pass through unchanged.
+		// Anthropic doesn't currently send these for /v1/messages.
+		return
+	}
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+}
+
+// decompressedBody chains a decompressor's Close to the underlying body.
+type decompressedBody struct {
+	rc         io.ReadCloser
+	underlying io.ReadCloser
+}
+
+func (d *decompressedBody) Read(p []byte) (int, error) { return d.rc.Read(p) }
+func (d *decompressedBody) Close() error {
+	_ = d.rc.Close()
+	return d.underlying.Close()
 }
 
 // streamSSE copies SSE events to the client as they arrive and parses
@@ -854,6 +959,85 @@ func parseRetryAfter(h http.Header) time.Time {
 		return t
 	}
 	return time.Time{}
+}
+
+// parseClaudeUsageLimitBody extracts the reset timestamp from a Claude
+// subscription usage-limit 429. Anthropic encodes it as
+// "Claude AI usage limit reached|<unix-seconds>" in the message field, e.g.
+//
+//	{"type":"error","error":{"type":"rate_limit_error",
+//	  "message":"Claude AI usage limit reached|1714761600"}}
+//
+// ok=true means we found the marker AND parsed a sane future timestamp;
+// caller should treat this as a regular quota cooldown (NOT a stealth ban),
+// because the body is explicit about both the cause and the recovery time.
+func parseClaudeUsageLimitBody(b []byte) (time.Time, bool) {
+	if len(b) == 0 {
+		return time.Time{}, false
+	}
+	const marker = "Claude AI usage limit reached"
+	lower := bytes.ToLower(b)
+	idx := bytes.Index(lower, []byte(strings.ToLower(marker)))
+	if idx < 0 {
+		return time.Time{}, false
+	}
+	// Walk past the marker in the original (non-lowercased) body; we want
+	// the literal "|<digits>" tail. Tolerate optional whitespace.
+	tail := b[idx+len(marker):]
+	for len(tail) > 0 && (tail[0] == ' ' || tail[0] == '\t') {
+		tail = tail[1:]
+	}
+	if len(tail) == 0 || tail[0] != '|' {
+		// Marker present but no timestamp — still a usage-limit signal,
+		// but we have nothing to set the cooldown to. Fall back to a
+		// best-effort 1h cooldown so the credential doesn't loop.
+		return time.Now().Add(1 * time.Hour), true
+	}
+	tail = tail[1:]
+	end := 0
+	for end < len(tail) && tail[end] >= '0' && tail[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return time.Now().Add(1 * time.Hour), true
+	}
+	secs, err := strconv.ParseInt(string(tail[:end]), 10, 64)
+	if err != nil {
+		return time.Now().Add(1 * time.Hour), true
+	}
+	t := time.Unix(secs, 0)
+	// Reject obviously bogus timestamps (already passed or > 30 days out)
+	// — degrade to the 1h fallback so we don't park a credential forever
+	// on a malformed payload.
+	if t.Before(time.Now()) || t.After(time.Now().Add(30*24*time.Hour)) {
+		return time.Now().Add(1 * time.Hour), true
+	}
+	return t, true
+}
+
+// is429StealthBan reports whether a 429 response is missing every signal a
+// genuine rate-limit response would carry. Anthropic occasionally serves
+// account bans as endless 429s rather than a clean 401/403; those replies
+// have no Retry-After, no anthropic-ratelimit-* headers, and no
+// "Claude AI usage limit reached|..." marker in the body — only a generic
+// rate_limit_error blurb. When all three signals are absent we presume the
+// credential is dead and hard-fail it immediately, bypassing the 15-strike
+// counter.
+//
+// Caller has already ruled out the "Extra usage is required" body (which
+// is a request-level rejection, not a credential signal) and the explicit
+// usage-limit body via parseClaudeUsageLimitBody.
+func is429StealthBan(h http.Header, body []byte) bool {
+	if strings.TrimSpace(h.Get("Retry-After")) != "" {
+		return false
+	}
+	for k := range h {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "anthropic-ratelimit-") {
+			return false
+		}
+	}
+	return true
 }
 
 // isAccountBanBody reports whether the upstream error body looks like a

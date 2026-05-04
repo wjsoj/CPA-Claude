@@ -60,6 +60,15 @@ type Auth struct {
 	AccountID string
 	PlanType  string
 
+	// Anthropic OAuth account/org UUIDs returned by the token-exchange
+	// response. Used by the body mimicry layer to populate
+	// metadata.user_id.account_uuid so requests look identical to the real
+	// Claude Code CLI's. Empty when not yet captured (legacy credentials
+	// saved before this field existed); body mimicry then falls back to
+	// deriving a stable per-account anchor from Email or ID.
+	AccountUUID      string
+	OrganizationUUID string
+
 	// Routing
 	ProxyURL      string // per-credential upstream proxy (empty = direct/use default)
 	BaseURL       string // per-credential upstream base URL override (API-key only; empty = config.AnthropicBaseURL)
@@ -93,6 +102,7 @@ type Auth struct {
 	LastFailureReason   string
 	LastSuccess         time.Time // set on every <400 upstream response
 	ConsecutiveFailures int       // reset on success; drives auto hard-fail
+	Consecutive429s     int       // reset on success; drives 429-specific hard-fail (suspected stealth ban)
 	HardFailureAt       time.Time // sticky unhealthy; cleared only by ClearFailure
 	HardFailureReason   string
 
@@ -121,6 +131,12 @@ const healthGrace = 2 * time.Minute
 // after which a credential is marked hard-unhealthy and must be manually
 // reset from the admin panel.
 const hardFailureThreshold = 5
+
+// rateLimit429HardFailureThreshold is the number of consecutive 429
+// responses after which a credential is presumed stealth-banned (Anthropic
+// occasionally hides bans behind perpetual 429s rather than a clean 401/403)
+// and marked hard-unhealthy. Counter resets on any successful response.
+const rateLimit429HardFailureThreshold = 15
 
 // clearExpiredQuotaLocked auto-clears the quota cooldown fields once their
 // reset time has passed, so stale "quota exceeded" state never lingers in
@@ -231,6 +247,44 @@ func (a *Auth) MarkFailure(reason string) {
 	a.mu.Unlock()
 }
 
+// MarkRateLimited records a 429 response. 429 alone is not a credential
+// fault (rate limit, transient), so it does not increment the generic
+// ConsecutiveFailures counter and does not set LastFailure — those drive
+// the "degraded" UI state, which is too noisy for normal rate-limiting.
+// Instead it bumps a dedicated 429 counter; once it crosses
+// rateLimit429HardFailureThreshold, the credential is presumed stealth-
+// banned and flipped to sticky hard-failure (Anthropic sometimes serves
+// bans as endless 429s rather than a clean 401/403).
+//
+// Returns the new Consecutive429s value so callers (the pool) can pick a
+// backoff length that grows with repeated hits.
+func (a *Auth) MarkRateLimited(reason string) int {
+	a.mu.Lock()
+	a.Consecutive429s++
+	n := a.Consecutive429s
+	if a.Consecutive429s >= rateLimit429HardFailureThreshold && a.HardFailureAt.IsZero() {
+		a.HardFailureAt = time.Now()
+		a.HardFailureReason = fmt.Sprintf("%d consecutive 429s (suspected stealth ban): %s", a.Consecutive429s, reason)
+		a.LastFailure = a.HardFailureAt
+		a.LastFailureReason = a.HardFailureReason
+	}
+	a.mu.Unlock()
+	return n
+}
+
+// MarkUsageLimitReached records a Claude subscription usage-limit 429 (the
+// body carries "Claude AI usage limit reached|<unix-ts>"). This is the
+// regular 5h/weekly quota signal and resets exactly when Anthropic says it
+// will, so we set a real cooldown and explicitly do NOT touch the
+// Consecutive429s counter — it would otherwise tick toward a stealth-ban
+// hard-failure for an account that's actually fine.
+func (a *Auth) MarkUsageLimitReached(resetAt time.Time) {
+	a.mu.Lock()
+	a.QuotaExceededAt = time.Now()
+	a.QuotaResetAt = resetAt
+	a.mu.Unlock()
+}
+
 // MarkClientCancel records that a request through this credential was
 // aborted by the client (context canceled before upstream responded). This
 // is surfaced to the admin panel as a non-fatal hint but never touches
@@ -271,6 +325,7 @@ func (a *Auth) MarkSuccess() {
 	a.mu.Lock()
 	a.LastSuccess = time.Now()
 	a.ConsecutiveFailures = 0
+	a.Consecutive429s = 0
 	a.mu.Unlock()
 }
 
@@ -281,6 +336,7 @@ func (a *Auth) ClearFailure() {
 	a.LastFailure = time.Time{}
 	a.LastFailureReason = ""
 	a.ConsecutiveFailures = 0
+	a.Consecutive429s = 0
 	a.HardFailureAt = time.Time{}
 	a.HardFailureReason = ""
 	a.LastSuccess = time.Now()

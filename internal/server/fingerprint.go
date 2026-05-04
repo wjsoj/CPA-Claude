@@ -2,42 +2,42 @@ package server
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 )
 
-// Header values pinned to Claude Code 2.1.92 / @anthropic-ai/sdk 0.70.0.
-// Aligned with sub2api (DefaultHeaders) and Parrot (cc_mimicry.py) — the
-// reference implementations whose values come from real CLI 2.1.9x captures.
+// Header values pinned to Claude Code 2.1.126 / @anthropic-ai/sdk 0.81.0.
+// Values verified against a live CC 2.1.126 OAuth session capture
+// (crack/oauth/rows/17-POST-api.anthropic.com_v1_messages.json).
 // CLICurrentVersion below MUST match the version baked into claudeCLIUserAgent;
 // any drift will cause the cc_version=X.Y.Z.{fp} billing block to disagree
 // with the User-Agent and trigger Anthropic's third-party detection.
 const (
-	CLICurrentVersion       = "2.1.92"
-	claudeCLIUserAgent      = "claude-cli/2.1.92 (external, cli)"
+	CLICurrentVersion       = "2.1.126"
+	claudeCLIUserAgent      = "claude-cli/2.1.126 (external, cli)"
 	claudeStainlessLang     = "js"
 	claudeStainlessRuntime  = "node"
-	claudeStainlessRuntimeV = "v24.13.0"
-	claudeStainlessPackageV = "0.70.0"
+	claudeStainlessRuntimeV = "v24.3.0"
+	claudeStainlessPackageV = "0.81.0"
 	claudeStainlessOS       = "Linux"
-	claudeStainlessArch     = "arm64"
+	claudeStainlessArch     = "x64"
 	claudeStainlessTimeout  = "600"
 	claudeStainlessRetryCnt = "0"
 	claudeAnthropicVersion  = "2023-06-01"
-	// Beta list mirrors sub2api FullClaudeCodeMimicryBetas() — order matters,
-	// upstream uses the full set as a cheap third-party signal. Any beta we
-	// drop that real CLI sends will downgrade us to "extra usage" billing.
-	claudeAnthropicBetaFull = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,redact-thinking-2026-02-12,context-management-2025-06-27,extended-cache-ttl-2025-04-11"
+	// Beta list captured from real CC 2.1.126 — exact value, exact order.
+	// Any beta we drop that real CLI sends will downgrade us to "extra usage"
+	// billing; any extra beta we add that real CLI does not send is also a
+	// fingerprint signal Anthropic edges look for.
+	claudeAnthropicBetaFull = "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,cache-diagnosis-2026-04-07"
 )
 
-// Default cache_control TTL for cache breakpoints we inject. Real CLI uses
-// "1h"; we follow sub2api's "5m" policy to avoid burning 1h cache slots when
-// the client didn't ask for them.
-const claudeDefaultCacheTTL = "5m"
+// Default cache_control TTL for cache breakpoints we inject. Real CC 2.1.126
+// uses "1h" with scope=global on the heavy system blocks — match it so prefix
+// caching works the same way and the request shape is byte-identical.
+const claudeDefaultCacheTTL = "1h"
+const claudeDefaultCacheScope = "global"
 
 // Claude Code system prompt — first system block on every real CLI request.
 const claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -50,29 +50,6 @@ var claudeCodePromptPrefixes = []string{
 	"You are a Claude agent, built on Anthropic's Claude Agent SDK",
 	"You are a file search specialist for Claude Code",
 	"You are a helpful AI assistant tasked with summarizing conversations",
-}
-
-// sessionIDCache assigns one stable UUID per credential ID. Matches the
-// X-Claude-Code-Session-Id behavior of the real Claude Code CLI, which keeps
-// the value steady across requests for the lifetime of a login.
-var (
-	sessionIDCacheMu sync.Mutex
-	sessionIDCache   = make(map[string]string)
-)
-
-func sessionIDFor(authID string) string {
-	sessionIDCacheMu.Lock()
-	defer sessionIDCacheMu.Unlock()
-	if v, ok := sessionIDCache[authID]; ok {
-		return v
-	}
-	// Derive deterministically from the auth ID so reloads produce the same
-	// value the upstream has previously seen, then format as a UUID v4 shape
-	// for cosmetic similarity to the real client.
-	sum := sha256.Sum256([]byte("cpa-claude-session/" + authID))
-	id := uuidFromBytes(sum[:16])
-	sessionIDCache[authID] = id
-	return id
 }
 
 func newRequestUUID() string {
