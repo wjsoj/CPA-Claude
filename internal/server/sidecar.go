@@ -60,6 +60,13 @@ const (
 	// dispatcher goroutine) and never blocks the user request.
 	sidecarRequestTimeout = 30 * time.Second
 
+	// bootstrapWaitCap caps how long the first business /v1/messages from
+	// a fresh (account, clientToken) pair will wait for sidecar bootstrap
+	// to reach the quota_probe step (real CC's last pre-business call,
+	// captured at T+1.27s). 5s comfortably accommodates slow proxy lanes
+	// while ensuring a wedged upstream can't hang user traffic.
+	bootstrapWaitCap = 5 * time.Second
+
 	// heartbeatBaseInterval is the median spacing between event_logging
 	// heartbeats. Real captures show 10-25s between batches; we centre
 	// at 18s and apply ±40% jitter so two co-running sessions don't
@@ -142,6 +149,13 @@ type sidecarSession struct {
 	// the quota probe, and the event_logging heartbeats. Computed
 	// once when the session is born.
 	bootstrapSessionID string
+	// bootstrapReady is closed once the quota_probe step has been
+	// dispatched (or once bootstrap aborts), letting the first business
+	// /v1/messages from this session wait until real CC's
+	// bootstrap-then-business sequence is observable upstream. Allocated
+	// at session creation; never reused — a long-idle session gets a
+	// brand-new sidecarSession with a fresh channel.
+	bootstrapReady chan struct{}
 	// cancel stops the heartbeat goroutine; called when the session is
 	// evicted or when the heartbeat itself decides the user is gone.
 	cancel context.CancelFunc
@@ -161,43 +175,60 @@ func newSidecarMgr(cfg sidecarConfig) *sidecarMgr {
 	return m
 }
 
-// Notify registers a request from (a, clientToken). Always returns
-// immediately — every network call runs in its own goroutine.
-func (m *sidecarMgr) Notify(a *auth.Auth, clientToken string) {
+// Notify registers a request from (a, clientToken). Returns a channel
+// that's closed once bootstrap has reached the quota-probe step (or once
+// bootstrap aborted) — caller may select on it to delay the FIRST business
+// /v1/messages from this session, so upstream sees the canonical real-CC
+// "GrowthBook → settings → bootstrap → quota probe → business" ordering
+// instead of business-first. Returns nil when no waiting is appropriate
+// (sidecar disabled, non-OAuth credential, etc.). Already-closed channels
+// (subsequent calls within an active session) make the wait a no-op.
+//
+// Always returns "fast" in the sense that the channel itself is allocated
+// synchronously; every actual HTTP call still runs in its own goroutine.
+func (m *sidecarMgr) Notify(a *auth.Auth, clientToken string) <-chan struct{} {
 	if m == nil || !m.enabled || a == nil || a.Kind != auth.KindOAuth {
-		return
+		return nil
 	}
 	now := time.Now().UnixNano()
 	key := sidecarSessionKey{accountKey: a.AccountKey(), clientToken: clientToken}
 
-	v, loaded := m.sessions.LoadOrStore(key, &sidecarSession{})
+	fresh := &sidecarSession{bootstrapReady: make(chan struct{})}
+	v, loaded := m.sessions.LoadOrStore(key, fresh)
 	sess := v.(*sidecarSession)
 	prevSeen := sess.lastSeen.Swap(now)
 
 	// "New session" if first ever or returning from idle past the TTL.
+	// On idle wake, replace the session wholesale (new bootstrapReady,
+	// new fired latch) — mutating in place would race with concurrent
+	// readers of bootstrapReady.
 	isNew := !loaded
-	if !isNew && prevSeen > 0 {
-		idle := time.Duration(now - prevSeen)
-		if idle >= sidecarSessionIdleTTL {
-			sess.bootstrapFired.Store(false)
-			isNew = true
+	if !isNew && prevSeen > 0 && time.Duration(now-prevSeen) >= sidecarSessionIdleTTL {
+		if sess.cancel != nil {
+			sess.cancel()
 		}
+		sess = &sidecarSession{bootstrapReady: make(chan struct{})}
+		sess.lastSeen.Store(now)
+		m.sessions.Store(key, sess)
+		isNew = true
 	}
 	if !isNew {
-		return
+		return sess.bootstrapReady
 	}
 	if !sess.bootstrapFired.CompareAndSwap(false, true) {
-		// Another concurrent first-request already kicked off bootstrap.
-		return
+		// Another concurrent first-request already kicked off bootstrap;
+		// share its readiness channel.
+		return sess.bootstrapReady
 	}
 
 	sess.bootstrapSessionID = bootstrapSessionIDFor(key.accountKey, key.clientToken)
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.cancel = cancel
 
-	go m.runBootstrap(ctx, a, key, sess.bootstrapSessionID)
+	go m.runBootstrap(ctx, a, key, sess.bootstrapSessionID, sess.bootstrapReady)
 	go m.runHeartbeat(ctx, a, sess)
 	go m.runDatadogHeartbeat(ctx, a, sess)
+	return sess.bootstrapReady
 }
 
 // bootstrapSessionIDFor derives a UUIDv4-shaped session id stable for the
@@ -346,7 +377,21 @@ func realBootstrapSteps(baseURL string) []bootstrapStep {
 // real CC produces. Each step is best-effort; failures are logged at
 // debug level and never propagate. Cancellation: if ctx is cancelled mid-
 // burst (session evicted), abort.
-func (m *sidecarMgr) runBootstrap(ctx context.Context, a *auth.Auth, key sidecarSessionKey, sessionID string) {
+//
+// `ready` is closed once the quota_probe step has been dispatched (success
+// or failure) so the first business /v1/messages from this session can
+// proceed. Defer-close also fires on early ctx-cancel so a stuck shutdown
+// can't hang client requests waiting on a session that will never finish.
+func (m *sidecarMgr) runBootstrap(ctx context.Context, a *auth.Auth, key sidecarSessionKey, sessionID string, ready chan struct{}) {
+	closed := false
+	closeReady := func() {
+		if !closed {
+			closed = true
+			close(ready)
+		}
+	}
+	defer closeReady()
+
 	steps := realBootstrapSteps(m.baseURL)
 	start := time.Now()
 	for _, step := range steps {
@@ -361,7 +406,13 @@ func (m *sidecarMgr) runBootstrap(ctx context.Context, a *auth.Auth, key sidecar
 		}
 		if err := m.sendBootstrapStep(ctx, a, sessionID, step); err != nil {
 			log.Debugf("sidecar: %s via %s failed: %v", step.name, a.ID, err)
-			continue
+		}
+		if step.name == "quota_probe" {
+			// quota_probe is the last pre-business step real CC fires.
+			// Unblock waiting business request now; the remaining
+			// mcp/release steps continue running in this goroutine but
+			// no longer gate user traffic.
+			closeReady()
 		}
 	}
 	log.Debugf("sidecar: bootstrap complete via %s (clientToken=%s, sessionID=%s)",
