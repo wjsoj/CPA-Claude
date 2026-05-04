@@ -195,15 +195,14 @@ func TestParseUnifiedRatelimitRejected(t *testing.T) {
 			expected: time.Unix(in1h, 0),
 		},
 		{
-			name: "rejected with stale reset stamp → clamp to >=1m future",
+			name: "rejected with stale reset stamp → 1h fallback (don't trust past stamp)",
 			headers: http.Header{
 				"Anthropic-Ratelimit-Unified-Status": []string{"rejected"},
 				"Anthropic-Ratelimit-Unified-Reset":  []string{itoa(stale)},
 			},
-			wantOK: true,
-			// expected = now + 1m exactly
+			wantOK:   true,
 			wantNear: 5 * time.Second,
-			expected: now.Add(1 * time.Minute),
+			expected: now.Add(1 * time.Hour),
 		},
 		{
 			name: "rejected with no reset header → 1h fallback",

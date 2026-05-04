@@ -1045,16 +1045,17 @@ func parseUnixSecondsHeader(v string) (time.Time, bool) {
 	return time.Unix(secs, 0), true
 }
 
-// clampReset coerces a parsed reset timestamp into a sane future window: at
-// least 1 minute ahead (so a stale stamp doesn't auto-clear immediately via
-// clearExpiredQuotaLocked), at most 30 days ahead (defensive cap against a
-// malformed far-future value).
+// clampReset coerces a parsed reset timestamp into a sane future window. A
+// stamp that's already in the past (clock skew, stale bucket value, upstream
+// races the actual reset by a few seconds) is NOT trusted — we fall back to
+// a 1h cooldown so the credential doesn't flicker back to healthy via
+// clearExpiredQuotaLocked seconds later. Far-future stamps are capped at
+// 30 days as a defense against malformed payloads.
 func clampReset(t time.Time) time.Time {
 	now := time.Now()
-	min := now.Add(1 * time.Minute)
 	max := now.Add(30 * 24 * time.Hour)
-	if t.Before(min) {
-		return min
+	if !t.After(now) {
+		return now.Add(1 * time.Hour)
 	}
 	if t.After(max) {
 		return max
