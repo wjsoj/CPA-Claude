@@ -124,11 +124,12 @@ func TestParseUnifiedRatelimitRejected(t *testing.T) {
 	stale := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
 	tests := []struct {
-		name     string
-		headers  http.Header
-		wantOK   bool
-		wantNear time.Duration // |returned - expected| <= 5s
-		expected time.Time
+		name       string
+		headers    http.Header
+		wantOK     bool
+		wantBanned bool
+		wantNear   time.Duration // |returned - expected| <= 5s; only checked when !wantBanned
+		expected   time.Time
 	}{
 		{
 			name: "all allowed → not rejected",
@@ -195,32 +196,42 @@ func TestParseUnifiedRatelimitRejected(t *testing.T) {
 			expected: time.Unix(in1h, 0),
 		},
 		{
-			name: "rejected with stale reset stamp → 1h fallback (don't trust past stamp)",
+			name: "rejected with stale reset stamp → banned (no recovery time)",
 			headers: http.Header{
 				"Anthropic-Ratelimit-Unified-Status": []string{"rejected"},
 				"Anthropic-Ratelimit-Unified-Reset":  []string{itoa(stale)},
 			},
-			wantOK:   true,
-			wantNear: 5 * time.Second,
-			expected: now.Add(1 * time.Hour),
+			wantOK:     true,
+			wantBanned: true,
 		},
 		{
-			name: "rejected with no reset header → 1h fallback",
+			name: "rejected with no reset header → banned (no recovery time)",
 			headers: http.Header{
 				"Anthropic-Ratelimit-Unified-Status": []string{"rejected"},
 			},
-			wantOK:   true,
-			wantNear: 5 * time.Second,
-			expected: now.Add(1 * time.Hour),
+			wantOK:     true,
+			wantBanned: true,
+		},
+		{
+			name: "bucket rejected but only past bucket-reset → banned",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-5h-Status": []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Reset":  []string{itoa(stale)},
+			},
+			wantOK:     true,
+			wantBanned: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := parseUnifiedRatelimitRejected(tc.headers)
+			got, banned, ok := parseUnifiedRatelimitRejected(tc.headers)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
-			if !ok {
+			if banned != tc.wantBanned {
+				t.Fatalf("banned = %v, want %v", banned, tc.wantBanned)
+			}
+			if !ok || banned {
 				return
 			}
 			delta := got.Sub(tc.expected)
