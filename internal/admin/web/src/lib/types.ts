@@ -21,6 +21,7 @@ export interface UsageSummary {
   sum_5h: Counts;
   last_used?: string;
   daily?: DayEntry[];
+  total_cost_usd?: number;
 }
 
 export type Provider = "anthropic" | "openai";

@@ -290,6 +290,10 @@ type usageSummary struct {
 	Sum5h    usage.Counts     `json:"sum_5h"`
 	LastUsed *time.Time       `json:"last_used,omitempty"`
 	Daily    []usage.DayEntry `json:"daily"` // last 14 days, oldest first
+	// TotalCostUSD is the lifetime USD spend routed through this credential,
+	// summed from the request log. Includes advisor sub-call rows (priced
+	// under their own model), so a credential's bar reflects true cost.
+	TotalCostUSD float64 `json:"total_cost_usd"`
 }
 
 func (h *Handler) handleSummary(c *gin.Context) {
@@ -338,11 +342,12 @@ func (h *Handler) handleSummary(c *gin.Context) {
 				daily = v.DailyOrdered(14)
 			}
 			u = &usageSummary{
-				Total:    aggToCounts(lifeAgg),
-				Sum24h:   aggToCounts(last24Agg),
-				Sum5h:    h.usage.Sum5h(st.Auth.ID),
-				LastUsed: lastPtr,
-				Daily:    daily,
+				Total:        aggToCounts(lifeAgg),
+				Sum24h:       aggToCounts(last24Agg),
+				Sum5h:        h.usage.Sum5h(st.Auth.ID),
+				LastUsed:     lastPtr,
+				Daily:        daily,
+				TotalCostUSD: lifeAgg.CostUSD,
 			}
 		}
 		live := h.pool.FindByID(st.Auth.ID)
