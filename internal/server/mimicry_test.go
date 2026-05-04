@@ -234,6 +234,55 @@ func TestAlreadyClaudeCode(t *testing.T) {
 	}
 }
 
+// TestCCStructuralFieldsInjected confirms that thinking, output_config,
+// and context_management get filled in with CC-canonical defaults when
+// the downstream client didn't send them — closing a fingerprint gap
+// since real CC always carries these on non-Haiku /v1/messages.
+func TestCCStructuralFieldsInjected(t *testing.T) {
+	in := `{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`
+	out := applyClaudeCodeBodyMimicry([]byte(in), "claude-sonnet-4-5", testID())
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("invalid output JSON: %v", err)
+	}
+	for _, f := range []struct{ key, want string }{
+		{"thinking", `{"type":"adaptive"}`},
+		{"output_config", `{"effort":"medium"}`},
+		{"context_management", `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`},
+	} {
+		got, ok := parsed[f.key]
+		if !ok {
+			t.Errorf("%s missing from output", f.key)
+			continue
+		}
+		if string(got) != f.want {
+			t.Errorf("%s = %s, want %s", f.key, got, f.want)
+		}
+	}
+}
+
+// TestCCStructuralFieldsRespectClient confirms that client-supplied values
+// for the structural fields are NOT overwritten — preserving downstream
+// client intent (e.g. thinking budget, custom output effort).
+func TestCCStructuralFieldsRespectClient(t *testing.T) {
+	in := `{"model":"claude-sonnet-4-5","thinking":{"type":"enabled","budget_tokens":16000},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hi"}]}`
+	out := applyClaudeCodeBodyMimicry([]byte(in), "claude-sonnet-4-5", testID())
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("invalid output JSON: %v", err)
+	}
+	if string(parsed["thinking"]) != `{"type":"enabled","budget_tokens":16000}` {
+		t.Errorf("thinking was overwritten: %s", parsed["thinking"])
+	}
+	if string(parsed["output_config"]) != `{"effort":"high"}` {
+		t.Errorf("output_config was overwritten: %s", parsed["output_config"])
+	}
+	// context_management was missing → should be injected.
+	if _, ok := parsed["context_management"]; !ok {
+		t.Errorf("context_management should have been injected when missing")
+	}
+}
+
 // TestCCHSigning asserts the cch field is replaced with a 5-hex digest
 // derived from body content (different bodies → different cch).
 func TestCCHSigning(t *testing.T) {
