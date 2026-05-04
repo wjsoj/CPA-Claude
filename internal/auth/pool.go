@@ -712,12 +712,24 @@ func (p *Pool) ReportUpstreamError(a *Auth, status int, resetAt time.Time) {
 	}
 	switch {
 	case status == 429:
+		// Track repeated 429s separately: Anthropic occasionally hides
+		// bans behind perpetual 429s. After enough back-to-back 429s
+		// without any success, MarkRateLimited promotes to sticky
+		// hard-failure so the credential stops cycling through cooldown.
+		n := a.MarkRateLimited(fmt.Sprintf("upstream %d (rate limited)", status))
 		// Most 429s from Anthropic are transient rate limits (RPM/TPM),
 		// NOT true quota exhaustion. A 10-minute freeze is far too
 		// aggressive — it takes the credential offline long after the
 		// rate window has reset. Use a short default; if the upstream
 		// sends a meaningful Retry-After we'll honour it instead.
-		setCooldown(30 * time.Second)
+		//
+		// As consecutive 429s pile up without any success, the cooldown
+		// grows exponentially so the credential stops being re-routed
+		// to within seconds of every 30s "ready now" tick — that
+		// rapid-cycle behavior is what makes a stealth-banned account
+		// look like a degraded one in the panel until the 15-strike
+		// hard-failure finally fires. Capped at 10 minutes.
+		setCooldown(rateLimit429Cooldown(n))
 	case status == 403:
 		setCooldown(1 * time.Minute)
 	case status == 401:
@@ -731,5 +743,31 @@ func (p *Pool) ReportUpstreamError(a *Auth, status int, resetAt time.Time) {
 		a.MarkFailure(fmt.Sprintf("upstream %d (overloaded)", status))
 	case status >= 500:
 		a.MarkFailure(fmt.Sprintf("upstream %d", status))
+	}
+}
+
+// rateLimit429Cooldown returns the per-credential cooldown duration after
+// the n-th consecutive 429 with no intervening success. Grows from 30s up
+// to a 10-minute cap so a stealth-banned credential isn't recycled back
+// into rotation within seconds of every "ready now" tick. Used only when
+// the upstream did NOT supply a Retry-After header.
+//
+//	n=1   → 30s
+//	n=2   → 1m
+//	n=3   → 2m
+//	n=4   → 5m
+//	n>=5  → 10m
+func rateLimit429Cooldown(n int) time.Duration {
+	switch {
+	case n <= 1:
+		return 30 * time.Second
+	case n == 2:
+		return 1 * time.Minute
+	case n == 3:
+		return 2 * time.Minute
+	case n == 4:
+		return 5 * time.Minute
+	default:
+		return 10 * time.Minute
 	}
 }

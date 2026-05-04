@@ -39,19 +39,44 @@ const (
 
 var cchPlaceholderRe = regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcch=)(00000)(;)`)
 
+// SimIdentity carries the stable per-account fingerprint values that the
+// mimicry layer needs from the upstream Auth. Splitting it out of *auth.Auth
+// keeps the mimicry package free of an auth import and makes tests trivial.
+//
+// AccountKey: the most stable per-account anchor (account_uuid > email > id);
+// device_id is sha256 over this and stays constant for the lifetime of the
+// account, even when multiple downstream client tokens are routed through it.
+//
+// AccountUUID: the real OAuth-issued UUID when known, written verbatim into
+// metadata.user_id.account_uuid. Empty string means "unknown" and that field
+// is omitted in the JSON, matching real CC's behavior on a brand-new login
+// before the bootstrap roundtrip has populated it.
+//
+// ClientToken: the downstream caller identity. Each distinct ClientToken
+// looks like a separate concurrent CC window on the same device, which is
+// exactly what we want when N users share one OAuth account.
+type SimIdentity struct {
+	AccountKey  string
+	AccountUUID string
+	ClientToken string
+}
+
 // applyClaudeCodeBodyMimicry rewrites the JSON request body to match the
-// shape of a real Claude Code CLI request. Returns the original body
+// shape of a real Claude Code 2.1.126 CLI request. Returns the original body
 // unchanged if any step fails (best-effort — the request still ships).
 //
-// authID seeds a stable device_id per credential so multi-turn conversations
-// keep the same metadata.user_id across requests.
+// id binds the request to the per-account device fingerprint and to the
+// per-downstream-user CC session. The conversation hash (sha256 of the
+// first user message) makes session_id stable across multi-turn requests
+// in the same conversation but rotate when a new conversation starts —
+// matching the real CLI, where one `claude` invocation = one session_id.
 //
 // Skips entirely when:
 //   - body isn't a JSON object (not an Anthropic /v1/messages payload)
 //   - model contains "haiku" (Anthropic doesn't third-party-check Haiku)
 //   - the request already looks like Claude Code (system already has the
 //     official prompt prefix — likely a real CLI client passing through)
-func applyClaudeCodeBodyMimicry(body []byte, model, authID string) []byte {
+func applyClaudeCodeBodyMimicry(body []byte, model string, id SimIdentity) []byte {
 	if len(body) == 0 || strings.Contains(strings.ToLower(model), "haiku") {
 		return body
 	}
@@ -68,19 +93,18 @@ func applyClaudeCodeBodyMimicry(body []byte, model, authID string) []byte {
 		return signBillingHeaderCCH(body)
 	}
 
-	// Step 1: rewrite system → [billing_block, claude_code_block], move
-	// original system into messages as user/assistant pair.
+	// Step 1: rebuild system to match the CC 2.1.126 4-block layout.
 	out, err := rewriteSystemForOAuth(obj, body)
 	if err != nil {
 		return body
 	}
 
-	// Step 2: stable cache breakpoints on messages.
+	// Step 2: stable cache breakpoints on the last message only.
 	out = stripMessageCacheControl(out)
 	out = addMessageCacheBreakpoints(out)
 
-	// Step 3: metadata.user_id (JSON shape, CLI 2.1.78+).
-	out = ensureMetadataUserID(out, authID)
+	// Step 3: metadata.user_id (JSON shape, CC 2.1.78+).
+	out = ensureMetadataUserID(out, id)
 
 	// Step 4: replace cch=00000 placeholder with xxhash64 of the final body.
 	// MUST be the last transformation — any later edit invalidates the hash.
@@ -118,88 +142,128 @@ func matchesClaudeCodePrefix(text string) bool {
 	return false
 }
 
-// extractSystemText returns the original system content as plain text so we
-// can move it into messages. Concatenates text blocks for array form.
-func extractSystemText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var asString string
-	if err := json.Unmarshal(raw, &asString); err == nil {
-		return strings.TrimSpace(asString)
-	}
-	var asArray []map[string]any
-	if err := json.Unmarshal(raw, &asArray); err == nil {
-		var parts []string
-		for _, blk := range asArray {
-			if t, _ := blk["text"].(string); strings.TrimSpace(t) != "" {
-				parts = append(parts, t)
-			}
-		}
-		return strings.Join(parts, "\n\n")
-	}
-	return ""
-}
-
-// rewriteSystemForOAuth replaces system with the canonical 2-block Claude
-// Code shape and prepends the original system content to messages as a
-// user/assistant pair.
+// rewriteSystemForOAuth rebuilds the system field to match the real CC 2.1.126
+// 4-block layout captured in crack/oauth/rows/17:
+//
+//	system[0] = billing block (no cache_control)
+//	system[1] = "You are Claude Code, Anthropic's official CLI for Claude."
+//	            (no cache_control — real CC leaves this bare)
+//	system[2..] = the client's original system prompt, preserved as text blocks
+//	              with cache_control: ephemeral 1h scope=global on the last block
+//	              (and on the second-to-last when 4+ blocks exist)
+//
+// The client's original prompt stays in system, NOT moved into messages —
+// real CC never moves it, and a stray [user/assistant] pair at message[0..1]
+// is itself a third-party-tool fingerprint.
 func rewriteSystemForOAuth(obj map[string]json.RawMessage, body []byte) ([]byte, error) {
-	originalSystem := extractSystemText(obj["system"])
+	originalBlocks := extractSystemBlocks(obj["system"])
 
 	billing := buildBillingBlock(body, CLICurrentVersion)
-	ccBlock := buildSystemTextBlock(claudeCodeSystemPrompt, true)
+	ccIntro := buildSystemTextBlock(claudeCodeSystemPrompt, false, false)
 
-	systemArr, err := json.Marshal([]json.RawMessage{billing, ccBlock})
+	systemBlocks := []json.RawMessage{billing, ccIntro}
+	if len(originalBlocks) > 0 {
+		// Normalize: ensure cache_control on the last block (1h + scope=global)
+		// and on the second-to-last block (1h, no scope) when present.
+		stripCacheControlFromBlocks(originalBlocks)
+		applySystemCacheBreakpoints(originalBlocks)
+		systemBlocks = append(systemBlocks, originalBlocks...)
+	}
+
+	systemArr, err := json.Marshal(systemBlocks)
 	if err != nil {
 		return nil, err
 	}
 	obj["system"] = systemArr
-
-	if originalSystem != "" && !matchesClaudeCodePrefix(originalSystem) {
-		// Inject original system as [user, assistant] pair at the head of
-		// messages so the model still receives the instructions.
-		instr, _ := json.Marshal(map[string]any{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "text", "text": "[System Instructions]\n" + originalSystem},
-			},
-		})
-		ack, _ := json.Marshal(map[string]any{
-			"role": "assistant",
-			"content": []map[string]any{
-				{"type": "text", "text": "Understood. I will follow these instructions."},
-			},
-		})
-
-		var existing []json.RawMessage
-		if raw, ok := obj["messages"]; ok && len(raw) > 0 {
-			_ = json.Unmarshal(raw, &existing)
-		}
-		merged := append([]json.RawMessage{instr, ack}, existing...)
-		if mb, err := json.Marshal(merged); err == nil {
-			obj["messages"] = mb
-		}
-	}
-
 	return json.Marshal(obj)
 }
 
-// buildSystemTextBlock returns a marshalled {"type":"text","text":...,
-// "cache_control":{"type":"ephemeral","ttl":"5m"}} block.
-func buildSystemTextBlock(text string, cache bool) json.RawMessage {
-	if cache {
-		out, _ := json.Marshal(map[string]any{
-			"type": "text",
-			"text": text,
-			"cache_control": map[string]any{
-				"type": "ephemeral",
-				"ttl":  claudeDefaultCacheTTL,
-			},
-		})
-		return out
+// extractSystemBlocks returns the original system field as a list of text
+// blocks. Accepts string (wrapped in one block), []block (passed through),
+// or null/missing (empty).
+func extractSystemBlocks(raw json.RawMessage) []json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
 	}
-	out, _ := json.Marshal(map[string]any{"type": "text", "text": text})
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		s := strings.TrimSpace(asString)
+		if s == "" {
+			return nil
+		}
+		blk, _ := json.Marshal(map[string]any{"type": "text", "text": asString})
+		return []json.RawMessage{blk}
+	}
+	var asArray []json.RawMessage
+	if err := json.Unmarshal(raw, &asArray); err == nil {
+		return asArray
+	}
+	return nil
+}
+
+// stripCacheControlFromBlocks removes any cache_control field from each block
+// so we can reapply our own breakpoints without doubling them.
+func stripCacheControlFromBlocks(blocks []json.RawMessage) {
+	for i, raw := range blocks {
+		var b map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &b); err != nil {
+			continue
+		}
+		if _, ok := b["cache_control"]; !ok {
+			continue
+		}
+		delete(b, "cache_control")
+		if nb, err := json.Marshal(b); err == nil {
+			blocks[i] = nb
+		}
+	}
+}
+
+// applySystemCacheBreakpoints adds cache_control to the last block (1h +
+// scope=global) and to the second-to-last block (1h, no scope) when present.
+// Mirrors the real CC 2.1.126 capture exactly.
+func applySystemCacheBreakpoints(blocks []json.RawMessage) {
+	if len(blocks) == 0 {
+		return
+	}
+	// Second-to-last gets a plain 1h breakpoint (no scope).
+	if len(blocks) >= 2 {
+		blocks[len(blocks)-2] = injectCacheControl(blocks[len(blocks)-2], false)
+	}
+	// Last gets the global 1h breakpoint.
+	blocks[len(blocks)-1] = injectCacheControl(blocks[len(blocks)-1], true)
+}
+
+func injectCacheControl(raw json.RawMessage, withGlobalScope bool) json.RawMessage {
+	var b map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return raw
+	}
+	cc := map[string]any{"type": "ephemeral", "ttl": claudeDefaultCacheTTL}
+	if withGlobalScope {
+		cc["scope"] = claudeDefaultCacheScope
+	}
+	if mb, err := json.Marshal(cc); err == nil {
+		b["cache_control"] = mb
+	}
+	if nb, err := json.Marshal(b); err == nil {
+		return nb
+	}
+	return raw
+}
+
+// buildSystemTextBlock returns a marshalled {"type":"text","text":...} block,
+// optionally with cache_control: ephemeral 1h scope=global appended.
+func buildSystemTextBlock(text string, cache, withGlobalScope bool) json.RawMessage {
+	m := map[string]any{"type": "text", "text": text}
+	if cache {
+		cc := map[string]any{"type": "ephemeral", "ttl": claudeDefaultCacheTTL}
+		if withGlobalScope {
+			cc["scope"] = claudeDefaultCacheScope
+		}
+		m["cache_control"] = cc
+	}
+	out, _ := json.Marshal(m)
 	return out
 }
 
@@ -336,14 +400,11 @@ func stripMessageCacheControl(body []byte) []byte {
 	return out
 }
 
-// addMessageCacheBreakpoints injects up to two ephemeral cache_control
-// blocks on:
-//  1. The last message (always, when there is at least one).
-//  2. The second-to-last user message (only when len(messages) >= 4).
-//
-// Mirrors sub2api/Parrot exactly — those positions are where the real CLI
-// places its breakpoints and matching them is part of the prefix-cache
-// stability story.
+// addMessageCacheBreakpoints injects an ephemeral 1h cache_control on the
+// last block of the last message — exactly what real CC 2.1.126 does
+// (verified in crack/oauth/rows/17). The second-to-last user breakpoint
+// that older sub2api/Parrot snapshots place is no longer present in the
+// 2.1.126 capture, so we don't add it.
 func addMessageCacheBreakpoints(body []byte) []byte {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
@@ -361,32 +422,7 @@ func addMessageCacheBreakpoints(body []byte) []byte {
 		return body
 	}
 
-	injectAt := func(i int) {
-		if i < 0 || i >= len(msgs) {
-			return
-		}
-		msgs[i] = injectBreakpointOnMessage(msgs[i])
-	}
-
-	injectAt(len(msgs) - 1)
-
-	if len(msgs) >= 4 {
-		userCount := 0
-		for i := len(msgs) - 1; i >= 0; i-- {
-			var role string
-			if r, ok := msgs[i]["role"]; ok {
-				_ = json.Unmarshal(r, &role)
-			}
-			if role != "user" {
-				continue
-			}
-			userCount++
-			if userCount == 2 {
-				injectAt(i)
-				break
-			}
-		}
-	}
+	msgs[len(msgs)-1] = injectBreakpointOnMessage(msgs[len(msgs)-1])
 
 	if nm, err := json.Marshal(msgs); err == nil {
 		obj["messages"] = nm
@@ -451,26 +487,31 @@ func injectBreakpointOnMessage(msg map[string]json.RawMessage) map[string]json.R
 }
 
 // ensureMetadataUserID writes a JSON-shaped metadata.user_id (the format
-// used by CLI >= 2.1.78). device_id is derived deterministically from
-// authID so the same OAuth credential always produces the same id;
-// session_id is derived from the body so it stays stable for retries of
-// the exact same request.
-func ensureMetadataUserID(body []byte, authID string) []byte {
+// used by CC >= 2.1.78). device_id is anchored to the OAuth account, so
+// every request routed through this account presents the same device.
+// session_id is anchored to (account, clientToken, conversation-hash):
+// one downstream user holding a multi-turn conversation keeps one stable
+// session_id (same first user message → same session), and a brand-new
+// conversation rotates to a new session_id — exactly matching real CC,
+// where each `claude` invocation gets its own session_id.
+func ensureMetadataUserID(body []byte, id SimIdentity) []byte {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
 
-	// Don't overwrite a user-supplied metadata.user_id.
+	deviceID := DeviceIDFor(id.AccountKey)
+	sessionID := SessionIDFor(id, body)
+	uid := buildJSONUserID(deviceID, id.AccountUUID, sessionID)
+
+	// Don't overwrite a user-supplied metadata.user_id (some clients hand
+	// us their own — respect it).
 	if rawMD, ok := obj["metadata"]; ok && len(rawMD) > 0 {
 		var md map[string]json.RawMessage
 		if err := json.Unmarshal(rawMD, &md); err == nil {
-			if uid, ok := md["user_id"]; ok && len(uid) > 0 && string(uid) != "null" && string(uid) != `""` {
+			if existing, ok := md["user_id"]; ok && len(existing) > 0 && string(existing) != "null" && string(existing) != `""` {
 				return body
 			}
-			deviceID := deviceIDFor(authID)
-			sessionID := sessionUUIDFor(authID, body)
-			uid := buildJSONUserID(deviceID, "", sessionID)
 			md["user_id"], _ = json.Marshal(uid)
 			if nm, err := json.Marshal(md); err == nil {
 				obj["metadata"] = nm
@@ -481,21 +522,18 @@ func ensureMetadataUserID(body []byte, authID string) []byte {
 		}
 	}
 
-	deviceID := deviceIDFor(authID)
-	sessionID := sessionUUIDFor(authID, body)
-	uid := buildJSONUserID(deviceID, "", sessionID)
 	md, _ := json.Marshal(map[string]any{"user_id": uid})
 	obj["metadata"] = md
 	out, _ := json.Marshal(obj)
 	return out
 }
 
-// buildJSONUserID returns the JSON-form user_id used by CLI 2.1.78+:
+// buildJSONUserID returns the JSON-form user_id used by CC 2.1.78+:
 //
 //	{"device_id":"...", "account_uuid":"...", "session_id":"..."}
 //
-// account_uuid is allowed to be empty when we don't know it (we never do
-// — we don't talk to Anthropic's account API).
+// account_uuid is the empty string when not yet known (legacy credentials
+// saved before the OAuth response was captured).
 func buildJSONUserID(deviceID, accountUUID, sessionID string) string {
 	b, _ := json.Marshal(map[string]string{
 		"device_id":    deviceID,
@@ -505,22 +543,35 @@ func buildJSONUserID(deviceID, accountUUID, sessionID string) string {
 	return string(b)
 }
 
-// deviceIDFor maps an authID to a stable 64-char hex device id, so the
-// same credential always shows the same device_id to upstream.
-func deviceIDFor(authID string) string {
-	sum := sha256.Sum256([]byte("cpa-claude-device/" + authID))
+// DeviceIDFor maps an account anchor (account_uuid > email > id) to a
+// stable 64-char hex device id. Same account → same device_id forever,
+// matching the machine-id sha256 the real CC writes. Exported so the
+// proxy header layer can compute the same value to keep
+// X-Claude-Code-Session-Id consistent with metadata.user_id.session_id.
+func DeviceIDFor(accountKey string) string {
+	sum := sha256.Sum256([]byte("cpa-claude-device/" + accountKey))
 	return hex.EncodeToString(sum[:])
 }
 
-// sessionUUIDFor derives a deterministic UUIDv4-shaped session id from
-// (authID, body-hash). Re-running the exact same body keeps the same
-// session — multi-turn conversations naturally rotate as the body grows.
-func sessionUUIDFor(authID string, body []byte) string {
+// SessionIDFor derives a UUIDv4-shaped session id keyed by:
+//   - account (so different accounts never share session ids)
+//   - downstream client token (so concurrent users on the same account
+//     present as separate windows of one CC instance)
+//   - first user message hash (so multi-turn conversations keep one
+//     session, but switching topics rotates to a new one)
+//
+// Stable across repeated requests of the same conversation — the real
+// CLI keeps the value steady for the entire `claude` invocation.
+func SessionIDFor(id SimIdentity, body []byte) string {
+	first := extractFirstUserText(body)
+	convHash := sha256.Sum256([]byte(first))
 	h := sha256.New()
 	h.Write([]byte("cpa-claude-session/"))
-	h.Write([]byte(authID))
+	h.Write([]byte(id.AccountKey))
 	h.Write([]byte("|"))
-	h.Write(body)
+	h.Write([]byte(id.ClientToken))
+	h.Write([]byte("|"))
+	h.Write(convHash[:])
 	sum := h.Sum(nil)
 	return uuidFromBytes(sum[:16])
 }
