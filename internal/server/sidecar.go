@@ -261,6 +261,12 @@ type bootstrapStep struct {
 	bodyBuilder    func(a *auth.Auth, sessionID string) ([]byte, error)
 	// extraHeaders sets endpoint-specific headers (e.g. x-service-name).
 	extraHeaders map[string]string
+	// responseHandler, when non-nil, is called with the (possibly
+	// decompressed) response body after a successful (<400) response.
+	// Used to harvest values from bootstrap responses — e.g.
+	// /api/claude_cli/bootstrap exposes the real subscription tier so
+	// future GrowthBook calls can stop hardcoding "max".
+	responseHandler func(a *auth.Auth, body []byte)
 }
 
 // realBootstrapSteps returns the 9-step sequence fired at session start.
@@ -300,14 +306,15 @@ func realBootstrapSteps(baseURL string) []bootstrapStep {
 			connection:     "close",
 		},
 		{
-			name:           "claude_cli_bootstrap",
-			method:         "GET",
-			url:            baseURL + "/api/claude_cli/bootstrap",
-			delayFromStart: 1250 * time.Millisecond,
-			userAgent:      uaClaudeCode,
-			beta:           "oauth-2025-04-20",
-			contentType:    "application/json",
-			connection:     "close",
+			name:            "claude_cli_bootstrap",
+			method:          "GET",
+			url:             baseURL + "/api/claude_cli/bootstrap",
+			delayFromStart:  1250 * time.Millisecond,
+			userAgent:       uaClaudeCode,
+			beta:            "oauth-2025-04-20",
+			contentType:     "application/json",
+			connection:      "close",
+			responseHandler: handleBootstrapResponse,
 		},
 		{
 			name:           "claude_code_penguin_mode",
@@ -483,10 +490,22 @@ func (m *sidecarMgr) sendBootstrapStep(parent context.Context, a *auth.Auth, ses
 		return fmt.Errorf("transport: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if step.responseHandler == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("upstream %d", resp.StatusCode)
+		}
+		return nil
+	}
+	maybeDecompressResponse(resp)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("upstream %d", resp.StatusCode)
 	}
+	step.responseHandler(a, respBody)
 	return nil
 }
 
@@ -497,9 +516,14 @@ func (m *sidecarMgr) sendBootstrapStep(parent context.Context, a *auth.Auth, ses
 // buildGrowthBookBody mirrors the row-1 capture: an attributes object
 // listing all the per-account properties Anthropic uses to bucket
 // experiments. Most fields are stable per account; firstTokenTime is a
-// process-start-ish timestamp.
+// process-start-ish timestamp. subscriptionType / rateLimitTier come from
+// the cached /api/claude_cli/bootstrap response (see
+// handleBootstrapResponse) when available, falling back to "max" /
+// "default_claude_max_20x" only on the very first ever bootstrap pass
+// (or for credentials whose org tier we've never observed).
 func buildGrowthBookBody(a *auth.Auth, sessionID string) ([]byte, error) {
 	deviceID := DeviceIDFor(a.AccountKey())
+	subType, rateLimitTier := subscriptionAttrsFor(a)
 	body := map[string]any{
 		"attributes": map[string]any{
 			"id":               deviceID,
@@ -509,8 +533,8 @@ func buildGrowthBookBody(a *auth.Auth, sessionID string) ([]byte, error) {
 			"organizationUUID": a.OrganizationUUID,
 			"accountUUID":      a.AccountUUIDValue(),
 			"userType":         "external",
-			"subscriptionType": "max",
-			"rateLimitTier":    "default_claude_max_20x",
+			"subscriptionType": subType,
+			"rateLimitTier":    rateLimitTier,
 			"firstTokenTime":   time.Now().UnixMilli(),
 			"email":            strings.TrimSpace(a.Email),
 			"appVersion":       CLICurrentVersion,
@@ -521,6 +545,55 @@ func buildGrowthBookBody(a *auth.Auth, sessionID string) ([]byte, error) {
 		"url":              "",
 	}
 	return json.Marshal(body)
+}
+
+// subscriptionAttrsFor returns (subscriptionType, rateLimitTier) for the
+// GrowthBook attributes block. Uses values cached on the auth from a
+// previous /api/claude_cli/bootstrap when available; falls back to the
+// historical hardcoded "max" defaults otherwise. The mapping
+// `claude_max → max` matches what real CC sends in row 01 (organization
+// type is `claude_max` in the bootstrap response but `max` in the
+// GrowthBook attributes, so the prefix is stripped).
+func subscriptionAttrsFor(a *auth.Auth) (string, string) {
+	subType := "max"
+	rateLimitTier := "default_claude_max_20x"
+	if t := strings.TrimSpace(a.OrganizationType); t != "" {
+		subType = strings.TrimPrefix(t, "claude_")
+	}
+	if t := strings.TrimSpace(a.OrganizationRateLimitTier); t != "" {
+		rateLimitTier = t
+	}
+	return subType, rateLimitTier
+}
+
+// handleBootstrapResponse is the responseHandler for the
+// /api/claude_cli/bootstrap step. Parses oauth_account.organization_type
+// and organization_rate_limit_tier and persists them on the auth so the
+// next GrowthBook call can advertise authentic subscription attributes
+// instead of the previous hardcoded "max" defaults — a hardcoded value
+// that doesn't match the real subscription is itself a fingerprint signal.
+func handleBootstrapResponse(a *auth.Auth, body []byte) {
+	if len(body) == 0 {
+		return
+	}
+	var parsed struct {
+		OAuthAccount struct {
+			OrganizationType          string `json:"organization_type"`
+			OrganizationRateLimitTier string `json:"organization_rate_limit_tier"`
+		} `json:"oauth_account"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		log.Debugf("sidecar: bootstrap response parse failed for %s: %v", a.ID, err)
+		return
+	}
+	orgType := parsed.OAuthAccount.OrganizationType
+	rateLimitTier := parsed.OAuthAccount.OrganizationRateLimitTier
+	if orgType == "" && rateLimitTier == "" {
+		return
+	}
+	if err := a.UpdateSubscriptionInfo(orgType, rateLimitTier); err != nil {
+		log.Debugf("sidecar: persist subscription info for %s failed: %v", a.ID, err)
+	}
 }
 
 // buildQuotaProbeBody returns the byte-for-byte shape of row 6:
@@ -948,6 +1021,7 @@ func userBucketFor(accountKey string) int {
 // is a comma-joined string of indexed dimensions.
 func buildDatadogHeartbeatBody(a *auth.Auth, sessionID string) ([]byte, error) {
 	bucket := userBucketFor(a.AccountKey())
+	subType, _ := subscriptionAttrsFor(a)
 	tags := []string{
 		"event:tengu_dir_search",
 		"arch:" + claudeStainlessArch,
@@ -955,7 +1029,7 @@ func buildDatadogHeartbeatBody(a *auth.Auth, sessionID string) ([]byte, error) {
 		"entrypoint:cli",
 		"model:claude-opus-4-7",
 		"platform:linux",
-		"subscription_type:max",
+		"subscription_type:" + subType,
 		fmt.Sprintf("user_bucket:%d", bucket),
 		"user_type:external",
 		"version:" + CLICurrentVersion,
@@ -992,7 +1066,7 @@ func buildDatadogHeartbeatBody(a *auth.Auth, sessionID string) ([]byte, error) {
 		"swe_bench_run_id":       "",
 		"swe_bench_instance_id":  "",
 		"swe_bench_task_id":      "",
-		"subscription_type":      "max",
+		"subscription_type":      subType,
 		"rh":                     randomHex16(),
 		"platform":               "linux",
 		"platform_raw":           "linux",
