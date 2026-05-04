@@ -391,23 +391,36 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 			// Request-level rejection (long context), not a credential
 			// problem — no cooldown.
 		case resp.StatusCode == 429:
-			// Three flavors of 429 from Anthropic, treated differently:
+			// Four flavors of 429 from Anthropic, treated differently. Check
+			// in this order — earlier checks are more specific signals:
 			//
-			//  1. Subscription usage limit ("Claude AI usage limit
-			//     reached|<unix-ts>"): the account is fine, just out
-			//     of 5h/weekly budget. Set a real cooldown to the
-			//     stamped reset time and DO NOT advance the
-			//     stealth-ban counter — that path is reserved for
-			//     suspicious 429s without any reset signal.
-			//  2. Stealth ban (no Retry-After, no anthropic-ratelimit-*
+			//  1. Authoritative ratelimit headers — `anthropic-ratelimit-
+			//     unified-status` (or `unified-5h-status` / `unified-7d-status`)
+			//     == "rejected" together with `anthropic-ratelimit-unified-reset`
+			//     (or per-bucket reset). This is the single most reliable quota
+			//     signal Anthropic ships, present on every modern API call,
+			//     regardless of body wording. Cool down until the stamped reset
+			//     time so IsHealthy stays false until the credential genuinely
+			//     recovers.
+			//  2. Subscription usage limit ("Claude AI usage limit
+			//     reached|<unix-ts>") — older / human-readable variant of (1).
+			//     Honour the body timestamp.
+			//  3. Stealth ban (no Retry-After, no anthropic-ratelimit-*
 			//     headers, body is the generic rate_limit_error blurb):
 			//     Anthropic occasionally serves bans this way. Hard-
 			//     fail immediately so the credential stops cycling
 			//     back into rotation every 30 seconds.
-			//  3. Ordinary RPM/TPM rate limit: short cooldown +
+			//  4. Ordinary RPM/TPM rate limit: short cooldown +
 			//     MarkRateLimited counter (15-strike escalation still
 			//     applies as a backstop).
-			if resetAt, ok := parseClaudeUsageLimitBody(errBody); ok {
+			//
+			// Only (1) and (2) advance MarkUsageLimitReached (which deliberately
+			// does NOT touch the consecutive-429 counter — those are real quota
+			// signals, not stealth-ban candidates).
+			if resetAt, ok := parseUnifiedRatelimitRejected(resp.Header); ok {
+				a.MarkUsageLimitReached(resetAt)
+				log.Warnf("auth: %s usage limit (unified-ratelimit rejected) — cooldown until %s", a.ID, resetAt.Format(time.RFC3339))
+			} else if resetAt, ok := parseClaudeUsageLimitBody(errBody); ok {
 				a.MarkUsageLimitReached(resetAt)
 				log.Warnf("auth: %s subscription usage limit — cooldown until %s", a.ID, resetAt.Format(time.RFC3339))
 			} else if is429StealthBan(resp.Header, errBody) {
@@ -959,6 +972,94 @@ func parseRetryAfter(h http.Header) time.Time {
 		return t
 	}
 	return time.Time{}
+}
+
+// parseUnifiedRatelimitRejected reports whether Anthropic's
+// `anthropic-ratelimit-unified-*` headers signal that this credential is out
+// of quota right now. When yes, the returned time is when to try again
+// (parsed from `*-reset`, expressed as Unix seconds; falls back 1h ahead if
+// missing/unparseable).
+//
+// Real responses carry a snapshot like:
+//
+//	anthropic-ratelimit-unified-status: rejected           ← top-level decision
+//	anthropic-ratelimit-unified-5h-status: rejected        ← per-bucket states
+//	anthropic-ratelimit-unified-7d-status: allowed
+//	anthropic-ratelimit-unified-5h-reset: 1777824000       ← per-bucket reset
+//	anthropic-ratelimit-unified-7d-reset: 1778018400
+//	anthropic-ratelimit-unified-reset: 1777824000          ← top-level reset
+//	anthropic-ratelimit-unified-representative-claim: five_hour
+//
+// We treat ANY of `unified-status / unified-5h-status / unified-7d-status`
+// being "rejected" (or a prefix thereof, e.g. "rejected_*") as a quota signal.
+// For the reset time we prefer top-level `unified-reset`, else the latest of
+// the rejected per-bucket resets — that way a 7d rejection isn't released by
+// the (sooner) 5h reset.
+func parseUnifiedRatelimitRejected(h http.Header) (time.Time, bool) {
+	const statusPrefix = "rejected"
+	isRejected := func(headerName string) bool {
+		v := strings.ToLower(strings.TrimSpace(h.Get(headerName)))
+		return v != "" && strings.HasPrefix(v, statusPrefix)
+	}
+
+	bucketStatuses := []struct{ statusHdr, resetHdr string }{
+		{"Anthropic-Ratelimit-Unified-5h-Status", "Anthropic-Ratelimit-Unified-5h-Reset"},
+		{"Anthropic-Ratelimit-Unified-7d-Status", "Anthropic-Ratelimit-Unified-7d-Reset"},
+	}
+	rejected := isRejected("Anthropic-Ratelimit-Unified-Status")
+	var bucketReset time.Time
+	for _, b := range bucketStatuses {
+		if !isRejected(b.statusHdr) {
+			continue
+		}
+		rejected = true
+		if t, ok := parseUnixSecondsHeader(h.Get(b.resetHdr)); ok && t.After(bucketReset) {
+			bucketReset = t
+		}
+	}
+	if !rejected {
+		return time.Time{}, false
+	}
+	if t, ok := parseUnixSecondsHeader(h.Get("Anthropic-Ratelimit-Unified-Reset")); ok {
+		return clampReset(t), true
+	}
+	if !bucketReset.IsZero() {
+		return clampReset(bucketReset), true
+	}
+	// Status says rejected but no usable reset — degrade to a 1h cooldown so
+	// the credential is not parked indefinitely on a malformed payload.
+	return time.Now().Add(1 * time.Hour), true
+}
+
+// parseUnixSecondsHeader parses an `epoch-seconds` integer header value into
+// a time.Time. Tolerates whitespace; returns ok=false on empty / non-integer.
+func parseUnixSecondsHeader(v string) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, false
+	}
+	secs, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(secs, 0), true
+}
+
+// clampReset coerces a parsed reset timestamp into a sane future window: at
+// least 1 minute ahead (so a stale stamp doesn't auto-clear immediately via
+// clearExpiredQuotaLocked), at most 30 days ahead (defensive cap against a
+// malformed far-future value).
+func clampReset(t time.Time) time.Time {
+	now := time.Now()
+	min := now.Add(1 * time.Minute)
+	max := now.Add(30 * 24 * time.Hour)
+	if t.Before(min) {
+		return min
+	}
+	if t.After(max) {
+		return max
+	}
+	return t
 }
 
 // parseClaudeUsageLimitBody extracts the reset timestamp from a Claude

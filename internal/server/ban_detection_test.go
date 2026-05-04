@@ -116,6 +116,125 @@ func TestIs429StealthBan(t *testing.T) {
 	}
 }
 
+func TestParseUnifiedRatelimitRejected(t *testing.T) {
+	now := time.Now()
+	in1h := now.Add(1 * time.Hour).Truncate(time.Second).Unix()
+	in3h := now.Add(3 * time.Hour).Truncate(time.Second).Unix()
+	in7d := now.Add(7 * 24 * time.Hour).Truncate(time.Second).Unix()
+	stale := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	tests := []struct {
+		name     string
+		headers  http.Header
+		wantOK   bool
+		wantNear time.Duration // |returned - expected| <= 5s
+		expected time.Time
+	}{
+		{
+			name: "all allowed → not rejected",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":    []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-5h-Status": []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d-Status": []string{"allowed"},
+			},
+			wantOK: false,
+		},
+		{
+			name: "top-level rejected with unified-reset → use unified-reset",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status": []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Reset":  []string{itoa(in3h)},
+			},
+			wantOK:   true,
+			wantNear: 5 * time.Second,
+			expected: time.Unix(in3h, 0),
+		},
+		{
+			name: "rejected_5h variant prefix matches",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status": []string{"rejected_5h"},
+				"Anthropic-Ratelimit-Unified-Reset":  []string{itoa(in1h)},
+			},
+			wantOK:   true,
+			wantNear: 5 * time.Second,
+			expected: time.Unix(in1h, 0),
+		},
+		{
+			name: "5h bucket rejected, no top-level → use 5h-reset",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-5h-Status": []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Reset":  []string{itoa(in1h)},
+				"Anthropic-Ratelimit-Unified-7d-Status": []string{"allowed"},
+			},
+			wantOK:   true,
+			wantNear: 5 * time.Second,
+			expected: time.Unix(in1h, 0),
+		},
+		{
+			name: "both buckets rejected → take later reset (7d)",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-5h-Status": []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Reset":  []string{itoa(in1h)},
+				"Anthropic-Ratelimit-Unified-7d-Status": []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-7d-Reset":  []string{itoa(in7d)},
+			},
+			wantOK:   true,
+			wantNear: 5 * time.Second,
+			expected: time.Unix(in7d, 0),
+		},
+		{
+			name: "top-level wins over bucket reset",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":    []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Reset":     []string{itoa(in1h)},
+				"Anthropic-Ratelimit-Unified-5h-Status": []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Reset":  []string{itoa(in7d)},
+			},
+			wantOK:   true,
+			wantNear: 5 * time.Second,
+			expected: time.Unix(in1h, 0),
+		},
+		{
+			name: "rejected with stale reset stamp → clamp to >=1m future",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status": []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Reset":  []string{itoa(stale)},
+			},
+			wantOK: true,
+			// expected = now + 1m exactly
+			wantNear: 5 * time.Second,
+			expected: now.Add(1 * time.Minute),
+		},
+		{
+			name: "rejected with no reset header → 1h fallback",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status": []string{"rejected"},
+			},
+			wantOK:   true,
+			wantNear: 5 * time.Second,
+			expected: now.Add(1 * time.Hour),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseUnifiedRatelimitRejected(tc.headers)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			delta := got.Sub(tc.expected)
+			if delta < 0 {
+				delta = -delta
+			}
+			if delta > tc.wantNear {
+				t.Fatalf("got %v, want within %v of %v (delta %v)", got, tc.wantNear, tc.expected, delta)
+			}
+		})
+	}
+}
+
 // itoa avoids pulling strconv into the test just for one cheap conversion.
 func itoa(n int64) string {
 	if n == 0 {
