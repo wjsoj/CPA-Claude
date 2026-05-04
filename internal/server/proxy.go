@@ -417,19 +417,21 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 			// Only (1) and (2) advance MarkUsageLimitReached (which deliberately
 			// does NOT touch the consecutive-429 counter — those are real quota
 			// signals, not stealth-ban candidates).
-			if resetAt, banned, ok := parseUnifiedRatelimitRejected(resp.Header); ok && banned {
-				a.MarkHardFailure("account banned (unified-ratelimit rejected, no future reset)")
-				log.Warnf("auth: %s hard-disabled — unified-ratelimit rejected with no recovery time (suspected ban)", a.ID)
-			} else if ok {
+			if resetAt, banned, ok := parseUnifiedRatelimitRejected(resp.Header); ok && !banned {
 				a.MarkUsageLimitReached(resetAt)
 				log.Warnf("auth: %s usage limit (unified-ratelimit rejected) — cooldown until %s", a.ID, resetAt.Format(time.RFC3339))
 			} else if resetAt, ok := parseClaudeUsageLimitBody(errBody); ok {
 				a.MarkUsageLimitReached(resetAt)
 				log.Warnf("auth: %s subscription usage limit — cooldown until %s", a.ID, resetAt.Format(time.RFC3339))
-			} else if is429StealthBan(resp.Header, errBody) {
-				a.MarkHardFailure("account banned (stealth 429: no reset signal)")
-				log.Warnf("auth: %s hard-disabled — stealth-ban 429 (no Retry-After / ratelimit headers / known reset body)", a.ID)
 			} else {
+				// "No reset signal" 429s — either unified-ratelimit
+				// rejected with every reset stamp past/missing, or no
+				// ratelimit headers at all. We don't know if the account
+				// is banned or just genuinely rate-limited with a buggy
+				// upstream payload, so defer the hard-fail decision to
+				// the 15-strike accumulator inside MarkRateLimited
+				// (rateLimit429HardFailureThreshold). One bad reply
+				// shouldn't be enough to take a credential offline.
 				resetAt := parseRetryAfter(resp.Header)
 				s.pool.ReportUpstreamError(a, resp.StatusCode, resetAt)
 			}
@@ -1125,31 +1127,6 @@ func parseClaudeUsageLimitBody(b []byte) (time.Time, bool) {
 		return time.Now().Add(1 * time.Hour), true
 	}
 	return t, true
-}
-
-// is429StealthBan reports whether a 429 response is missing every signal a
-// genuine rate-limit response would carry. Anthropic occasionally serves
-// account bans as endless 429s rather than a clean 401/403; those replies
-// have no Retry-After, no anthropic-ratelimit-* headers, and no
-// "Claude AI usage limit reached|..." marker in the body — only a generic
-// rate_limit_error blurb. When all three signals are absent we presume the
-// credential is dead and hard-fail it immediately, bypassing the 15-strike
-// counter.
-//
-// Caller has already ruled out the "Extra usage is required" body (which
-// is a request-level rejection, not a credential signal) and the explicit
-// usage-limit body via parseClaudeUsageLimitBody.
-func is429StealthBan(h http.Header, body []byte) bool {
-	if strings.TrimSpace(h.Get("Retry-After")) != "" {
-		return false
-	}
-	for k := range h {
-		lk := strings.ToLower(k)
-		if strings.HasPrefix(lk, "anthropic-ratelimit-") {
-			return false
-		}
-	}
-	return true
 }
 
 // isAccountBanBody reports whether the upstream error body looks like a

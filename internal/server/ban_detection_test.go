@@ -70,52 +70,6 @@ func TestParseClaudeUsageLimitBody(t *testing.T) {
 	}
 }
 
-func TestIs429StealthBan(t *testing.T) {
-	cases := []struct {
-		name    string
-		headers http.Header
-		body    []byte
-		want    bool
-	}{
-		{
-			name:    "no headers, generic body → stealth",
-			headers: http.Header{},
-			body:    []byte(`{"error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}`),
-			want:    true,
-		},
-		{
-			name:    "Retry-After present → not stealth",
-			headers: http.Header{"Retry-After": []string{"30"}},
-			body:    []byte(`{"error":{"message":"rate limited"}}`),
-			want:    false,
-		},
-		{
-			name: "anthropic-ratelimit-* present → not stealth",
-			headers: http.Header{
-				"Anthropic-Ratelimit-Requests-Remaining": []string{"0"},
-			},
-			body: []byte(`{"error":{"message":"rate limited"}}`),
-			want: false,
-		},
-		{
-			name: "ratelimit header lowercase key → not stealth (case-insensitive prefix match)",
-			headers: http.Header{
-				"anthropic-ratelimit-tokens-reset": []string{"2026-05-03T10:00:00Z"},
-			},
-			body: []byte(`{}`),
-			want: false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := is429StealthBan(tc.headers, tc.body)
-			if got != tc.want {
-				t.Fatalf("got %v want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestParseUnifiedRatelimitRejected(t *testing.T) {
 	now := time.Now()
 	in1h := now.Add(1 * time.Hour).Truncate(time.Second).Unix()
