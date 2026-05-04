@@ -117,23 +117,27 @@ func parseFile(path string, data []byte) (*Auth, error) {
 
 	accountUUID, _ := raw["account_uuid"].(string)
 	orgUUID, _ := raw["organization_uuid"].(string)
+	orgType, _ := raw["organization_type"].(string)
+	orgRateLimitTier, _ := raw["organization_rate_limit_tier"].(string)
 
 	a := &Auth{
-		ID:               filepath.Base(path),
-		Kind:             KindOAuth,
-		Provider:         provider,
-		Label:            label,
-		Email:            email,
-		AccessToken:      access,
-		RefreshToken:     refresh,
-		ExpiresAt:        exp,
-		ProxyURL:         proxyURL,
-		MaxConcurrent:    maxConc,
-		FilePath:         path,
-		Disabled:         disabled,
-		Group:            NormalizeGroup(group),
-		AccountUUID:      accountUUID,
-		OrganizationUUID: orgUUID,
+		ID:                        filepath.Base(path),
+		Kind:                      KindOAuth,
+		Provider:                  provider,
+		Label:                     label,
+		Email:                     email,
+		AccessToken:               access,
+		RefreshToken:              refresh,
+		ExpiresAt:                 exp,
+		ProxyURL:                  proxyURL,
+		MaxConcurrent:             maxConc,
+		FilePath:                  path,
+		Disabled:                  disabled,
+		Group:                     NormalizeGroup(group),
+		AccountUUID:               accountUUID,
+		OrganizationUUID:          orgUUID,
+		OrganizationType:          orgType,
+		OrganizationRateLimitTier: orgRateLimitTier,
 	}
 	return a, nil
 }
@@ -396,6 +400,16 @@ func saveAuth(a *Auth) error {
 		} else {
 			delete(raw, "plan_type")
 		}
+		if a.OrganizationType != "" {
+			raw["organization_type"] = a.OrganizationType
+		} else {
+			delete(raw, "organization_type")
+		}
+		if a.OrganizationRateLimitTier != "" {
+			raw["organization_rate_limit_tier"] = a.OrganizationRateLimitTier
+		} else {
+			delete(raw, "organization_rate_limit_tier")
+		}
 	}
 	raw["disabled"] = a.Disabled
 	if a.ProxyURL != "" {
@@ -425,6 +439,30 @@ func saveAuth(a *Auth) error {
 
 // Persist writes the current admin-editable fields of the auth back to disk.
 func (a *Auth) Persist() error { return saveAuth(a) }
+
+// UpdateSubscriptionInfo records the subscription tier captured from a
+// /api/claude_cli/bootstrap response so future GrowthBook calls can
+// advertise the real per-account attributes instead of the hardcoded
+// "max" defaults. No-op (and no disk write) when both inputs are empty
+// or already match the cached values. Persists on change so the value
+// survives process restart and is available before the next bootstrap.
+func (a *Auth) UpdateSubscriptionInfo(orgType, rateLimitTier string) error {
+	a.mu.Lock()
+	changed := false
+	if orgType != "" && a.OrganizationType != orgType {
+		a.OrganizationType = orgType
+		changed = true
+	}
+	if rateLimitTier != "" && a.OrganizationRateLimitTier != rateLimitTier {
+		a.OrganizationRateLimitTier = rateLimitTier
+		changed = true
+	}
+	a.mu.Unlock()
+	if !changed {
+		return nil
+	}
+	return saveAuth(a)
+}
 
 // ParseFile is the exported variant of parseFile for admin upload handlers.
 func ParseFile(path string, data []byte) (*Auth, error) { return parseFile(path, data) }

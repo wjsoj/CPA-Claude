@@ -410,6 +410,76 @@ func TestStartupHeartbeatBatchShape(t *testing.T) {
 	}
 }
 
+// TestSubscriptionAttrsFor verifies the mapping from cached
+// organization_type / organization_rate_limit_tier to GrowthBook
+// attribute values. claude_<tier> → <tier> matches what real CC sends
+// in row 01 (organization_type=claude_max, subscriptionType=max).
+func TestSubscriptionAttrsFor(t *testing.T) {
+	cases := []struct {
+		name, orgType, rlTier  string
+		wantSubType, wantRLTier string
+	}{
+		{"empty → defaults", "", "", "max", "default_claude_max_20x"},
+		{"claude_max", "claude_max", "default_claude_max_20x", "max", "default_claude_max_20x"},
+		{"claude_pro", "claude_pro", "default_claude_pro_5x", "pro", "default_claude_pro_5x"},
+		{"claude_team", "claude_team", "default_claude_team", "team", "default_claude_team"},
+		{"non-prefixed value preserved", "enterprise", "custom_tier", "enterprise", "custom_tier"},
+		{"rate-limit only", "", "default_claude_max_20x", "max", "default_claude_max_20x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestAuth("auth-1", "alice@example.com")
+			a.OrganizationType = tc.orgType
+			a.OrganizationRateLimitTier = tc.rlTier
+			gotSub, gotRL := subscriptionAttrsFor(a)
+			if gotSub != tc.wantSubType {
+				t.Errorf("subscriptionType: got %q want %q", gotSub, tc.wantSubType)
+			}
+			if gotRL != tc.wantRLTier {
+				t.Errorf("rateLimitTier: got %q want %q", gotRL, tc.wantRLTier)
+			}
+		})
+	}
+}
+
+// TestHandleBootstrapResponse verifies parsing the captured row-04 shape
+// caches the right values onto the auth.
+func TestHandleBootstrapResponse(t *testing.T) {
+	a := newTestAuth("auth-1", "alice@example.com")
+	body := []byte(`{
+		"oauth_account": {
+			"account_uuid": "00000000-0000-0000-0000-000000000001",
+			"organization_type": "claude_pro",
+			"organization_rate_limit_tier": "default_claude_pro_5x"
+		}
+	}`)
+	handleBootstrapResponse(a, body)
+	if a.OrganizationType != "claude_pro" {
+		t.Errorf("OrganizationType = %q, want claude_pro", a.OrganizationType)
+	}
+	if a.OrganizationRateLimitTier != "default_claude_pro_5x" {
+		t.Errorf("OrganizationRateLimitTier = %q, want default_claude_pro_5x", a.OrganizationRateLimitTier)
+	}
+	// Subsequent GrowthBook call now uses real values.
+	subType, rlTier := subscriptionAttrsFor(a)
+	if subType != "pro" || rlTier != "default_claude_pro_5x" {
+		t.Errorf("after bootstrap: subType=%q rlTier=%q", subType, rlTier)
+	}
+}
+
+// TestHandleBootstrapResponseEmpty asserts a payload with no usable
+// fields leaves the cached values untouched (no spurious overwrite to
+// empty strings).
+func TestHandleBootstrapResponseEmpty(t *testing.T) {
+	a := newTestAuth("auth-1", "alice@example.com")
+	a.OrganizationType = "claude_max"
+	a.OrganizationRateLimitTier = "default_claude_max_20x"
+	handleBootstrapResponse(a, []byte(`{"oauth_account":{}}`))
+	if a.OrganizationType != "claude_max" {
+		t.Errorf("OrganizationType clobbered: %q", a.OrganizationType)
+	}
+}
+
 func waitForCallCount(r *recorder, want int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

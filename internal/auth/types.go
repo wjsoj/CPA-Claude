@@ -69,6 +69,19 @@ type Auth struct {
 	AccountUUID      string
 	OrganizationUUID string
 
+	// Subscription / rate-limit tier captured from the
+	// /api/claude_cli/bootstrap response (oauth_account.organization_type
+	// and organization_rate_limit_tier). Used by the GrowthBook sidecar
+	// (buildGrowthBookBody) to send authentic per-account experiment
+	// attributes instead of the previous hardcoded "max" defaults — a
+	// hardcoded value that didn't match the real subscription is itself
+	// a fingerprint signal. Empty when not yet captured (the very first
+	// bootstrap pass falls back to "max" / "default_claude_max_20x");
+	// persisted to the credential file once known so subsequent process
+	// starts have it without waiting for another bootstrap.
+	OrganizationType          string // e.g. "claude_max", "claude_pro", "claude_team"
+	OrganizationRateLimitTier string // e.g. "default_claude_max_20x"
+
 	// Routing
 	ProxyURL      string // per-credential upstream proxy (empty = direct/use default)
 	BaseURL       string // per-credential upstream base URL override (API-key only; empty = config.AnthropicBaseURL)
