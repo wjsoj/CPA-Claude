@@ -417,7 +417,10 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 			// Only (1) and (2) advance MarkUsageLimitReached (which deliberately
 			// does NOT touch the consecutive-429 counter — those are real quota
 			// signals, not stealth-ban candidates).
-			if resetAt, ok := parseUnifiedRatelimitRejected(resp.Header); ok {
+			if resetAt, banned, ok := parseUnifiedRatelimitRejected(resp.Header); ok && banned {
+				a.MarkHardFailure("account banned (unified-ratelimit rejected, no future reset)")
+				log.Warnf("auth: %s hard-disabled — unified-ratelimit rejected with no recovery time (suspected ban)", a.ID)
+			} else if ok {
 				a.MarkUsageLimitReached(resetAt)
 				log.Warnf("auth: %s usage limit (unified-ratelimit rejected) — cooldown until %s", a.ID, resetAt.Format(time.RFC3339))
 			} else if resetAt, ok := parseClaudeUsageLimitBody(errBody); ok {
@@ -995,7 +998,18 @@ func parseRetryAfter(h http.Header) time.Time {
 // For the reset time we prefer top-level `unified-reset`, else the latest of
 // the rejected per-bucket resets — that way a 7d rejection isn't released by
 // the (sooner) 5h reset.
-func parseUnifiedRatelimitRejected(h http.Header) (time.Time, bool) {
+//
+// Returns:
+//   - ok=false: not rejected.
+//   - ok=true, banned=true: rejected but no usable FUTURE reset stamp
+//     (every parseable stamp is in the past, or there is no stamp at all).
+//     This shape — "you're rejected, recovery time = unknown / already past"
+//     — is the stealth-ban signature: a banned account stays "rejected"
+//     forever, so admin-panel users see "Quota exceeded → resets in now"
+//     looping. Caller must hard-fail the credential.
+//   - ok=true, banned=false: rejected with a real future reset stamp →
+//     normal quota cooldown until that time.
+func parseUnifiedRatelimitRejected(h http.Header) (resetAt time.Time, banned bool, ok bool) {
 	const statusPrefix = "rejected"
 	isRejected := func(headerName string) bool {
 		v := strings.ToLower(strings.TrimSpace(h.Get(headerName)))
@@ -1013,22 +1027,24 @@ func parseUnifiedRatelimitRejected(h http.Header) (time.Time, bool) {
 			continue
 		}
 		rejected = true
-		if t, ok := parseUnixSecondsHeader(h.Get(b.resetHdr)); ok && t.After(bucketReset) {
+		if t, parsed := parseUnixSecondsHeader(h.Get(b.resetHdr)); parsed && t.After(bucketReset) {
 			bucketReset = t
 		}
 	}
 	if !rejected {
-		return time.Time{}, false
+		return time.Time{}, false, false
 	}
-	if t, ok := parseUnixSecondsHeader(h.Get("Anthropic-Ratelimit-Unified-Reset")); ok {
-		return clampReset(t), true
+	now := time.Now()
+	if t, parsed := parseUnixSecondsHeader(h.Get("Anthropic-Ratelimit-Unified-Reset")); parsed && t.After(now) {
+		return clampReset(t), false, true
 	}
-	if !bucketReset.IsZero() {
-		return clampReset(bucketReset), true
+	if !bucketReset.IsZero() && bucketReset.After(now) {
+		return clampReset(bucketReset), false, true
 	}
-	// Status says rejected but no usable reset — degrade to a 1h cooldown so
-	// the credential is not parked indefinitely on a malformed payload.
-	return time.Now().Add(1 * time.Hour), true
+	// Rejected with no future reset (every stamp is past, or missing entirely).
+	// This is what a banned subscription account looks like — Anthropic flags
+	// it "rejected" forever with no recovery time. Tell caller to hard-fail.
+	return time.Time{}, true, true
 }
 
 // parseUnixSecondsHeader parses an `epoch-seconds` integer header value into
@@ -1045,18 +1061,12 @@ func parseUnixSecondsHeader(v string) (time.Time, bool) {
 	return time.Unix(secs, 0), true
 }
 
-// clampReset coerces a parsed reset timestamp into a sane future window. A
-// stamp that's already in the past (clock skew, stale bucket value, upstream
-// races the actual reset by a few seconds) is NOT trusted — we fall back to
-// a 1h cooldown so the credential doesn't flicker back to healthy via
-// clearExpiredQuotaLocked seconds later. Far-future stamps are capped at
-// 30 days as a defense against malformed payloads.
+// clampReset caps a parsed future reset stamp at 30 days as a defense
+// against malformed payloads. Caller is responsible for ensuring t is
+// already in the future (past stamps are a separate signal — see
+// parseUnifiedRatelimitRejected).
 func clampReset(t time.Time) time.Time {
-	now := time.Now()
-	max := now.Add(30 * 24 * time.Hour)
-	if !t.After(now) {
-		return now.Add(1 * time.Hour)
-	}
+	max := time.Now().Add(30 * 24 * time.Hour)
 	if t.After(max) {
 		return max
 	}
