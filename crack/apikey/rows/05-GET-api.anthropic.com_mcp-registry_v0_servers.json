@@ -32,7 +32,7 @@
     ],
     "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
     "x-robots-tag": "none",
-    "cf-ray": "9f6070eaa8c0f59a-LAX"
+    "cf-ray": "REDACTED-cf-ray"
   },
   "reqSize": 0,
   "resSize": 82743,

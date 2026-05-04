@@ -35,7 +35,7 @@ _无_
 | content-type | application/json |
 | transfer-encoding | chunked |
 | connection | close |
-| request-id | req_011CafuUjXaRYceXN9PWRSop |
+| request-id | req_REDACTED |
 | strict-transport-security | max-age=31536000; includeSubDomains; preload |
 | anthropic-organization-id | 00000000-0000-0000-0000-000000000002 |
 | server | cloudflare |
@@ -47,7 +47,7 @@ _无_
 | set-cookie | _cfuvid=REDACTED; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com |
 | content-security-policy | default-src 'none'; frame-ancestors 'none' |
 | x-robots-tag | none |
-| cf-ray | 9f6070e8b8d1f7bf-LAX |
+| cf-ray | REDACTED-cf-ray |
 
 ## 响应体
 

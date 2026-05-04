@@ -44,7 +44,7 @@ POST https://api.anthropic.com/api/event_logging/v2/batch
 | content-type | application/json |
 | transfer-encoding | chunked |
 | connection | close |
-| request-id | req_011CafsbZfDPmPrECTVfmH9S |
+| request-id | req_REDACTED |
 | strict-transport-security | max-age=31536000; includeSubDomains; preload |
 | server | cloudflare |
 | x-envoy-upstream-service-time | 14 |
@@ -55,7 +55,7 @@ POST https://api.anthropic.com/api/event_logging/v2/batch
 | x-robots-tag | none |
 | cf-cache-status | DYNAMIC |
 | content-security-policy | default-src 'none'; frame-ancestors 'none' |
-| cf-ray | 9f604cc01849e9dd-LAX |
+| cf-ray | REDACTED-cf-ray |
 
 ## 响应体
 

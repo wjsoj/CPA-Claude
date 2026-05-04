@@ -26,7 +26,7 @@ POST https://http-intake.logs.us5.datadoghq.com/api/v2/logs
 ## 请求体
 
 - **Content-Type**：`application/json`
-- **Content-Length**：`5973` B（解码后实际 `5979` B）
+- **Content-Length**：`5973` B（解码后实际 `5973` B）
 - **格式**：JSON (array[3])
 
 ### 顶层字段
@@ -74,7 +74,7 @@ _数组共 3 项，每项结构相同。展示第 0 项字段：_
 | build_time | string | "2026-04-30T16:01:00Z" |
 | deployment_environment | string | "unknown-linux" |
 | linux_kernel | string | "6.10.0-generic" |
-| linux_distro_id | string | "generic" |
+| linux_distro_id | string | "arch" |
 | vcs | string | "git" |
 | last_session_cost | float | 29.451797250000006 |
 | last_session_api_duration | int | 3996513 |

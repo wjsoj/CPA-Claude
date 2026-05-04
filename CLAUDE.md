@@ -87,7 +87,14 @@ OpenAI-format requests on the Codex endpoint. **API-key credentials** forward to
 
 ### Capture archive — `crack/`
 
-Contains a complete recorded session of real Claude Code 2.1.126 traffic, used as ground truth for every fingerprint constant in the codebase. `crack/oauth/rows/` and `crack/apikey/rows/` hold per-request decoded JSON; `crack/oauth/docs/` and `crack/apikey/docs/` are per-request markdown write-ups; `crack/COMPARE.md` is the OAuth-vs-APIkey diff. **When bumping the CC version target, re-capture and update `crack/` first**, then update fingerprint constants to match.
+Contains complete recorded sessions of real Claude Code 2.1.126 traffic, used as ground truth for every fingerprint constant in the codebase.
+
+- `crack/raw/<mode>-session-full.json` and `crack/login/raw/login-session-full.json` — original Whistle dumps.
+- `crack/oauth/`, `crack/apikey/`, `crack/login/` — three parallel modes; each has `rows/` (per-request decoded JSON) and `docs/` (per-request markdown write-ups). `crack/login/` covers the OAuth PKCE login flow specifically (12 requests).
+- `crack/COMPARE.md` — OAuth-vs-APIkey diff. `crack/login/README.md` — PKCE flow + CPA alignment table.
+- `crack/scripts/{split,sanitize,gen}.py` — all helper scripts live here, separate from data. `split.py <mode>` decodes raw dumps into per-row JSON, `sanitize.py` does idempotent in-place redaction across the whole tree, `gen.py <mode>` re-renders markdown docs from rows. See `crack/scripts/README.md`.
+
+**When bumping the CC version target, re-capture and update `crack/` first**, then update fingerprint constants to match. Pipeline: `split.py → sanitize.py → gen.py → sanitize.py` (the trailing sanitize is critical — `gen.py` may reproduce raw values from rows into docs).
 
 ## Conventions worth knowing
 

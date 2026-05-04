@@ -27,7 +27,7 @@ POST https://api.anthropic.com/api/eval/sdk-zAZezfDKGoZuXXKe
 ## 请求体
 
 - **Content-Type**：`application/json`
-- **Content-Length**：`593` B（解码后实际 `590` B）
+- **Content-Length**：`593` B（解码后实际 `593` B）
 - **格式**：JSON (object)
 
 ### 顶层字段

@@ -22,7 +22,7 @@
     "content-type": "application/json",
     "transfer-encoding": "chunked",
     "connection": "close",
-    "request-id": "req_011CafsahR1bUtkvUMRNoHRL",
+    "request-id": "req_REDACTED",
     "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
     "server": "cloudflare",
     "x-envoy-upstream-service-time": "47",
@@ -35,7 +35,7 @@
     "x-robots-tag": "none",
     "cf-cache-status": "DYNAMIC",
     "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
-    "cf-ray": "9f604c77083dde8b-LAX"
+    "cf-ray": "REDACTED-cf-ray"
   },
   "reqSize": 16999,
   "resSize": 56,

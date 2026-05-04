@@ -28,7 +28,7 @@ POST https://api.anthropic.com/api/event_logging/v2/batch
 ## 请求体
 
 - **Content-Type**：`application/json`
-- **Content-Length**：`13215` B（解码后实际 `13225` B）
+- **Content-Length**：`13215` B（解码后实际 `13215` B）
 - **格式**：JSON (object)
 
 ### 顶层字段
