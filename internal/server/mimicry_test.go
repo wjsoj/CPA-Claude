@@ -234,52 +234,38 @@ func TestAlreadyClaudeCode(t *testing.T) {
 	}
 }
 
-// TestCCStructuralFieldsInjected confirms that thinking, output_config,
-// and context_management get filled in with CC-canonical defaults when
-// the downstream client didn't send them — closing a fingerprint gap
-// since real CC always carries these on non-Haiku /v1/messages.
-func TestCCStructuralFieldsInjected(t *testing.T) {
+// TestNoBetaGatedFieldInjection confirms we do NOT synthesize beta-gated
+// body fields (thinking / output_config / context_management) when the
+// downstream client didn't send them. Real CC carries these but each is
+// gated by a beta header that only some clients negotiate; injecting
+// blindly would 400 the request whenever the client's anthropic-beta
+// list lacks the matching marker, which is both worse for the user AND
+// a stronger fingerprint than omitting them.
+func TestNoBetaGatedFieldInjection(t *testing.T) {
 	in := `{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`
 	out := applyClaudeCodeBodyMimicry([]byte(in), "claude-sonnet-4-5", testID())
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("invalid output JSON: %v", err)
 	}
-	for _, f := range []struct{ key, want string }{
-		{"thinking", `{"type":"adaptive"}`},
-		{"output_config", `{"effort":"medium"}`},
-		{"context_management", `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`},
-	} {
-		got, ok := parsed[f.key]
-		if !ok {
-			t.Errorf("%s missing from output", f.key)
-			continue
-		}
-		if string(got) != f.want {
-			t.Errorf("%s = %s, want %s", f.key, got, f.want)
+	for _, key := range []string{"thinking", "output_config", "context_management"} {
+		if _, ok := parsed[key]; ok {
+			t.Errorf("%s was synthesized but client didn't send it — this should be omitted to avoid breaking non-CC clients on beta-gated fields", key)
 		}
 	}
 }
 
-// TestCCStructuralFieldsRespectClient confirms that client-supplied values
-// for the structural fields are NOT overwritten — preserving downstream
-// client intent (e.g. thinking budget, custom output effort).
-func TestCCStructuralFieldsRespectClient(t *testing.T) {
-	in := `{"model":"claude-sonnet-4-5","thinking":{"type":"enabled","budget_tokens":16000},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hi"}]}`
+// TestClientBetaGatedFieldsPassThrough confirms client-supplied values for
+// beta-gated fields are preserved verbatim — we don't strip them either.
+func TestClientBetaGatedFieldsPassThrough(t *testing.T) {
+	in := `{"model":"claude-sonnet-4-5","thinking":{"type":"enabled","budget_tokens":16000},"messages":[{"role":"user","content":"hi"}]}`
 	out := applyClaudeCodeBodyMimicry([]byte(in), "claude-sonnet-4-5", testID())
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("invalid output JSON: %v", err)
 	}
 	if string(parsed["thinking"]) != `{"type":"enabled","budget_tokens":16000}` {
-		t.Errorf("thinking was overwritten: %s", parsed["thinking"])
-	}
-	if string(parsed["output_config"]) != `{"effort":"high"}` {
-		t.Errorf("output_config was overwritten: %s", parsed["output_config"])
-	}
-	// context_management was missing → should be injected.
-	if _, ok := parsed["context_management"]; !ok {
-		t.Errorf("context_management should have been injected when missing")
+		t.Errorf("thinking was modified: %s", parsed["thinking"])
 	}
 }
 
