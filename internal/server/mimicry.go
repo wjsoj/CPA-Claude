@@ -106,9 +106,58 @@ func applyClaudeCodeBodyMimicry(body []byte, model string, id SimIdentity) []byt
 	// Step 3: metadata.user_id (JSON shape, CC 2.1.78+).
 	out = ensureMetadataUserID(out, id)
 
-	// Step 4: replace cch=00000 placeholder with xxhash64 of the final body.
+	// Step 4: inject CC-canonical structural fields (thinking,
+	// output_config, context_management) when the downstream client
+	// didn't send them. Real CC 2.1.126 always carries these on every
+	// non-Haiku /v1/messages — their absence is a single-shot fingerprint
+	// of a non-CC client. Existing client-supplied values are preserved.
+	out = ensureCCStructuralFields(out)
+
+	// Step 5: replace cch=00000 placeholder with xxhash64 of the final body.
 	// MUST be the last transformation — any later edit invalidates the hash.
 	out = signBillingHeaderCCH(out)
+	return out
+}
+
+// ensureCCStructuralFields adds the three top-level fields real CC always
+// includes on non-Haiku business requests, but only when the client didn't
+// already set them. Values come straight from crack/oauth/rows/17,18,20,22,26
+// (stable across all captured business turns).
+//
+// Defaults:
+//   - thinking            → {"type":"adaptive"}
+//   - output_config       → {"effort":"medium"}
+//   - context_management  → {"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}
+//
+// Note: `diagnostics.previous_message_id` is also always present in real CC
+// requests but its value is the previous SSE response's message id — without
+// per-session response-id tracking we can't synthesize a valid one, and a
+// fake id is riskier than omitting the field. Tracked as future work.
+func ensureCCStructuralFields(body []byte) []byte {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	changed := false
+	if _, ok := obj["thinking"]; !ok {
+		obj["thinking"] = json.RawMessage(`{"type":"adaptive"}`)
+		changed = true
+	}
+	if _, ok := obj["output_config"]; !ok {
+		obj["output_config"] = json.RawMessage(`{"effort":"medium"}`)
+		changed = true
+	}
+	if _, ok := obj["context_management"]; !ok {
+		obj["context_management"] = json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`)
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
 	return out
 }
 
