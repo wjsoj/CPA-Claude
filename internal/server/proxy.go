@@ -1166,6 +1166,12 @@ func isAccountBanBody(b []byte) bool {
 		[]byte("account has been disabled"),
 		[]byte("account is disabled"),
 		[]byte("organization is disabled"),
+		// Org-level OAuth revocation. Anthropic returns a 403
+		// permission_error with this exact wording when the
+		// subscription account has been blocked from using OAuth
+		// (typically a stealth/soft ban). Recovery requires manual
+		// intervention, not a cooldown — treat as terminal.
+		[]byte("oauth authentication is currently not allowed"),
 	}
 	for _, m := range markers {
 		if bytes.Contains(lower, m) {
