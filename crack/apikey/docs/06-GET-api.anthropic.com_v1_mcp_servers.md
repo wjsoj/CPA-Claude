@@ -36,7 +36,7 @@ _无_
 | content-type | application/json |
 | content-length | 28 |
 | connection | close |
-| request-id | req_011CafuUmAoaJPmrB8kQ7UQP |
+| request-id | req_REDACTED |
 | strict-transport-security | max-age=31536000; includeSubDomains; preload |
 | server | cloudflare |
 | x-envoy-upstream-service-time | 382 |
@@ -45,7 +45,7 @@ _无_
 | x-robots-tag | none |
 | cf-cache-status | DYNAMIC |
 | content-security-policy | default-src 'none'; frame-ancestors 'none' |
-| cf-ray | 9f6070eaac9bd7ac-LAX |
+| cf-ray | REDACTED-cf-ray |
 
 ## 响应体
 

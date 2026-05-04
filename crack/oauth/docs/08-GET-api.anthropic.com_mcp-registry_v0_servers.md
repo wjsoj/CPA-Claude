@@ -45,7 +45,7 @@ _无_
 | x-robots-tag | none |
 | cf-cache-status | DYNAMIC |
 | content-security-policy | default-src 'none'; frame-ancestors 'none' |
-| cf-ray | 9f604af6abbbd183-LAX |
+| cf-ray | REDACTED-cf-ray |
 
 ## 响应体
 

@@ -45,7 +45,7 @@ _无_
 | set-cookie | _cfuvid=REDACTED; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com |
 | content-security-policy | default-src 'none'; frame-ancestors 'none' |
 | x-robots-tag | none |
-| cf-ray | 9f6070eaa8c0f59a-LAX |
+| cf-ray | REDACTED-cf-ray |
 
 ## 响应体
 

@@ -79,7 +79,7 @@ POST https://api.anthropic.com/v1/messages?beta=true
 | anthropic-ratelimit-unified-reset | 1777824000 |
 | anthropic-ratelimit-unified-overage-disabled-reason | org_level_disabled |
 | anthropic-ratelimit-unified-overage-status | rejected |
-| request-id | req_011CafsaqXRb8V7dHFJTwQGi |
+| request-id | req_REDACTED |
 | strict-transport-security | max-age=31536000; includeSubDomains; preload |
 | anthropic-organization-id | 00000000-0000-0000-0000-000000000002 |
 | traceresponse | 00-4d9faad993d7138983857624786396e3-091fe0fd3644f20a-01 |
@@ -91,7 +91,7 @@ POST https://api.anthropic.com/v1/messages?beta=true
 | set-cookie | _cfuvid=REDACTED; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com |
 | content-security-policy | default-src 'none'; frame-ancestors 'none' |
 | x-robots-tag | none |
-| cf-ray | 9f604c804ea3ae6a-LAX |
+| cf-ray | REDACTED-cf-ray |
 
 ## 响应体
 

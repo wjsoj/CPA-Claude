@@ -25,7 +25,7 @@ POST https://platform.claude.com/v1/oauth/token
 ## 请求体
 
 - **Content-Type**：`application/json`
-- **Content-Length**：`309` B（解码后实际 `236` B）
+- **Content-Length**：`309` B（解码后实际 `309` B）
 - **格式**：JSON (object)
 
 ### 顶层字段
@@ -65,16 +65,16 @@ POST https://platform.claude.com/v1/oauth/token
 ## 响应体
 
 - **Content-Type**：`application/json`
-- **解码后大小**：`497` B
+- **解码后大小**：`677` B
 - **格式**：JSON (object)
 
 ### 顶层字段
 | Field | Type | Sample |
 |---|---|---|
 | token_type | string | "Bearer" |
-| access_token | string | "sk-ant-oat01-REDACTED" |
+| access_token | string | "sk-ant-oat01-REDACTED... |
 | expires_in | int | 28800 |
-| refresh_token | string | "sk-ant-ort01-REDACTED" |
+| refresh_token | string | "sk-ant-ort01-REDACTED... |
 | scope | string | "user:file_upload user:inference user:mcp_servers user:profi... |
 | token_uuid | string | "00000000-0000-0000-0000-000000000003" |
 | organization | object{2} | {uuid, name} |

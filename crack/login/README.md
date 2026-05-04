@@ -7,8 +7,6 @@
 ```
 crack/login/
 ├── README.md                ← 本文件（PKCE 流程总览 + 与 CPA-Claude 现状对比）
-├── _split.py                ← raw → rows 解码脚本
-├── _sanitize.py             ← 脱敏脚本（与 crack/README.md 占位符表一致）
 ├── raw/
 │   ├── login-dump-full.json     ← whistle 后端最新 100 行 dump（包含历史噪声）
 │   └── login-session-full.json  ← 显式 ids= 拉到的 55 行（含完整登录链路）
@@ -27,6 +25,10 @@ crack/login/
 │   └── 12-GET-…api_claude_code_penguin_mode.json
 └── docs/                    ← 12 个独立 markdown
 ```
+
+> **脚本位置**：split / sanitize / gen 三件套已收敛到 [`crack/scripts/`](../scripts/README.md)，
+> 不再放在 `login/` 子目录里。重新生成本档案：
+> `python3 crack/scripts/split.py login && python3 crack/scripts/sanitize.py && python3 crack/scripts/gen.py login`
 
 ## 浏览器侧（不经代理）
 

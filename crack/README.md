@@ -11,8 +11,7 @@
 crack/
 ├── README.md         ← 本文件（双模式入口）
 ├── COMPARE.md        ← OAuth vs ApiKey 全方位对比 ★ 重点
-├── _gen.py           ← rows → docs 生成脚本（参数 oauth | apikey）
-├── _split.py         ← raw → rows 解码脚本（参数 oauth | apikey）
+├── scripts/          ← 所有处理脚本（split / gen / sanitize），见 scripts/README.md
 ├── raw/              ← Whistle 原始 dump（两次会话的全量 + 单次会话带 body）
 │   ├── oauth-dump-full.json
 │   ├── oauth-session-full.json
@@ -24,6 +23,11 @@ crack/
 ├── apikey/           ← ApiKey 模式（26 条请求）
 │   ├── docs/         ← 26 个独立 markdown
 │   └── rows/         ← 26 个 JSON 原文
+├── login/            ← OAuth PKCE 登录链路（12 条请求 + 自带 raw/）
+│   ├── README.md     ← PKCE 流程总览
+│   ├── docs/
+│   ├── rows/
+│   └── raw/
 └── .archive/         ← 旧的单文档汇总（已废弃）
 ```
 
@@ -71,15 +75,19 @@ crack/
 
 ## 重新生成
 
+所有处理脚本都在 [`scripts/`](scripts/README.md)。脚本路径自锚定，cwd 无关：
+
 ```bash
-cd crack
-python3 _split.py oauth     # raw/oauth-session-full.json → oauth/rows/
-python3 _split.py apikey    # raw/apikey-session-full.json → apikey/rows/
-python3 _gen.py oauth       # oauth/rows/ → oauth/docs/
-python3 _gen.py apikey      # apikey/rows/ → apikey/docs/
+python3 crack/scripts/split.py oauth      # raw/oauth-session-full.json → oauth/rows/
+python3 crack/scripts/split.py apikey     # raw/apikey-session-full.json → apikey/rows/
+python3 crack/scripts/split.py login      # login/raw/login-session-full.json → login/rows/
+python3 crack/scripts/sanitize.py         # 跨 crack/ 全量脱敏（幂等）
+python3 crack/scripts/gen.py oauth        # oauth/rows/ → oauth/docs/
+python3 crack/scripts/gen.py apikey       # apikey/rows/ → apikey/docs/
+python3 crack/scripts/gen.py login        # login/rows/ → login/docs/
 ```
 
-修改 `_gen.py` 里的 `NOTES_BY_MODE['<mode>']` / `EXTRA_BY_MODE['<mode>']` 可调整每条 markdown 的注释和"字段深挖"附录。
+修改 `scripts/gen.py` 里的 `NOTES_BY_MODE['<mode>']` / `EXTRA_BY_MODE['<mode>']` 可调整每条 markdown 的注释和"字段深挖"附录。
 
 ## 几个关键发现（提炼自 COMPARE.md）
 

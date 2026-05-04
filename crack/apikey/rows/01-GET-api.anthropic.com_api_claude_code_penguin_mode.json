@@ -19,7 +19,7 @@
     "content-type": "application/json",
     "transfer-encoding": "chunked",
     "connection": "close",
-    "request-id": "req_011CafuUjYa6nciMGmjHp6wo",
+    "request-id": "req_REDACTED",
     "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
     "anthropic-organization-id": "00000000-0000-0000-0000-000000000002",
     "server": "cloudflare",
@@ -33,7 +33,7 @@
     "x-robots-tag": "none",
     "cf-cache-status": "DYNAMIC",
     "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
-    "cf-ray": "9f6070e8b940f514-LAX"
+    "cf-ray": "REDACTED-cf-ray"
   },
   "reqSize": 0,
   "resSize": 75,
