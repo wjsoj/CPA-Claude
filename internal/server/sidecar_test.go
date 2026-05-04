@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,6 +38,7 @@ type recordedCall struct {
 	path string
 	ua   string
 	beta string
+	body []byte
 }
 
 func (r *recorder) handler() http.HandlerFunc {
@@ -66,6 +68,41 @@ func (r *recorder) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.calls)
+}
+
+// batchCapturingHandler is like handler() but also stores the request body
+// for /api/event_logging/v2/batch hits so tests can inspect event counts.
+func (r *recorder) batchCapturingHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		var body []byte
+		if strings.HasSuffix(req.URL.Path, "/api/event_logging/v2/batch") {
+			b, _ := io.ReadAll(req.Body)
+			body = b
+		}
+		r.mu.Lock()
+		r.calls = append(r.calls, recordedCall{
+			path: req.URL.Path,
+			ua:   req.Header.Get("User-Agent"),
+			beta: req.Header.Get("Anthropic-Beta"),
+			body: body,
+		})
+		r.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}
+}
+
+// firstBatchBody returns the body of the first event_logging batch hit.
+func (r *recorder) firstBatchBody() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.calls {
+		if strings.HasSuffix(c.path, "/api/event_logging/v2/batch") {
+			return c.body
+		}
+	}
+	return nil
 }
 
 // TestBootstrapFiresAllStepsWithCorrectUA asserts that one Notify triggers
@@ -177,10 +214,13 @@ func TestBootstrapFiresOncePerSession(t *testing.T) {
 	}
 }
 
-// TestBootstrapDifferentClientTokens asserts each downstream caller gets
-// its own bootstrap — concurrent users on one account simulate separate
-// `claude` windows.
-func TestBootstrapDifferentClientTokens(t *testing.T) {
+// TestBootstrapDeduplicatesAcrossClientTokens asserts that two downstream
+// client_tokens routing through the same OAuth account share ONE bootstrap.
+// Upstream must see "one CLI process serving multiple chat sessions", not
+// "this user launched the CLI twice in five seconds" — the latter is the
+// fingerprint we got banned for. (Each chat still gets its own session_id
+// from SessionIDFor; only the bootstrap/heartbeat sidecar collapses.)
+func TestBootstrapDeduplicatesAcrossClientTokens(t *testing.T) {
 	rec := &recorder{}
 	srv := httptest.NewServer(rec.handler())
 	defer srv.Close()
@@ -193,10 +233,20 @@ func TestBootstrapDifferentClientTokens(t *testing.T) {
 	mgr.Notify(a, "client-A")
 	mgr.Notify(a, "client-B")
 
-	// Two independent bootstraps should each fire ~8 calls (16 total,
-	// minus the off-host releases endpoint that doesn't hit our server).
-	if !waitForCallCount(rec, 16, 6*time.Second) {
-		t.Errorf("expected ~16 bootstrap calls (8 per client), got %d", rec.count())
+	// One bootstrap should fire ~8 on-host calls, regardless of token count.
+	if !waitForCallCount(rec, 8, 5*time.Second) {
+		t.Fatalf("expected ~8 bootstrap calls (one shared burst), got %d", rec.count())
+	}
+	// Wait a bit longer to confirm a second burst doesn't sneak in.
+	time.Sleep(500 * time.Millisecond)
+	bootstrapHits := 0
+	for _, c := range rec.snapshot() {
+		if !strings.HasSuffix(c.path, "/api/event_logging/v2/batch") {
+			bootstrapHits++
+		}
+	}
+	if bootstrapHits > 9 {
+		t.Errorf("expected at most 9 bootstrap hits across both client_tokens (per-account dedupe), got %d", bootstrapHits)
 	}
 }
 
@@ -252,20 +302,108 @@ func TestSidecarRefiresAfterIdle(t *testing.T) {
 		t.Fatalf("first bootstrap never landed, got %d calls", rec.count())
 	}
 
-	// Rewind lastSeen past the idle TTL and force-reset the latch so the
-	// next Notify treats it as a fresh boot.
-	key := sidecarSessionKey{accountKey: a.AccountKey(), clientToken: "client-A"}
-	v, ok := mgr.sessions.Load(key)
+	// Rewind lastSeen past the idle TTL AND lastBootstrap past the
+	// cooldown so the next Notify treats it as a fresh boot. With only
+	// the session-level rewind, the cooldown (default 12h) would keep
+	// bootstrap suppressed, which is the production-correct behavior but
+	// not what this test exercises.
+	v, ok := mgr.sessions.Load(a.AccountKey())
 	if !ok {
 		t.Fatalf("session entry missing")
 	}
 	sess := v.(*sidecarSession)
 	sess.lastSeen.Store(time.Now().Add(-2 * sidecarSessionIdleTTL).UnixNano())
+	if av, ok := mgr.anchors.Load(a.AccountKey()); ok {
+		av.(*accountAnchor).lastBootstrap.Store(time.Now().Add(-2 * bootstrapCooldown).UnixNano())
+	}
 
 	before := rec.count()
 	mgr.Notify(a, "client-A")
 	if !waitForCallCount(rec, before+8, 5*time.Second) {
 		t.Errorf("expected another bootstrap burst after idle, got %d calls (before=%d)", rec.count(), before)
+	}
+}
+
+// TestBootstrapCooldownSuppressesBurst: an account whose anchor records a
+// recent bootstrap must NOT re-fire the burst on a fresh session, even
+// after idle eviction. Heartbeat still starts so the simulated process
+// continues to look alive.
+func TestBootstrapCooldownSuppressesBurst(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(rec.handler())
+	defer srv.Close()
+
+	mgr := newSidecarMgr(sidecarConfig{enabled: true, baseURL: srv.URL})
+	defer mgr.Stop()
+	mgr.httpClient = srv.Client()
+
+	a := newTestAuth("auth-1", "alice@example.com")
+	// Pre-stamp a recent bootstrap on the anchor so Notify hits the
+	// cooldown branch on its very first call.
+	anchor := mgr.anchorFor(a.AccountKey())
+	anchor.lastBootstrap.Store(time.Now().UnixNano())
+
+	ready := mgr.Notify(a, "client-A")
+	// bootstrapReady must be closed immediately so callers don't block on
+	// a bootstrap that's never going to happen.
+	select {
+	case <-ready:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("bootstrapReady should be closed immediately under cooldown")
+	}
+
+	// Give bootstrap a chance to misfire if the cooldown failed. None of
+	// the 9 endpoints should be hit; only the heartbeat at +8s+ may fire.
+	time.Sleep(3 * time.Second)
+	bootstrapHits := 0
+	for _, c := range rec.snapshot() {
+		if !strings.HasSuffix(c.path, "/api/event_logging/v2/batch") {
+			bootstrapHits++
+		}
+	}
+	if bootstrapHits != 0 {
+		t.Errorf("cooldown should suppress bootstrap entirely, got %d non-heartbeat hits", bootstrapHits)
+	}
+}
+
+// TestStartupBatchSuppressedUnderCooldown: when bootstrap is suppressed,
+// the heartbeat's "first batch" must NOT be the fat ~80-event startup
+// dump — that batch is a process-launch signal in real CC, and re-firing
+// it on every wake-from-idle defeats the bootstrap cooldown.
+func TestStartupBatchSuppressedUnderCooldown(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(rec.batchCapturingHandler())
+	defer srv.Close()
+
+	mgr := newSidecarMgr(sidecarConfig{enabled: true, baseURL: srv.URL})
+	defer mgr.Stop()
+	mgr.httpClient = srv.Client()
+
+	a := newTestAuth("auth-1", "alice@example.com")
+	mgr.anchorFor(a.AccountKey()).lastBootstrap.Store(time.Now().UnixNano())
+	mgr.Notify(a, "client-A")
+
+	// Wait past the +8s heartbeat warmup so the first batch lands.
+	deadline := time.Now().Add(15 * time.Second)
+	var firstBatch []byte
+	for time.Now().Before(deadline) {
+		if b := rec.firstBatchBody(); b != nil {
+			firstBatch = b
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if firstBatch == nil {
+		t.Fatalf("no event_logging batch landed within 15s")
+	}
+	var parsed struct {
+		Events []any `json:"events"`
+	}
+	if err := json.Unmarshal(firstBatch, &parsed); err != nil {
+		t.Fatalf("parse batch: %v", err)
+	}
+	if len(parsed.Events) > 5 {
+		t.Errorf("startup batch should be suppressed under cooldown; got %d events (expected ≤5 steady-state)", len(parsed.Events))
 	}
 }
 

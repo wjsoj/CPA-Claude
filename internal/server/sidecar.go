@@ -41,9 +41,14 @@ import (
 //     2.1.126 / Linux / x64 / Node v24.3.0 fingerprint). Stops 5 min
 //     after the session goes idle — mirrors a real CLI process exit.
 //
-// A virtual session is identified by (accountKey, clientToken). All three
-// phases share one bootstrapSessionID per session, matching what real CC
-// does (rows 01/06/14 all carried the same session UUID).
+// A virtual session is identified by accountKey alone. Multiple downstream
+// client_tokens routing through the same OAuth account share one virtual
+// session — upstream sees one device with one bootstrap and one heartbeat
+// stream, regardless of how many clients are fanned in. Re-bootstrapping
+// is gated by bootstrapCooldown so we don't look like the same machine
+// "launching the CLI" several times an hour. All three phases share one
+// bootstrapSessionID per account-anchor (rows 01/06/14 all carried the
+// same session UUID in real CC).
 
 const (
 	// sidecarSessionIdleTTL controls when an idle virtual session is
@@ -75,10 +80,34 @@ const (
 	heartbeatJitter       = 0.4
 
 	// heartbeatActiveWindow: if no Notify in this window, stop emitting
-	// heartbeats — the user has effectively closed the CLI. Triggered
-	// from inside the heartbeat ticker, so the cap on lingering goroutines
-	// is min(idleTTL, activeWindow + heartbeatBaseInterval).
+	// heartbeats — the user has effectively closed the CLI. Used only by
+	// the (disabled) datadog path; the event_logging heartbeat now scales
+	// its own interval based on idle age (see nextHeartbeatInterval).
 	heartbeatActiveWindow = 5 * time.Minute
+
+	// heartbeatHotWindow: while activity is more recent than this, emit
+	// heartbeats at heartbeatHotInterval. Beyond it but within
+	// heartbeatWarmWindow, slow to heartbeatWarmInterval. After
+	// heartbeatWarmWindow, stop. Captures real CC's behavior where
+	// tengu_dir_search fires constantly during user typing then goes
+	// quiet within a minute or two of pause.
+	heartbeatHotWindow    = 30 * time.Second
+	heartbeatHotInterval  = 18 * time.Second
+	heartbeatWarmWindow   = 90 * time.Second
+	heartbeatWarmInterval = 45 * time.Second
+
+	// bootstrapCooldown is how long after a bootstrap fires for one OAuth
+	// account before the next Notify is allowed to re-fire. 12h means a
+	// single account fires bootstrap at most twice a day even when many
+	// downstream client_tokens funnel through it — matching the "user
+	// launches CLI in the morning, maybe again in the evening" pattern
+	// real CC produces.
+	bootstrapCooldown = 12 * time.Hour
+
+	// bootstrapJitterFrac perturbs each step's relative offset by ±this
+	// fraction. The captured 9-step ladder (T+0/T+0.16/T+1.25/...) is
+	// itself a fingerprint when replayed bit-exact every session.
+	bootstrapJitterFrac = 0.15
 
 	// Datadog logs intake — Phase D. Real CC ships its own telemetry to
 	// Anthropic's Datadog org alongside event_logging. The intake key is
@@ -121,7 +150,13 @@ type sidecarMgr struct {
 	baseURL    string // typically https://api.anthropic.com
 	httpClient *http.Client
 
-	sessions sync.Map // sidecarSessionKey → *sidecarSession
+	sessions sync.Map // accountKey (string) → *sidecarSession
+	// anchors persist across session eviction. They hold the per-account
+	// bootstrap session UUID and the timestamp of the last bootstrap, so
+	// a wake-from-idle can suppress redundant bootstrap traffic and reuse
+	// the previous session UUID — making upstream see a long-running CLI
+	// process instead of one "restart" per virtual session.
+	anchors sync.Map // accountKey (string) → *accountAnchor
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -133,9 +168,10 @@ type sidecarConfig struct {
 	baseURL string
 }
 
-type sidecarSessionKey struct {
-	accountKey  string
-	clientToken string
+type accountAnchor struct {
+	bootstrapSessionID string
+	lastBootstrap      atomic.Int64 // unix-nano
+	mu                 sync.Mutex   // guards bootstrapSessionID lazy init
 }
 
 type sidecarSession struct {
@@ -191,10 +227,11 @@ func (m *sidecarMgr) Notify(a *auth.Auth, clientToken string) <-chan struct{} {
 		return nil
 	}
 	now := time.Now().UnixNano()
-	key := sidecarSessionKey{accountKey: a.AccountKey(), clientToken: clientToken}
+	accountKey := a.AccountKey()
+	anchor := m.anchorFor(accountKey)
 
 	fresh := &sidecarSession{bootstrapReady: make(chan struct{})}
-	v, loaded := m.sessions.LoadOrStore(key, fresh)
+	v, loaded := m.sessions.LoadOrStore(accountKey, fresh)
 	sess := v.(*sidecarSession)
 	prevSeen := sess.lastSeen.Swap(now)
 
@@ -209,34 +246,66 @@ func (m *sidecarMgr) Notify(a *auth.Auth, clientToken string) <-chan struct{} {
 		}
 		sess = &sidecarSession{bootstrapReady: make(chan struct{})}
 		sess.lastSeen.Store(now)
-		m.sessions.Store(key, sess)
+		m.sessions.Store(accountKey, sess)
 		isNew = true
 	}
 	if !isNew {
 		return sess.bootstrapReady
 	}
 	if !sess.bootstrapFired.CompareAndSwap(false, true) {
-		// Another concurrent first-request already kicked off bootstrap;
-		// share its readiness channel.
 		return sess.bootstrapReady
 	}
 
-	sess.bootstrapSessionID = bootstrapSessionIDFor(key.accountKey, key.clientToken)
+	sess.bootstrapSessionID = anchor.sessionID(accountKey)
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.cancel = cancel
 
-	go m.runBootstrap(ctx, a, key, sess.bootstrapSessionID, sess.bootstrapReady)
-	go m.runHeartbeat(ctx, a, sess)
-	go m.runDatadogHeartbeat(ctx, a, sess)
+	// Bootstrap cooldown: within bootstrapCooldown of the previous bootstrap
+	// for this account, suppress the 9-step burst entirely. Heartbeat still
+	// starts so the long-running "process" continues to look alive.
+	lastBoot := anchor.lastBootstrap.Load()
+	withinCooldown := lastBoot > 0 && time.Duration(now-lastBoot) < bootstrapCooldown
+	if withinCooldown {
+		log.Debugf("sidecar: bootstrap suppressed (within %s cooldown) for %s, clientToken=%s, sessionID=%s",
+			bootstrapCooldown, a.ID, maskClientToken(clientToken), sess.bootstrapSessionID)
+		close(sess.bootstrapReady)
+	} else {
+		go m.runBootstrap(ctx, a, accountKey, clientToken, anchor, sess.bootstrapSessionID, sess.bootstrapReady)
+	}
+	// Startup-batch firing is gated on the same cooldown: real CC's fat
+	// ~80-event tengu_skill_loaded/plugin_enabled batch is a "process
+	// launch" signal, not a "session resume" signal. Re-firing it on every
+	// wake-from-idle would turn a quiet bootstrap-suppressed window into
+	// 80 events of "I just relaunched", which is the exact fingerprint we
+	// removed at the bootstrap layer.
+	go m.runHeartbeat(ctx, a, sess, !withinCooldown)
+	// Datadog heartbeat intentionally not started: the hardcoded public
+	// intake key is a pinned fingerprint Anthropic could rotate or monitor.
 	return sess.bootstrapReady
 }
 
-// bootstrapSessionIDFor derives a UUIDv4-shaped session id stable for the
-// lifetime of one virtual session. Distinct from the per-conversation
-// chat session_id (which rotates as the user starts new conversations).
-func bootstrapSessionIDFor(accountKey, clientToken string) string {
-	sum := sha256.Sum256([]byte("cpa-claude-bootstrap/" + accountKey + "|" + clientToken))
-	return uuidFromBytes(sum[:16])
+// anchorFor returns the per-account anchor, creating it on first use.
+func (m *sidecarMgr) anchorFor(accountKey string) *accountAnchor {
+	if v, ok := m.anchors.Load(accountKey); ok {
+		return v.(*accountAnchor)
+	}
+	v, _ := m.anchors.LoadOrStore(accountKey, &accountAnchor{})
+	return v.(*accountAnchor)
+}
+
+// sessionID returns the stable bootstrap session UUID for this account,
+// computing it on first call. All bootstrap, quota probe, and event_logging
+// traffic from this account shares the same value — matching real CC where
+// one process instance carries one session UUID across all auxiliary
+// streams.
+func (a *accountAnchor) sessionID(accountKey string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.bootstrapSessionID == "" {
+		sum := sha256.Sum256([]byte("cpa-claude-bootstrap/" + accountKey))
+		a.bootstrapSessionID = uuidFromBytes(sum[:16])
+	}
+	return a.bootstrapSessionID
 }
 
 // =============================================================================
@@ -389,7 +458,7 @@ func realBootstrapSteps(baseURL string) []bootstrapStep {
 // or failure) so the first business /v1/messages from this session can
 // proceed. Defer-close also fires on early ctx-cancel so a stuck shutdown
 // can't hang client requests waiting on a session that will never finish.
-func (m *sidecarMgr) runBootstrap(ctx context.Context, a *auth.Auth, key sidecarSessionKey, sessionID string, ready chan struct{}) {
+func (m *sidecarMgr) runBootstrap(ctx context.Context, a *auth.Auth, accountKey, clientToken string, anchor *accountAnchor, sessionID string, ready chan struct{}) {
 	closed := false
 	closeReady := func() {
 		if !closed {
@@ -401,9 +470,17 @@ func (m *sidecarMgr) runBootstrap(ctx context.Context, a *auth.Auth, key sidecar
 
 	steps := realBootstrapSteps(m.baseURL)
 	start := time.Now()
+	prevDue := start
 	for _, step := range steps {
-		// Sleep until the step's relative time.
-		due := start.Add(step.delayFromStart)
+		// Jitter the captured offset by ±bootstrapJitterFrac. Clamp to
+		// monotonic order so two steps with identical delayFromStart still
+		// land in the captured order.
+		offset := jitterDuration(step.delayFromStart, bootstrapJitterFrac)
+		due := start.Add(offset)
+		if !due.After(prevDue) {
+			due = prevDue.Add(5 * time.Millisecond)
+		}
+		prevDue = due
 		if w := time.Until(due); w > 0 {
 			select {
 			case <-ctx.Done():
@@ -422,8 +499,24 @@ func (m *sidecarMgr) runBootstrap(ctx context.Context, a *auth.Auth, key sidecar
 			closeReady()
 		}
 	}
-	log.Debugf("sidecar: bootstrap complete via %s (clientToken=%s, sessionID=%s)",
-		a.ID, maskClientToken(key.clientToken), sessionID)
+	anchor.lastBootstrap.Store(time.Now().UnixNano())
+	log.Debugf("sidecar: bootstrap complete for %s (clientToken=%s, sessionID=%s, account=%s)",
+		a.ID, maskClientToken(clientToken), sessionID, accountKey)
+}
+
+// jitterDuration returns d ± frac*d using a uniform distribution. Negative
+// outputs are clamped to zero. Used for both bootstrap step offsets and
+// heartbeat intervals so the proxy doesn't replay timing patterns bit-exact.
+func jitterDuration(d time.Duration, frac float64) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	delta := (rand.Float64()*2 - 1) * frac * float64(d)
+	out := time.Duration(float64(d) + delta)
+	if out < 0 {
+		return 0
+	}
+	return out
 }
 
 // sendBootstrapStep builds and dispatches one step. Bodies are only sent
@@ -626,7 +719,7 @@ func buildQuotaProbeBody(a *auth.Auth, sessionID string) ([]byte, error) {
 // state cadence. Stops when:
 //   - parent ctx is cancelled (session evicted, server shutdown), OR
 //   - the session has been idle past heartbeatActiveWindow.
-func (m *sidecarMgr) runHeartbeat(ctx context.Context, a *auth.Auth, sess *sidecarSession) {
+func (m *sidecarMgr) runHeartbeat(ctx context.Context, a *auth.Auth, sess *sidecarSession, firstBatch bool) {
 	// Wait for the bootstrap burst to finish before our first heartbeat —
 	// real CC's first event_logging batch lands at T+10s, well after
 	// bootstrap. We use 8s here so the heartbeat starts after the last
@@ -637,16 +730,16 @@ func (m *sidecarMgr) runHeartbeat(ctx context.Context, a *auth.Auth, sess *sidec
 	case <-time.After(8 * time.Second):
 	}
 
-	first := true
+	first := firstBatch
 	for {
-		if isHeartbeatIdle(sess) {
+		wait, ok := nextHeartbeatInterval(sess)
+		if !ok {
 			return
 		}
 		if err := m.sendHeartbeat(ctx, a, sess.bootstrapSessionID, first); err != nil {
 			log.Debugf("sidecar: heartbeat via %s failed: %v", a.ID, err)
 		}
 		first = false
-		wait := jitteredHeartbeatInterval()
 		select {
 		case <-ctx.Done():
 			return
@@ -655,18 +748,36 @@ func (m *sidecarMgr) runHeartbeat(ctx context.Context, a *auth.Auth, sess *sidec
 	}
 }
 
+// nextHeartbeatInterval scales the heartbeat cadence by how recently we
+// observed real business traffic. Hot (≤30s since last activity) → ~18s.
+// Warm (≤90s) → ~45s. Cold → stop. ok=false signals the loop to exit.
+// Real CC's tengu_dir_search fires constantly while the user types and
+// goes quiet within a minute or two — replaying a flat 18s tick across
+// a long idle window is itself a fingerprint.
+func nextHeartbeatInterval(sess *sidecarSession) (time.Duration, bool) {
+	last := sess.lastSeen.Load()
+	if last == 0 {
+		return 0, false
+	}
+	idle := time.Since(time.Unix(0, last))
+	switch {
+	case idle <= heartbeatHotWindow:
+		return jitterDuration(heartbeatHotInterval, heartbeatJitter), true
+	case idle <= heartbeatWarmWindow:
+		return jitterDuration(heartbeatWarmInterval, heartbeatJitter), true
+	default:
+		return 0, false
+	}
+}
+
+// isHeartbeatIdle is retained for the (currently unused) datadog heartbeat
+// path so re-enabling it remains a one-line change.
 func isHeartbeatIdle(sess *sidecarSession) bool {
 	last := sess.lastSeen.Load()
 	if last == 0 {
 		return true
 	}
 	return time.Since(time.Unix(0, last)) > heartbeatActiveWindow
-}
-
-func jitteredHeartbeatInterval() time.Duration {
-	d := float64(heartbeatBaseInterval)
-	delta := (rand.Float64()*2 - 1) * heartbeatJitter * d
-	return time.Duration(d + delta)
 }
 
 // sendHeartbeat POSTs one ClaudeCodeInternalEvent batch. Body and headers
