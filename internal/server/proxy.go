@@ -298,17 +298,31 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		ClientToken: clientToken,
 	}
 
-	// Sidecar: dispatch the per-session quota probe the first time we see
-	// this (account, clientToken) pair. Async + best-effort, never blocks
-	// the user request. Real CC fires this exact request at bootstrap, so
-	// "active OAuth account / zero quota probes" is otherwise a single-
-	// signal third-party-tool detection.
-	s.sidecar.Notify(a, clientToken)
+	// Sidecar: dispatch the per-session bootstrap+quota_probe the first
+	// time we see this (account, clientToken) pair. Real CC fires the
+	// 9-step bootstrap (GrowthBook → settings → grove → bootstrap →
+	// penguin → quota probe → mcp_servers → mcp_registry → releases)
+	// BEFORE its first business /v1/messages — an OAuth bearer whose
+	// very first observed traffic is /v1/messages with full system+tools
+	// is a single-shot fingerprint of a non-CC client. Notify returns a
+	// channel closed when bootstrap reaches the quota_probe step; we
+	// gate the first business request on it, capped at bootstrapWaitCap
+	// so a stuck sidecar can't hang user traffic.
+	bootstrapReady := s.sidecar.Notify(a, clientToken)
 	if path == "/v1/messages" {
 		upstreamBody = applyClaudeCodeBodyMimicry(upstreamBody, model, id)
 	}
 
 	ctx := c.Request.Context()
+	if bootstrapReady != nil {
+		select {
+		case <-bootstrapReady:
+		case <-ctx.Done():
+			// client cancelled — let downstream layer handle it normally
+		case <-time.After(bootstrapWaitCap):
+			log.Warnf("sidecar: bootstrap-wait timeout for %s — proceeding without preceding bootstrap traffic", a.ID)
+		}
+	}
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(upstreamBody))
 	if err != nil {
 		c.AbortWithStatusJSON(500, gin.H{"error": err.Error()})
