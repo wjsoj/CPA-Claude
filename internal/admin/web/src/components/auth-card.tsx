@@ -5,7 +5,7 @@ import { CardUpstreamQuota } from "./upstream-quota";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { GroupBadge } from "./group-badge";
-import { cn, fmtDate, fmtInt } from "@/lib/utils";
+import { cn, fmtDate, fmtInt, fmtUSD } from "@/lib/utils";
 import {
   AlertTriangle,
   Ban,
@@ -223,6 +223,10 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
                     ({fmtInt(u.total.errors)})
                   </span>
                 ) : null}
+              </div>
+              <div className="eyebrow mt-2 mb-0.5">Total cost</div>
+              <div className="mono tabular text-xs font-medium">
+                {fmtUSD(u.total_cost_usd)}
               </div>
             </div>
             <div>
