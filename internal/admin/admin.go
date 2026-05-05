@@ -145,6 +145,7 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/auths/:id/clear-failure", h.handleClearFailure)
 		api.POST("/oauth/start", h.handleOAuthStart)
 		api.POST("/oauth/finish", h.handleOAuthFinish)
+		api.POST("/oauth/session-cookie", h.handleOAuthSessionCookie)
 		api.POST("/apikeys", h.handleCreateAPIKey)
 		api.POST("/auths/:id/anthropic-usage", h.handleAnthropicUsage)
 		api.GET("/requests", h.handleRequestsQuery)
@@ -855,6 +856,45 @@ func (h *Handler) handleOAuthFinish(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 	a, err := auth.FinishLogin(ctx, body.SessionID, code, state, h.cfg.AuthDir, body.MaxConcurrent, h.cfg.UseUTLS, body.Group)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	h.pool.AddOAuth(a)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID, "email": a.Email})
+}
+
+// ---- Session-cookie login (Anthropic only) ----
+
+type oauthSessionCookieBody struct {
+	SessionCookie string `json:"session_cookie"`
+	ProxyURL      string `json:"proxy_url"`
+	Label         string `json:"label"`
+	Group         string `json:"group"`
+	MaxConcurrent int    `json:"max_concurrent"`
+}
+
+// handleOAuthSessionCookie drives the authorize-with-cookie flow.
+// Forces uTLS regardless of the global UseUTLS setting because driving
+// claude.com from a server IP without browser-grade TLS fingerprinting
+// will fail Cloudflare's bot challenges. Proxy is required.
+func (h *Handler) handleOAuthSessionCookie(c *gin.Context) {
+	var body oauthSessionCookieBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+	a, err := auth.LoginWithSessionCookie(
+		ctx,
+		body.SessionCookie,
+		body.ProxyURL,
+		body.Label,
+		body.Group,
+		body.MaxConcurrent,
+		h.cfg.AuthDir,
+	)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
