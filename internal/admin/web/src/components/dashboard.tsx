@@ -20,6 +20,7 @@ import { EditAuthModal } from "./modals/edit-auth";
 import { UploadModal } from "./modals/upload";
 import { APIKeyModal } from "./modals/apikey";
 import { OAuthModal } from "./modals/oauth";
+import { SessionCookieModal } from "./modals/session-cookie";
 import { AddTokenModal } from "./modals/add-token";
 import { EditTokenModal } from "./modals/edit-token";
 import { ThemeToggle } from "./theme-toggle";
@@ -92,6 +93,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
   // modals differ per upstream (URLs, placeholder text). null = closed.
   const [oauthing, setOauthing] = useState<Provider | null>(null);
   const [apikeying, setAPIKeying] = useState<Provider | null>(null);
+  const [sessionCookieOpen, setSessionCookieOpen] = useState(false);
   const [addingToken, setAddingToken] = useState(false);
   const [editingToken, setEditingToken] = useState<ClientRow | null>(null);
   const [lastTick, setLastTick] = useState(Date.now());
@@ -371,6 +373,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
               onAddOAuth={(p) => setOauthing(p)}
               onAddAPIKey={(p) => setAPIKeying(p)}
               onUpload={(p) => setUploading(p)}
+              onAddSessionCookie={() => setSessionCookieOpen(true)}
             />
           )}
           {tab === "tokens" && (
@@ -503,6 +506,15 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
           onClose={() => setOauthing(null)}
           onSaved={() => {
             setOauthing(null);
+            refresh();
+          }}
+        />
+      )}
+      {sessionCookieOpen && (
+        <SessionCookieModal
+          onClose={() => setSessionCookieOpen(false)}
+          onSaved={() => {
+            setSessionCookieOpen(false);
             refresh();
           }}
         />

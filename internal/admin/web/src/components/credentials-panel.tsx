@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { KeyRound, Plus, FileJson } from "lucide-react";
+import { KeyRound, Plus, FileJson, Cookie } from "lucide-react";
 import type { AuthRow, Provider, Summary } from "@/lib/types";
 import { AuthCard } from "./auth-card";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ interface Props {
   onAddOAuth: (provider: Provider) => void;
   onAddAPIKey: (provider: Provider) => void;
   onUpload: (provider: Provider) => void;
+  onAddSessionCookie: () => void;
 }
 
 // Sub-tab per upstream provider. The user explicitly asked for strict
@@ -36,6 +37,7 @@ export function CredentialsPanel({
   onAddOAuth,
   onAddAPIKey,
   onUpload,
+  onAddSessionCookie,
 }: Props) {
   const [provider, setProvider] = useState<Provider>("anthropic");
   const auths = summary?.auths || [];
@@ -73,6 +75,12 @@ export function CredentialsPanel({
             <Plus className="h-4 w-4" />
             {current.signInCta}
           </Button>
+          {provider === "anthropic" && (
+            <Button variant="outline" onClick={onAddSessionCookie} className="gap-2">
+              <Cookie className="h-4 w-4" />
+              Session cookie
+            </Button>
+          )}
           <Button variant="outline" onClick={() => onAddAPIKey(provider)} className="gap-2">
             <KeyRound className="h-4 w-4" />
             API key
