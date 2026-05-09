@@ -53,6 +53,11 @@ type Server struct {
 	// account whose request stream contains zero quota probes is
 	// trivially flagged as a third-party tool.
 	sidecar *sidecarMgr
+	// switchTracker detects when a conversation rotates mid-stream from
+	// one upstream credential to another. On switch we sanitize away
+	// the prior account's signed `thinking` blocks before forwarding
+	// (they would 400 with "signature in thinking" on the new account).
+	switchTracker *switchTracker
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -68,6 +73,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 		useUTLS: cfg.UseUTLS,
 		baseURL: cfg.AnthropicBaseURL,
 	})
+	s.switchTracker = newSwitchTracker()
 
 	primary := pickPrimary(cfg)
 	adminH := admin.New(cfg, pool, store, cat, tokens)

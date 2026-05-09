@@ -258,6 +258,20 @@ func maskClientToken(t string) string {
 //	done=true   → response was delivered successfully (status < 400 or
 //	              non-retryable error already written to client)
 func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry bool, done bool) {
+	// Mid-conversation account switch: drop prior `thinking` block
+	// signatures before forwarding. Both OAuth and API-key paths bind
+	// thinking signatures to the issuing account, so this runs ahead
+	// of the API-key branch. Scoped to /v1/messages — no other path
+	// carries multi-turn assistant history. The natural sidecar.Notify
+	// below handles the "treat as new session" telemetry: if the new
+	// account has no live sidecar session, it fires the standard 9-step
+	// bootstrap; if it does, the existing heartbeat covers continuity.
+	if path == "/v1/messages" && s.switchTracker.Check(clientToken, body, a.ID) {
+		log.Infof("auth switch detected: clientToken=%s now on auth=%s — sanitizing prior thinking signatures",
+			maskClientToken(clientToken), a.ID)
+		body = sanitizeThinkingForSwitch(body)
+	}
+
 	if a.Kind == auth.KindAPIKey {
 		return s.doForwardAnthropicAPIKey(c, a, path, body, stream, model, clientToken, clientName, start, attempts)
 	}
@@ -1126,7 +1140,7 @@ func mergeSSEUsage(dst *usage.Counts, sub *subUsage, payload []byte) {
 	if sub != nil && len(u.Iterations) > 0 {
 		// message_delta.usage.iterations is cumulative — last non-empty
 		// observation wins, never append.
-		sub.replaceFrom(u.Iterations)
+sub.replaceFrom(u.Iterations)
 	}
 }
 
