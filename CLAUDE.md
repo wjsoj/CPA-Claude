@@ -65,6 +65,14 @@ The OAuth path applies **two layers of mimicry** to look like a real Claude Code
 
 **Invariant:** for one OAuth account routed by N downstream client tokens, upstream sees one device with N concurrent CC sessions — exactly what one user opening multiple `claude` windows would look like. Don't change this without re-checking every place that derives identity.
 
+### Advisor sub-call billing — `subUsage` in `proxy.go`
+
+The `advisor-tool-2026-03-01` beta lets Anthropic run a stronger model (typically `claude-opus-4-7`) as a server-side sub-call inside one `/v1/messages` response. Wire shape: `message_delta.usage.iterations[]` with entries of `type:"message"` (outer model, already in top-level totals) or `type:"advisor_message"` (sub-call, NOT in top-level — has its own `model` field).
+
+`subUsage.replaceFrom` overwrites (not appends) on every observation because SSE emits cumulative iterations. `recordSubUsage` charges the sub-model tokens to the same auth that handled the parent, looks up pricing under the sub-model's own name, and emits a separate requestlog row per sub-model so the admin panel breaks orchestrator vs advisor cost apart. Parent request count (`Requests +1`) is unchanged — one `/v1/messages` is still one request regardless of how many sub-models ran.
+
+In real captures advisor sub-calls always run cache-cold (cache_read/cache_create = 0); the four-counter parsing is kept in case Anthropic enables advisor caching later. Ground truth in `crack/advisor/`.
+
 ### Sidecar (auxiliary traffic emulation) — `internal/server/sidecar.go`
 
 `sidecarMgr.Notify(a, clientToken)` is called from `doForward` after credential acquisition. First-touch of a `(account, clientToken)` pair starts three goroutines:
@@ -85,6 +93,13 @@ OpenAI-format requests on the Codex endpoint. **API-key credentials** forward to
 
 > **Codex OAuth has not been smoke-tested against a real ChatGPT subscription token in production.** The auth-layer paths (token exchange, refresh, JWT) work; full request/response parity against `chatgpt.com/backend-api` is pending. If you change anything in this path, exercise both the API-key and OAuth branches.
 
+### Two ways to add an Anthropic OAuth credential
+
+1. **Standard PKCE flow** — `buildAnthropicAuthURL` + browser redirect + `finishAnthropicLogin` token-exchange. This is what the admin panel's "Sign in with Claude" button does.
+2. **Session cookie flow** — `internal/auth/login_session.go`. Operator pastes a `sk-ant-sid02-…` `sessionKey` cookie + a mandatory proxy URL; server drives `claude.com/cai/oauth/authorize` server-side under uTLS Chrome fingerprint, captures the 302 redirect, and reuses `finishAnthropicLogin` for token-exchange. Proxy is non-optional because driving `claude.com` from a server IP without one fails Cloudflare's checks and risks the underlying account.
+
+Both paths produce the same `auth.Auth` and go through `Pool.AddOAuth`. If you change the token-exchange logic in `finishAnthropicLogin`, both flows are affected.
+
 ### Capture archive — `crack/`
 
 Contains complete recorded sessions of real Claude Code 2.1.126 traffic, used as ground truth for every fingerprint constant in the codebase.
@@ -92,6 +107,7 @@ Contains complete recorded sessions of real Claude Code 2.1.126 traffic, used as
 - `crack/raw/<mode>-session-full.json` and `crack/login/raw/login-session-full.json` — original Whistle dumps.
 - `crack/oauth/`, `crack/apikey/`, `crack/login/` — three parallel modes; each has `rows/` (per-request decoded JSON) and `docs/` (per-request markdown write-ups). `crack/login/` covers the OAuth PKCE login flow specifically (12 requests).
 - `crack/COMPARE.md` — OAuth-vs-APIkey diff. `crack/login/README.md` — PKCE flow + CPA alignment table.
+- `crack/advisor/` — two real `advisor-tool-2026-03-01` round-trips with verbatim `iterations[]` wire shape. Ground truth for the `subUsage` parser and the `"advisor_message"` type-string literal.
 - `crack/scripts/{split,sanitize,gen}.py` — all helper scripts live here, separate from data. `split.py <mode>` decodes raw dumps into per-row JSON, `sanitize.py` does idempotent in-place redaction across the whole tree, `gen.py <mode>` re-renders markdown docs from rows. See `crack/scripts/README.md`.
 
 **When bumping the CC version target, re-capture and update `crack/` first**, then update fingerprint constants to match. Pipeline: `split.py → sanitize.py → gen.py → sanitize.py` (the trailing sanitize is critical — `gen.py` may reproduce raw values from rows into docs).
