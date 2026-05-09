@@ -13,12 +13,13 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/CPA-Claude/internal/admin"
-	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/clienttoken"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/pricing"
 	"github.com/wjsoj/CPA-Claude/internal/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
+	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/thinkingsig"
 )
 
 // endpoint is one listening http.Server paired with its provider label. The
@@ -57,7 +58,7 @@ type Server struct {
 	// one upstream credential to another. On switch we sanitize away
 	// the prior account's signed `thinking` blocks before forwarding
 	// (they would 400 with "signature in thinking" on the new account).
-	switchTracker *switchTracker
+	switchTracker *thinkingsig.SwitchTracker
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -73,7 +74,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 		useUTLS: cfg.UseUTLS,
 		baseURL: cfg.AnthropicBaseURL,
 	})
-	s.switchTracker = newSwitchTracker()
+	s.switchTracker = thinkingsig.NewSwitchTracker()
 
 	primary := pickPrimary(cfg)
 	adminH := admin.New(cfg, pool, store, cat, tokens)
