@@ -19,9 +19,10 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/wjsoj/CPA-Claude/internal/auth"
 	"github.com/wjsoj/CPA-Claude/internal/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
+	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/thinkingsig"
 )
 
 // hopHeaders are stripped when forwarding to upstream.
@@ -269,7 +270,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	if path == "/v1/messages" && s.switchTracker.Check(clientToken, body, a.ID) {
 		log.Infof("auth switch detected: clientToken=%s now on auth=%s — sanitizing prior thinking signatures",
 			maskClientToken(clientToken), a.ID)
-		body = sanitizeThinkingForSwitch(body)
+		body = thinkingsig.SanitizeForSwitch(body)
 	}
 
 	if a.Kind == auth.KindAPIKey {
