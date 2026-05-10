@@ -697,18 +697,26 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	writeResponseHeaders(c, resp)
 	var counts usage.Counts
 	var sub subUsage
-	if resp.StatusCode < 400 {
-		counts.Requests = 1
-	}
-	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		streamSSE(c, resp, &counts, &sub, rewriteClientModel)
+	var errSnippet string
+	if resp.StatusCode >= 400 {
+		// Capture upstream body for the request log + warning. Without
+		// this, API-key 4xx is silent — only the gin access line shows
+		// up — and operators have no signal whether the relay rejected
+		// the model, exhausted the key's quota, IP-banned us, etc.
+		errBody, _ := io.ReadAll(resp.Body)
+		c.Writer.Write(errBody)
+		errSnippet = truncate(errBody, 500)
+		log.Warnf("proxy(apikey): %s returned %d — body=%s", a.ID, resp.StatusCode, errSnippet)
 	} else {
-		respBody, _ := io.ReadAll(resp.Body)
-		if rewriteClientModel != "" && resp.StatusCode < 400 {
-			respBody = rewriteResponseModel(respBody, rewriteClientModel)
-		}
-		c.Writer.Write(respBody)
-		if resp.StatusCode < 400 {
+		counts.Requests = 1
+		if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+			streamSSE(c, resp, &counts, &sub, rewriteClientModel)
+		} else {
+			respBody, _ := io.ReadAll(resp.Body)
+			if rewriteClientModel != "" {
+				respBody = rewriteResponseModel(respBody, rewriteClientModel)
+			}
+			c.Writer.Write(respBody)
 			counts.Add(extractUsageFromJSON(respBody, &sub))
 		}
 	}
@@ -748,6 +756,10 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 			s.usage.RecordClient(clientToken, clientName, clientCounts, costUSD+advisorCost)
 		}
 	}
+	errField := ""
+	if resp.StatusCode >= 400 {
+		errField = fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate([]byte(errSnippet), 200))
+	}
 	s.emitLog(requestlog.Record{
 		Client:      clientName,
 		ClientToken: maskClientToken(clientToken),
@@ -766,6 +778,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		Stream:      stream,
 		Path:        path,
 		Attempts:    attempts,
+		Error:       errField,
 	})
 	return false, true
 }
