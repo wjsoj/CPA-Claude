@@ -7,7 +7,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/sirupsen/logrus v1.9.4
-	github.com/wjsoj/cc-core v0.1.0
+	github.com/wjsoj/cc-core v0.1.3
 	gopkg.in/yaml.v3 v3.0.1
 )
 
