@@ -13,7 +13,8 @@ import {
   YAxis,
 } from "recharts";
 import { Info } from "lucide-react";
-import type { HourBucket, Pricing, PricingEntry, RequestAgg } from "@/lib/types";
+import type { HourBucket, Pricing, RequestAgg } from "@/lib/types";
+import { lookupPriceAnyProvider } from "@/lib/pricing";
 import {
   ChartContainer,
   ChartLegend,
@@ -140,19 +141,10 @@ export function DashboardBoard({
   busy = false,
   clientsAnonymized = false,
 }: DashboardBoardProps) {
-  const lookupPrice = (model: string): PricingEntry | null => {
-    if (!pricing) return null;
-    const m = (model || "").toLowerCase().trim();
-    const models = pricing.models || {};
-    if (m && models[m]) return models[m];
-    if (m) {
-      for (let i = m.lastIndexOf("-"); i > 0; i = m.lastIndexOf("-", i - 1)) {
-        const p = models[m.slice(0, i)];
-        if (p) return p;
-      }
-    }
-    return pricing.default || null;
-  };
+  // by_model is keyed by bare model name (no provider prefix), so use the
+  // any-provider lookup which scans the catalog by suffix-after-"/" with the
+  // same prefix-fallback rule as the server.
+  const lookupPrice = (model: string) => lookupPriceAnyProvider(pricing, model);
 
   const cacheStats = (() => {
     if (!lifetimeData) return null;

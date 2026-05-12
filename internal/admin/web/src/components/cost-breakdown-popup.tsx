@@ -4,10 +4,12 @@ import {
   HoverCardPortal,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
-import type { Pricing, PricingEntry } from "@/lib/types";
+import type { Pricing } from "@/lib/types";
+import { lookupPrice, matchedModelKey } from "@/lib/pricing";
 import { cn, fmtInt } from "@/lib/utils";
 
 interface Props {
+  provider?: string;
   model?: string;
   inputTokens: number;
   outputTokens: number;
@@ -16,20 +18,6 @@ interface Props {
   costUsd: number;
   pricing?: Pricing | null;
   children: React.ReactNode;
-}
-
-function lookupPrice(pricing: Pricing | null | undefined, model?: string): PricingEntry | null {
-  if (!pricing) return null;
-  const m = (model || "").toLowerCase().trim();
-  const models = pricing.models || {};
-  if (m && models[m]) return models[m];
-  if (m) {
-    for (let i = m.lastIndexOf("-"); i > 0; i = m.lastIndexOf("-", i - 1)) {
-      const p = models[m.slice(0, i)];
-      if (p) return p;
-    }
-  }
-  return pricing.default || null;
 }
 
 function fmtRate(perMillion: number): string {
@@ -54,6 +42,7 @@ type Row = {
 };
 
 export function CostBreakdownPopup({
+  provider,
   model,
   inputTokens,
   outputTokens,
@@ -63,18 +52,8 @@ export function CostBreakdownPopup({
   pricing,
   children,
 }: Props) {
-  const price = lookupPrice(pricing, model);
-  const matchedModel = (() => {
-    if (!pricing || !model) return null;
-    const m = model.toLowerCase().trim();
-    const models = pricing.models || {};
-    if (models[m]) return m;
-    for (let i = m.lastIndexOf("-"); i > 0; i = m.lastIndexOf("-", i - 1)) {
-      const key = m.slice(0, i);
-      if (models[key]) return key;
-    }
-    return null;
-  })();
+  const price = lookupPrice(pricing, provider, model);
+  const matched = matchedModelKey(pricing, provider, model);
 
   const rows: Row[] = price
     ? [
@@ -191,7 +170,7 @@ export function CostBreakdownPopup({
                     animationDelay: `${60 + (rows.length + 1) * 45}ms`,
                     animationDuration: "300ms",
                   }}
-                  title="Local recompute differs from server-recorded total. Pricing may have changed or includes advisor sub-call."
+                  title="Local recompute differs from server-recorded total. Pricing catalog may have updated since the row was logged, or the request triggered an advisor sub-call billed separately."
                 >
                   <div>Δ vs. server-logged</div>
                   <div className="tabular text-right">
@@ -208,14 +187,15 @@ export function CostBreakdownPopup({
                   animationDuration: "320ms",
                 }}
               >
-                Rates from pricing catalog
-                {matchedModel && matchedModel !== (model || "").toLowerCase().trim() ? (
+                Rates from catalog
+                {matched ? (
                   <>
-                    {" · matched "}
-                    <span className="text-foreground">{matchedModel}</span>
-                    {" (prefix)"}
+                    {" · "}
+                    <span className="text-foreground">{matched}</span>
                   </>
-                ) : null}
+                ) : (
+                  " · provider/global default"
+                )}
                 . Server cost is authoritative; local sum shown for traceability.
               </div>
             </div>

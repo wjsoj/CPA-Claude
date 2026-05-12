@@ -331,6 +331,7 @@ type statusDailyEntry struct {
 
 type statusRecentEntry struct {
 	TS         time.Time `json:"ts"`
+	Provider   string    `json:"provider,omitempty"`
 	Model      string    `json:"model,omitempty"`
 	Input      int64     `json:"input_tokens"`
 	Output     int64     `json:"output_tokens"`
@@ -480,6 +481,7 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 					}
 					b.recent = append(b.recent, statusRecentEntry{
 						TS:         rec.TS,
+						Provider:   rec.Provider,
 						Model:      rec.Model,
 						Input:      rec.Input,
 						Output:     rec.Output,
@@ -607,6 +609,7 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 		}
 		all = append(all, statusRecentEntry{
 			TS:         rec.TS,
+			Provider:   rec.Provider,
 			Model:      rec.Model,
 			Input:      rec.Input,
 			Output:     rec.Output,

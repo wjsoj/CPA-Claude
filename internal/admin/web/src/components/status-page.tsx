@@ -974,6 +974,7 @@ function TokenLedger({ r, fullToken }: { r: StatusTokenResult; fullToken: string
                     </td>
                     <td className="py-1.5 px-3 tabular text-right font-medium">
                       <CostBreakdownPopup
+                        provider={e.provider}
                         model={e.model}
                         inputTokens={e.input_tokens}
                         outputTokens={e.output_tokens}

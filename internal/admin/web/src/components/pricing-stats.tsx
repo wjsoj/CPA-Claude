@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
-import type { Pricing, PricingEntry, RequestsResp } from "@/lib/types";
+import type { Pricing, RequestsResp } from "@/lib/types";
 import { Card } from "@/components/ui/card";
 import { fmtInt } from "@/lib/utils";
+import { lookupPriceAnyProvider } from "@/lib/pricing";
 
 interface Props {
   pricing?: Pricing;
@@ -14,19 +15,10 @@ export function PricingStats({ pricing, refreshTick }: Props) {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const lookupPrice = (model: string): PricingEntry | null => {
-    if (!pricing) return null;
-    const m = (model || "").toLowerCase().trim();
-    const models = pricing.models || {};
-    if (m && models[m]) return models[m];
-    if (m) {
-      for (let i = m.lastIndexOf("-"); i > 0; i = m.lastIndexOf("-", i - 1)) {
-        const p = models[m.slice(0, i)];
-        if (p) return p;
-      }
-    }
-    return pricing.default || null;
-  };
+  // by_model is keyed by bare model name (no provider prefix), so use the
+  // any-provider lookup which scans the catalog by suffix-after-"/" with the
+  // same prefix-fallback rule as the server.
+  const lookupPrice = (model: string) => lookupPriceAnyProvider(pricing, model);
 
   const load = useCallback(async () => {
     setBusy(true);
