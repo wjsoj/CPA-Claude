@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
-import type { Pricing, PricingEntry, RequestEntry, RequestsResp } from "@/lib/types";
+import type { Pricing, RequestEntry, RequestsResp } from "@/lib/types";
+import { lookupPrice as lookupPriceShared } from "@/lib/pricing";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,41 +26,8 @@ const localDate = (d: Date) =>
 const cost = (v: number | undefined | null) => "$" + (v || 0).toFixed(4);
 
 export function RequestsExplorer({ refreshTick, pricing }: Props) {
-  // Mirror the server-side pricing.Catalog.Lookup: keys in pricing.models are
-  // canonical "provider/model"; resolution is exact → hyphen-prefix walk →
-  // provider_defaults → global default. Also strip the "(effort)" suffix
-  // (e.g. "gpt-5.3-codex(high)") before matching — same as the Go side.
-  const canonicalProvider = (p: string | undefined | null): string => {
-    const v = (p || "").toLowerCase().trim();
-    if (v === "" || v === "anthropic" || v === "claude") return "anthropic";
-    if (v === "openai" || v === "codex" || v === "chatgpt") return "openai";
-    return v;
-  };
-
-  const lookupPrice = (provider: string | undefined, model: string): PricingEntry | null => {
-    if (!pricing) return null;
-    const models = pricing.models || {};
-    const prov = canonicalProvider(provider);
-    let m = (model || "").toLowerCase().trim();
-    if (m.endsWith(")")) {
-      const i = m.lastIndexOf("(");
-      if (i > 0) m = m.slice(0, i).trim();
-    }
-    if (m) {
-      const full = `${prov}/${m}`;
-      if (models[full]) return models[full];
-      for (let i = m.lastIndexOf("-"); i > 0; i = m.lastIndexOf("-", i - 1)) {
-        const p = models[`${prov}/${m.slice(0, i)}`];
-        if (p) return p;
-      }
-    }
-    const provDef = pricing.provider_defaults?.[prov];
-    if (provDef) return provDef;
-    return pricing.default || null;
-  };
-
   const costBreakdown = (r: RequestEntry) => {
-    const p = lookupPrice(r.provider, r.model);
+    const p = lookupPriceShared(pricing, r.provider, r.model);
     if (!p) return null;
     const fmt = (tok: number, per1m: number) =>
       `${fmtInt(tok)} × $${per1m.toFixed(2)}/1M = $${((tok * per1m) / 1e6).toFixed(6)}`;

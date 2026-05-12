@@ -29,6 +29,7 @@ export interface StatusOverview {
 
 export interface StatusRecent {
   ts: string;
+  provider?: string;
   model?: string;
   input_tokens: number;
   output_tokens: number;
