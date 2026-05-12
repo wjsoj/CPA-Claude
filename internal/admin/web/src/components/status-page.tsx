@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { StatusDashboardPanel } from "./status-dashboard-panel";
 import {
+  loadStatusDashboard,
   loadStatusOverview,
   loadSavedTokens,
   queryStatusHistory,
@@ -26,6 +27,8 @@ import {
   type StatusRecent,
   type StatusTokenResult,
 } from "@/lib/status-api";
+import type { Pricing } from "@/lib/types";
+import { CostBreakdownPopup } from "./cost-breakdown-popup";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import {
   ChartContainer,
@@ -763,6 +766,20 @@ function TokenLedger({ r, fullToken }: { r: StatusTokenResult; fullToken: string
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [filterActive, setFilterActive] = useState(false);
+  const [pricing, setPricing] = useState<Pricing | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    loadStatusDashboard()
+      .then((d) => {
+        if (!cancelled && d.pricing) setPricing(d.pricing);
+      })
+      .catch(() => {
+        /* breakdown will gracefully degrade if catalog unavailable */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [page, setPage] = useState<{
     entries: StatusRecent[];
     total: number;
@@ -956,7 +973,22 @@ function TokenLedger({ r, fullToken }: { r: StatusTokenResult; fullToken: string
                       {fmtInt(e.cache_create_tokens)}
                     </td>
                     <td className="py-1.5 px-3 tabular text-right font-medium">
-                      ${e.cost_usd.toFixed(4)}
+                      <CostBreakdownPopup
+                        model={e.model}
+                        inputTokens={e.input_tokens}
+                        outputTokens={e.output_tokens}
+                        cacheReadTokens={e.cache_read_tokens}
+                        cacheCreateTokens={e.cache_create_tokens}
+                        costUsd={e.cost_usd}
+                        pricing={pricing}
+                      >
+                        <button
+                          type="button"
+                          className="cursor-help underline decoration-dotted decoration-border underline-offset-[3px] hover:decoration-foreground/60 transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm px-0.5 -mx-0.5"
+                        >
+                          ${e.cost_usd.toFixed(4)}
+                        </button>
+                      </CostBreakdownPopup>
                     </td>
                     <td
                       className={cn(
