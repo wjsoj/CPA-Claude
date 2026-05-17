@@ -985,9 +985,13 @@ function TokenLedger({ r, fullToken }: { r: StatusTokenResult; fullToken: string
                       >
                         <button
                           type="button"
-                          className="cursor-help underline decoration-dotted decoration-border underline-offset-[3px] hover:decoration-foreground/60 transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm px-0.5 -mx-0.5"
+                          className="group relative inline-flex items-baseline cursor-help font-medium tabular transition-colors hover:text-primary outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm px-0.5 -mx-0.5"
                         >
-                          ${e.cost_usd.toFixed(4)}
+                          <span>${e.cost_usd.toFixed(4)}</span>
+                          <span
+                            aria-hidden
+                            className="pointer-events-none absolute inset-x-0.5 -bottom-0.5 h-px bg-[linear-gradient(to_right,currentColor_50%,transparent_50%)] bg-[length:4px_1px] bg-repeat-x opacity-60 scale-x-0 origin-left transition-transform duration-300 ease-out group-hover:scale-x-100"
+                          />
                         </button>
                       </CostBreakdownPopup>
                     </td>

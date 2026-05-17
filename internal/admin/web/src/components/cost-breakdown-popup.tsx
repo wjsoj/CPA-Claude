@@ -38,7 +38,7 @@ type Row = {
   tokens: number;
   rate: number;
   cost: number;
-  shade: string;
+  dim?: boolean;
 };
 
 export function CostBreakdownPopup({
@@ -63,7 +63,6 @@ export function CostBreakdownPopup({
           tokens: inputTokens,
           rate: price.input_per_1m,
           cost: (inputTokens * price.input_per_1m) / 1_000_000,
-          shade: "text-foreground",
         },
         {
           key: "out",
@@ -71,7 +70,6 @@ export function CostBreakdownPopup({
           tokens: outputTokens,
           rate: price.output_per_1m,
           cost: (outputTokens * price.output_per_1m) / 1_000_000,
-          shade: "text-foreground",
         },
         {
           key: "cr",
@@ -79,7 +77,7 @@ export function CostBreakdownPopup({
           tokens: cacheReadTokens,
           rate: price.cache_read_per_1m,
           cost: (cacheReadTokens * price.cache_read_per_1m) / 1_000_000,
-          shade: "opacity-80",
+          dim: true,
         },
         {
           key: "cw",
@@ -87,14 +85,14 @@ export function CostBreakdownPopup({
           tokens: cacheCreateTokens,
           rate: price.cache_create_per_1m,
           cost: (cacheCreateTokens * price.cache_create_per_1m) / 1_000_000,
-          shade: "opacity-80",
+          dim: true,
         },
       ]
     : [];
 
   const computed = rows.reduce((s, r) => s + r.cost, 0);
   const diff = costUsd - computed;
-  const reconciles = price ? Math.abs(diff) < 0.0001 : false;
+  const drift = price ? Math.abs(diff) > 0.0005 : false;
 
   return (
     <HoverCard openDelay={120} closeDelay={80}>
@@ -102,102 +100,169 @@ export function CostBreakdownPopup({
       <HoverCardPortal>
         <HoverCardContent
           side="left"
-          align="center"
-          sideOffset={8}
-          className="w-[320px] p-0 mono"
+          align="start"
+          sideOffset={10}
+          collisionPadding={12}
+          className={cn(
+            "w-[22rem] max-w-[92vw] p-0 overflow-hidden mono",
+            "rounded-xl border border-border/80 bg-popover text-popover-foreground",
+            "shadow-[0_20px_70px_-20px_rgba(0,0,0,0.45),0_4px_12px_-6px_rgba(0,0,0,0.25)]",
+          )}
         >
-          {/* Header */}
-          <div className="flex items-center justify-between gap-3 px-3 pt-3 pb-2 border-b border-border/60">
-            <div className="min-w-0">
-              <div className="eyebrow text-[10px] opacity-60 leading-none mb-1">
+          {/* Hairline accent ribbon along the top edge */}
+          <div
+            aria-hidden
+            className="h-[2px] w-full bg-gradient-to-r from-primary/0 via-primary/70 to-primary/0 animate-in fade-in-0 zoom-in-95 fill-mode-both"
+            style={{ animationDuration: "260ms" }}
+          />
+
+          {/* Header — model + total */}
+          <div
+            className="flex items-start justify-between gap-3 px-4 pt-3.5 pb-3 border-b border-border/60 animate-in fade-in-0 slide-in-from-top-1 fill-mode-both"
+            style={{ animationDelay: "40ms", animationDuration: "280ms" }}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="eyebrow text-[9px] uppercase tracking-[0.18em] opacity-60">
                 Cost breakdown
               </div>
-              <div className="text-[11px] truncate" title={model || ""}>
+              <div
+                className="mt-1 text-xs font-medium text-foreground truncate"
+                title={model || ""}
+              >
                 {model || "—"}
               </div>
+              <div className="mt-0.5 text-[10px] opacity-60">
+                {(provider || "anthropic")}
+              </div>
             </div>
-            <div className="text-right tabular">
-              <div className="eyebrow text-[10px] opacity-60 leading-none mb-1">Total</div>
-              <div className="text-sm font-medium">{fmtCost(costUsd)}</div>
+            <div className="text-right shrink-0">
+              <div className="eyebrow text-[9px] uppercase tracking-[0.18em] opacity-60">
+                Total
+              </div>
+              <div className="mt-1 text-sm font-semibold tabular text-foreground">
+                {fmtCost(costUsd)}
+              </div>
             </div>
           </div>
 
           {/* Body */}
           {!price ? (
-            <div className="px-3 py-4 text-[11px] text-muted-foreground">
+            <div className="px-4 py-4 text-[11px] text-muted-foreground">
               pricing catalog unavailable — cost was logged as{" "}
-              <span className="text-foreground">{fmtCost(costUsd)}</span> by the server.
+              <span className="text-foreground">{fmtCost(costUsd)}</span> by the
+              server.
             </div>
           ) : (
-            <div className="px-3 py-2.5 space-y-1.5">
-              <div className="grid grid-cols-[1fr_auto_auto] gap-x-3 gap-y-0 items-baseline text-[11px]">
-                <div className="eyebrow text-[9px] opacity-50">Category</div>
-                <div className="eyebrow text-[9px] opacity-50 text-right">Tokens × Rate / 1M</div>
-                <div className="eyebrow text-[9px] opacity-50 text-right">Subtotal</div>
+            <div className="px-4 pt-2.5 pb-3 space-y-1">
+              <div className="grid grid-cols-[auto_1fr_auto] gap-x-3 items-baseline pb-1.5 eyebrow text-[9px] uppercase tracking-[0.15em] opacity-55">
+                <span>Category</span>
+                <span className="text-right">Tokens × Rate / 1M</span>
+                <span className="text-right">Subtotal</span>
               </div>
               {rows.map((r, i) => (
                 <div
                   key={r.key}
                   className={cn(
-                    "grid grid-cols-[1fr_auto_auto] gap-x-3 items-baseline text-[11px]",
-                    "animate-in fade-in-0 slide-in-from-left-1 fill-mode-both",
-                    r.shade,
+                    "grid grid-cols-[auto_1fr_auto] gap-x-3 items-baseline text-[11px] py-0.5",
+                    r.dim && "opacity-70",
+                    "animate-in fade-in-0 slide-in-from-left-2 fill-mode-both",
                   )}
-                  style={{ animationDelay: `${60 + i * 45}ms`, animationDuration: "260ms" }}
+                  style={{
+                    animationDelay: `${100 + i * 50}ms`,
+                    animationDuration: "280ms",
+                  }}
                 >
-                  <div className="truncate">{r.label}</div>
-                  <div className="tabular text-right opacity-70 whitespace-nowrap">
+                  <span className="text-foreground/85">{r.label}</span>
+                  <span className="text-right opacity-70 tabular whitespace-nowrap">
                     <span className="text-foreground">{fmtInt(r.tokens)}</span>
-                    <span className="opacity-50"> × </span>
+                    <span className="opacity-60"> × </span>
                     <span>{fmtRate(r.rate)}</span>
-                  </div>
-                  <div className="tabular text-right whitespace-nowrap">{fmtCost(r.cost)}</div>
+                    <span className="opacity-60">/M</span>
+                  </span>
+                  <span className="text-right tabular text-foreground">
+                    {fmtCost(r.cost)}
+                  </span>
                 </div>
               ))}
-              {/* Sum line */}
+
+              {/* Σ computed total */}
               <div
-                className="grid grid-cols-[1fr_auto_auto] gap-x-3 items-baseline text-[11px] pt-1.5 mt-1 border-t border-border/50 animate-in fade-in-0 fill-mode-both"
-                style={{ animationDelay: `${60 + rows.length * 45}ms`, animationDuration: "300ms" }}
-              >
-                <div className="opacity-70">Σ computed</div>
-                <div />
-                <div className="tabular text-right font-medium">{fmtCost(computed)}</div>
-              </div>
-              {!reconciles && (
-                <div
-                  className="grid grid-cols-[1fr_auto] gap-x-3 items-baseline text-[10px] text-amber-600 dark:text-amber-400 animate-in fade-in-0 fill-mode-both"
-                  style={{
-                    animationDelay: `${60 + (rows.length + 1) * 45}ms`,
-                    animationDuration: "300ms",
-                  }}
-                  title="Local recompute differs from server-recorded total. Pricing catalog may have updated since the row was logged, or the request triggered an advisor sub-call billed separately."
-                >
-                  <div>Δ vs. server-logged</div>
-                  <div className="tabular text-right">
-                    {diff >= 0 ? "+" : ""}
-                    {fmtCost(diff)}
-                  </div>
-                </div>
-              )}
-              {/* Footer note */}
-              <div
-                className="pt-1.5 mt-1 border-t border-border/40 text-[10px] opacity-55 leading-snug animate-in fade-in-0 fill-mode-both"
+                className="grid grid-cols-[auto_1fr_auto] gap-x-3 items-baseline text-[11px] pt-2 mt-1 border-t border-dashed border-border/60 animate-in fade-in-0 fill-mode-both"
                 style={{
-                  animationDelay: `${60 + (rows.length + 2) * 45}ms`,
-                  animationDuration: "320ms",
+                  animationDelay: `${100 + rows.length * 50}ms`,
+                  animationDuration: "300ms",
                 }}
               >
-                Rates from catalog
-                {matched ? (
-                  <>
-                    {" · "}
-                    <span className="text-foreground">{matched}</span>
-                  </>
-                ) : (
-                  " · provider/global default"
-                )}
-                . Server cost is authoritative; local sum shown for traceability.
+                <span className="opacity-70">Σ computed</span>
+                <span />
+                <span className="text-right tabular font-medium">
+                  {fmtCost(computed)}
+                </span>
               </div>
+            </div>
+          )}
+
+          {/* Settled — accented strip at the bottom */}
+          {price && (
+            <div
+              className={cn(
+                "relative px-4 py-2.5 flex items-baseline justify-between gap-3",
+                "border-t border-border/60 bg-primary/[0.07]",
+                "animate-in fade-in-0 slide-in-from-bottom-1 fill-mode-both",
+              )}
+              style={{
+                animationDelay: `${100 + (rows.length + 1) * 50}ms`,
+                animationDuration: "320ms",
+              }}
+            >
+              <span className="eyebrow text-[10px] uppercase tracking-[0.15em] text-foreground/80">
+                Server logged
+              </span>
+              <span className="text-sm font-semibold tabular text-foreground">
+                {fmtCost(costUsd)}
+              </span>
+              <span
+                aria-hidden
+                className="absolute inset-y-0 left-0 w-[2px] bg-primary"
+              />
+            </div>
+          )}
+
+          {/* Drift warning */}
+          {drift && (
+            <div
+              className="px-4 py-2 border-t border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[10px] leading-relaxed animate-in fade-in-0 fill-mode-both"
+              style={{
+                animationDelay: `${100 + (rows.length + 2) * 50}ms`,
+                animationDuration: "320ms",
+              }}
+              title="Local recompute differs from server-recorded total. Pricing catalog may have updated since the row was logged, or the request triggered an advisor sub-call billed separately."
+            >
+              Δ vs. server-logged: {diff >= 0 ? "+" : ""}
+              {fmtCost(diff)} — catalog may have shifted, or an advisor sub-call
+              was billed separately.
+            </div>
+          )}
+
+          {/* Footer note */}
+          {price && (
+            <div
+              className="px-4 py-2 border-t border-border/40 text-[10px] opacity-55 leading-snug animate-in fade-in-0 fill-mode-both"
+              style={{
+                animationDelay: `${100 + (rows.length + 3) * 50}ms`,
+                animationDuration: "320ms",
+              }}
+            >
+              Rates from catalog
+              {matched ? (
+                <>
+                  {" · "}
+                  <span className="text-foreground">{matched}</span>
+                </>
+              ) : (
+                " · provider/global default"
+              )}
+              . Server cost is authoritative.
             </div>
           )}
         </HoverCardContent>
