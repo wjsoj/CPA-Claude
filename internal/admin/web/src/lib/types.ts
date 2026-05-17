@@ -54,6 +54,49 @@ export interface AuthRow {
   usage?: UsageSummary;
   codex_rate_limits?: Record<string, string>;
   codex_rate_limits_at?: string;
+  // Live snapshot from chatgpt.com/backend-api/wham/usage (active probe via
+  // cc-core FetchCodexUsage). Carries the official portal view of the
+  // primary/secondary rate-limit windows, credit balance, and plan type.
+  codex_usage?: CodexUsage;
+  codex_usage_at?: string;
+}
+
+export interface CodexUsageRateWindow {
+  used_percent?: number;
+  limit_window_seconds?: number;
+  reset_after_seconds?: number;
+  reset_at?: number; // unix seconds
+}
+
+export interface CodexUsage {
+  user_id?: string;
+  account_id?: string;
+  email?: string;
+  plan_type?: string;
+  updated?: string;
+  rate_limit?: {
+    allowed?: boolean;
+    limit_reached?: boolean;
+    primary_window?: CodexUsageRateWindow;
+    secondary_window?: CodexUsageRateWindow;
+  };
+  credits?: {
+    has_credits?: boolean;
+    unlimited?: boolean;
+    overage_limit_reached?: boolean;
+    balance?: string;
+    approx_local_messages?: number[];
+    approx_cloud_messages?: number[];
+  };
+  spend_control?: {
+    reached?: boolean;
+    individual_limit?: number | null;
+  };
+  rate_limit_reached_type?: string | null;
+}
+
+export interface CodexUsageResponse {
+  usage?: CodexUsage;
 }
 
 export interface ClientRow {

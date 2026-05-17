@@ -1,7 +1,7 @@
 import React from "react";
 import type { AuthRow } from "@/lib/types";
 import { Sparkline } from "./sparkline";
-import { CardUpstreamQuota } from "./upstream-quota";
+import { CardUpstreamCodex, CardUpstreamQuota } from "./upstream-quota";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { GroupBadge } from "./group-badge";
@@ -244,6 +244,7 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
       )}
 
       {a.kind === "oauth" && a.provider === "anthropic" && <CardUpstreamQuota auth={a} />}
+      {a.kind === "oauth" && a.provider === "openai" && <CardUpstreamCodex auth={a} />}
       {a.kind === "oauth" && a.provider === "openai" && u && (
         <div className="px-5 py-3 border-t border-border bg-muted/20">
           <div className="flex items-center justify-between gap-2">

@@ -148,6 +148,7 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/oauth/session-cookie", h.handleOAuthSessionCookie)
 		api.POST("/apikeys", h.handleCreateAPIKey)
 		api.POST("/auths/:id/anthropic-usage", h.handleAnthropicUsage)
+		api.POST("/auths/:id/codex-usage", h.handleCodexUsage)
 		api.GET("/requests", h.handleRequestsQuery)
 		api.GET("/requests/clients", h.handleRequestsClients)
 		api.GET("/requests/hourly", h.handleRequestsHourly)
@@ -279,6 +280,11 @@ type authRow struct {
 	// Empty for non-OAuth / non-Codex credentials or until first call.
 	CodexRateLimits   map[string]string `json:"codex_rate_limits,omitempty"`
 	CodexRateLimitsAt *time.Time        `json:"codex_rate_limits_at,omitempty"`
+	// CodexUsage is the latest wham/usage snapshot (active probe of the
+	// chatgpt.com web portal — see FetchCodexUsage in cc-core). Stays nil
+	// for non-Codex creds and for Codex creds that have never been probed.
+	CodexUsage   *auth.CodexUsageInfo `json:"codex_usage,omitempty"`
+	CodexUsageAt *time.Time           `json:"codex_usage_at,omitempty"`
 }
 
 type usageSummary struct {
@@ -410,6 +416,23 @@ func (h *Handler) handleSummary(c *gin.Context) {
 					return nil
 				}
 				t := snap.CodexRateLimitsAt
+				return &t
+			}(),
+			CodexUsage: func() *auth.CodexUsageInfo {
+				if live == nil {
+					return nil
+				}
+				return live.Snapshot().CodexUsage
+			}(),
+			CodexUsageAt: func() *time.Time {
+				if live == nil {
+					return nil
+				}
+				snap := live.Snapshot()
+				if snap.CodexUsageAt.IsZero() {
+					return nil
+				}
+				t := snap.CodexUsageAt
 				return &t
 			}(),
 		})
@@ -1066,6 +1089,35 @@ func (h *Handler) handleAnthropicUsage(c *gin.Context) {
 			"error":  profileErr,
 		},
 	})
+}
+
+// handleCodexUsage actively probes chatgpt.com/backend-api/wham/usage for an
+// OpenAI OAuth credential. Unlike Anthropic's api/oauth/usage — which is only
+// hit on manual click here — Codex's wham/usage is the official portal
+// endpoint and safe to call any time without third-party-detection risk.
+// The same data is also mirrored back into a.CodexRateLimits (the legacy
+// x-codex-* surface), and a limit_reached=true reply triggers
+// MarkUsageLimitReached on the credential so the scheduler skips it until
+// the soonest window resets. See cc-core/auth/codex_usage.go.
+func (h *Handler) handleCodexUsage(c *gin.Context) {
+	id := c.Param("id")
+	a := h.pool.FindByID(id)
+	if a == nil || a.Kind != auth.KindOAuth {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "oauth credential not found"})
+		return
+	}
+	if auth.NormalizeProvider(a.Provider) != auth.ProviderOpenAI {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "codex-usage endpoint is OpenAI-only"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	info, err := a.FetchCodexUsage(ctx, h.pool.UseUTLS())
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"usage": info})
 }
 
 // ---- request log query ----
