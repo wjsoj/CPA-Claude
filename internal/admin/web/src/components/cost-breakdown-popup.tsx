@@ -15,7 +15,14 @@ interface Props {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreateTokens: number;
+  // costUsd is the official upstream cost. billedUsd (if > 0) is what
+  // actually hit the user's wallet — costUsd × multiplier. When
+  // billedUsd is set the popup's footer strip + the bottom-line total
+  // shift to "You paid" semantics; when unset (admin view, or rows
+  // pre-dating SaaS billing) we fall back to showing costUsd alone.
   costUsd: number;
+  billedUsd?: number;
+  multiplier?: number;
   pricing?: Pricing | null;
   children: React.ReactNode;
 }
@@ -49,11 +56,19 @@ export function CostBreakdownPopup({
   cacheReadTokens,
   cacheCreateTokens,
   costUsd,
+  billedUsd,
+  multiplier,
   pricing,
   children,
 }: Props) {
   const price = lookupPrice(pricing, provider, model);
   const matched = matchedModelKey(pricing, provider, model);
+  // When the row carries a billed amount + multiplier (status page side),
+  // surface the "you paid" math; the admin panel passes neither so the
+  // popup degrades to its original "official cost only" form.
+  const hasBilling =
+    billedUsd !== undefined && billedUsd > 0 && multiplier !== undefined && multiplier > 0;
+  const headlineTotal = hasBilling ? (billedUsd as number) : costUsd;
 
   const rows: Row[] = price
     ? [
@@ -137,11 +152,16 @@ export function CostBreakdownPopup({
             </div>
             <div className="text-right shrink-0">
               <div className="eyebrow text-[9px] uppercase tracking-[0.18em] opacity-60">
-                Total
+                {hasBilling ? "You paid" : "Total"}
               </div>
               <div className="mt-1 text-sm font-semibold tabular text-foreground">
-                {fmtCost(costUsd)}
+                {fmtCost(headlineTotal)}
               </div>
+              {hasBilling && (
+                <div className="mt-0.5 text-[10px] opacity-60 tabular">
+                  ×{(multiplier as number).toFixed(4)} of {fmtCost(costUsd)}
+                </div>
+              )}
             </div>
           </div>
 
@@ -185,7 +205,8 @@ export function CostBreakdownPopup({
                 </div>
               ))}
 
-              {/* Σ computed total */}
+              {/* Σ upstream — sum of the per-bucket subtotals (the
+                  catalog rate × tokens, before any group multiplier). */}
               <div
                 className="grid grid-cols-[auto_1fr_auto] gap-x-3 items-baseline text-[11px] pt-2 mt-1 border-t border-dashed border-border/60 animate-in fade-in-0 fill-mode-both"
                 style={{
@@ -193,12 +214,52 @@ export function CostBreakdownPopup({
                   animationDuration: "300ms",
                 }}
               >
-                <span className="opacity-70">Σ computed</span>
+                <span className="opacity-70">
+                  {hasBilling ? "Σ upstream" : "Σ computed"}
+                </span>
                 <span />
-                <span className="text-right tabular font-medium">
+                <span
+                  className={cn(
+                    "text-right tabular",
+                    hasBilling ? "opacity-70" : "font-medium",
+                  )}
+                >
                   {fmtCost(computed)}
                 </span>
               </div>
+              {/* Multiplier line — present only when SaaS billing
+                  applied to this row. */}
+              {hasBilling && (
+                <div
+                  className="grid grid-cols-[auto_1fr_auto] gap-x-3 items-baseline text-[11px] animate-in fade-in-0 fill-mode-both"
+                  style={{
+                    animationDelay: `${100 + (rows.length + 1) * 50}ms`,
+                    animationDuration: "300ms",
+                  }}
+                >
+                  <span className="opacity-70">× multiplier</span>
+                  <span />
+                  <span className="text-right tabular opacity-70">
+                    {(multiplier as number).toFixed(4)}
+                  </span>
+                </div>
+              )}
+              {/* = billed (you paid). */}
+              {hasBilling && (
+                <div
+                  className="grid grid-cols-[auto_1fr_auto] gap-x-3 items-baseline text-[11px] pt-1 mt-0.5 border-t border-dashed border-border/40 animate-in fade-in-0 fill-mode-both"
+                  style={{
+                    animationDelay: `${100 + (rows.length + 2) * 50}ms`,
+                    animationDuration: "300ms",
+                  }}
+                >
+                  <span className="font-medium">= billed</span>
+                  <span />
+                  <span className="text-right tabular font-medium">
+                    {fmtCost(billedUsd as number)}
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
@@ -216,10 +277,10 @@ export function CostBreakdownPopup({
               }}
             >
               <span className="eyebrow text-[10px] uppercase tracking-[0.15em] text-foreground/80">
-                Server logged
+                {hasBilling ? "Wallet debited" : "Server logged"}
               </span>
               <span className="text-sm font-semibold tabular text-foreground">
-                {fmtCost(costUsd)}
+                {fmtCost(headlineTotal)}
               </span>
               <span
                 aria-hidden

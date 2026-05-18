@@ -35,7 +35,13 @@ export interface StatusRecent {
   output_tokens: number;
   cache_read_tokens: number;
   cache_create_tokens: number;
+  // cost_usd is the official upstream cost (catalog × tokens). The
+  // status page surfaces billed_usd (post-multiplier wallet debit) as
+  // the primary number; cost_usd is shown inside the hover popup for
+  // transparency.
   cost_usd: number;
+  billed_usd?: number;
+  multiplier?: number;
   status: number;
   duration_ms: number;
   stream?: boolean;

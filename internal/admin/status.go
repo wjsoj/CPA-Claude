@@ -345,6 +345,13 @@ type statusRecentEntry struct {
 	CacheRead  int64     `json:"cache_read_tokens"`
 	CacheWrite int64     `json:"cache_create_tokens"`
 	CostUSD    float64   `json:"cost_usd"`
+	// BilledUSD is the post-multiplier amount the user's wallet was
+	// debited. Zero on rows pre-dating SaaS billing or on error
+	// statuses where nothing settled. The status page's Usage Lookup
+	// renders this as the primary number; cost_usd is shown in the
+	// hover popup as the "official" upstream cost.
+	BilledUSD  float64   `json:"billed_usd,omitempty"`
+	Multiplier float64   `json:"multiplier,omitempty"`
 	Status     int       `json:"status"`
 	DurationMs int64     `json:"duration_ms"`
 	Stream     bool      `json:"stream,omitempty"`
@@ -506,6 +513,8 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 						CacheRead:  rec.CacheRead,
 						CacheWrite: rec.CacheCreate,
 						CostUSD:    rec.CostUSD,
+						BilledUSD:  rec.BilledUSD,
+						Multiplier: rec.Multiplier,
 						Status:     rec.Status,
 						DurationMs: rec.DurationMs,
 						Stream:     rec.Stream,
@@ -634,6 +643,8 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 			CacheRead:  rec.CacheRead,
 			CacheWrite: rec.CacheCreate,
 			CostUSD:    rec.CostUSD,
+			BilledUSD:  rec.BilledUSD,
+			Multiplier: rec.Multiplier,
 			Status:     rec.Status,
 			DurationMs: rec.DurationMs,
 			Stream:     rec.Stream,
