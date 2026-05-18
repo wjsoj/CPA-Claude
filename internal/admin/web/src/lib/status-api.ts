@@ -285,6 +285,14 @@ export function loadWalletOrder(token: string, outTradeNo: string): Promise<Wall
   return authedJSON<WalletOrder>(`/api/wallet/orders/${encodeURIComponent(outTradeNo)}`, token);
 }
 
+export function cancelWalletOrder(token: string, outTradeNo: string): Promise<{ status: string }> {
+  return authedJSON<{ status: string }>(
+    `/api/wallet/orders/${encodeURIComponent(outTradeNo)}`,
+    token,
+    { method: "DELETE" },
+  );
+}
+
 export function topupWallet(token: string, usd: number): Promise<TopupResp> {
   return authedJSON<TopupResp>("/api/wallet/topup", token, {
     method: "POST",

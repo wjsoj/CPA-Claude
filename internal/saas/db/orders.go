@@ -139,6 +139,26 @@ func (db *DB) ExpirePendingOrdersBefore(ctx context.Context, cutoff time.Time) (
 	return n, nil
 }
 
+// DeletePendingOrder removes a single pending order owned by the given
+// token. Refuses to delete orders in any other status — paid/expired/
+// failed states either carry financial reconciliation we must preserve
+// (paid) or are about to be swept by ExpirePendingOrdersBefore anyway
+// (expired/failed). Returns ErrNotFound when no matching pending row
+// existed (already paid, already swept, or never owned by this token).
+func (db *DB) DeletePendingOrder(ctx context.Context, outTradeNo, token string) error {
+	res, err := db.ExecContext(ctx,
+		`DELETE FROM alipay_orders WHERE out_trade_no = ? AND token = ? AND status = ?`,
+		outTradeNo, token, OrderPending)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // CountPendingOrders returns the number of pending orders for a token.
 func (db *DB) CountPendingOrders(ctx context.Context, token string) (int, error) {
 	var n int

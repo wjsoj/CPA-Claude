@@ -19,6 +19,7 @@ import {
   Clock3,
   AlertTriangle,
   XCircle,
+  Trash2,
 } from "lucide-react";
 import {
   loadActiveToken,
@@ -27,6 +28,7 @@ import {
   loadWalletTransactions,
   loadWalletOrders,
   loadWalletOrder,
+  cancelWalletOrder,
   topupWallet,
   loadExchangeRate,
   type WalletBalance,
@@ -44,6 +46,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { confirmDialog } from "@/hooks/use-confirm";
 import { cn, fmtInt } from "@/lib/utils";
 
 function fmtUSD(v: number): string {
@@ -383,8 +386,8 @@ function OrdersCard({
                 <span>{fmtTime(o.created_at)}</span>
                 <span>{fmtCNY(o.cny_amount)} @ ¥{o.rate.toFixed(4)}</span>
               </div>
-              {o.status === "pending" && (o.img || o.pay_url || o.qr_code) && (
-                <div className="mt-2 flex gap-3 flex-wrap">
+              {o.status === "pending" && (
+                <div className="mt-2 flex gap-3 flex-wrap items-center">
                   {o.img && (
                     <a
                       href={o.img}
@@ -395,6 +398,29 @@ function OrdersCard({
                       <ExternalLink className="h-3 w-3" /> show QR
                     </a>
                   )}
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const ok = await confirmDialog({
+                        title: "Cancel this order?",
+                        message: `Order ${o.out_trade_no.slice(0, 18)}… for $${o.usd_credit.toFixed(2)} will be deleted. If you've already paid, do NOT cancel — wait a few seconds for the gateway to settle. This can't be undone.`,
+                        confirmLabel: "Cancel order",
+                        cancelLabel: "Keep it",
+                        danger: true,
+                      });
+                      if (!ok) return;
+                      try {
+                        await cancelWalletOrder(activeToken, o.out_trade_no);
+                        toast.success("Order cancelled");
+                        onPaid();
+                      } catch (e: any) {
+                        toast.error("Cancel failed", { description: e.message || String(e) });
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Trash2 className="h-3 w-3" /> cancel
+                  </button>
                   {o.pay_url && (
                     <a
                       href={o.pay_url}

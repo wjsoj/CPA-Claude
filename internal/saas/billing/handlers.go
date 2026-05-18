@@ -109,6 +109,7 @@ func (h *Handler) UserRoutes(g *gin.RouterGroup) {
 	g.GET("/transactions", h.transactions)
 	g.GET("/orders", h.orders)
 	g.GET("/orders/:id", h.orderStatus)
+	g.DELETE("/orders/:id", h.orderCancel)
 	g.POST("/topup", h.topup)
 }
 
@@ -297,6 +298,26 @@ func (h *Handler) orderStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, orderView(o))
+}
+
+// orderCancel lets a user drop one of their own pending orders — e.g.
+// they changed their mind before paying. Only pending orders are
+// cancellable; paid orders are immutable financial state, and expired
+// rows the sweeper already removes. Ownership is enforced by the
+// DELETE WHERE clause matching both out_trade_no and token, so the
+// endpoint can't be coaxed into deleting another user's row even with
+// a spoofed out_trade_no.
+func (h *Handler) orderCancel(c *gin.Context) {
+	tok, ok := h.requireToken(c)
+	if !ok {
+		return
+	}
+	out := c.Param("id")
+	if err := h.DB.DeletePendingOrder(c.Request.Context(), out, tok); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found or not pending"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
 
 func (h *Handler) notify(c *gin.Context) {
