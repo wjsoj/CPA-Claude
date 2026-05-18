@@ -118,12 +118,20 @@ func (db *DB) MarkOrderExpired(ctx context.Context, outTradeNo string) error {
 	return err
 }
 
-// ExpirePendingOrdersBefore atomically transitions every pending order
-// created before cutoff to expired. Returns the row count touched.
+// ExpirePendingOrdersBefore deletes every pending order created before
+// cutoff. Returns the row count removed.
+//
+// Was originally an UPDATE → 'expired'; switched to outright DELETE so
+// stale orders don't clutter the user's recharge history. The wallet
+// ledger (wallet_tx) is the audit trail for *credited* top-ups; orders
+// that never paid carry no financial state so dropping them entirely is
+// safe. Late notify hits for a dropped order go through the
+// applyNotification "order not found" terminal branch and ACK without
+// effect.
 func (db *DB) ExpirePendingOrdersBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	res, err := db.ExecContext(ctx,
-		`UPDATE alipay_orders SET status = ? WHERE status = ? AND created_at < ?`,
-		OrderExpired, OrderPending, cutoff.Unix())
+		`DELETE FROM alipay_orders WHERE status = ? AND created_at < ?`,
+		OrderPending, cutoff.Unix())
 	if err != nil {
 		return 0, err
 	}
@@ -144,8 +152,12 @@ func (db *DB) ListOrders(ctx context.Context, token string, limit int) ([]*Alipa
 	if limit <= 0 {
 		limit = 50
 	}
+	// Hide expired/failed orders from the user-facing list — they
+	// carry no financial state and the sweeper deletes new ones
+	// outright; this filter also hides rows that were marked expired
+	// by the pre-DELETE sweeper version still living in the DB.
 	rows, err := db.QueryContext(ctx,
-		`SELECT `+orderCols+` FROM alipay_orders WHERE token = ? ORDER BY created_at DESC LIMIT ?`,
+		`SELECT `+orderCols+` FROM alipay_orders WHERE token = ? AND status NOT IN ('expired','failed') ORDER BY created_at DESC LIMIT ?`,
 		token, limit)
 	if err != nil {
 		return nil, err

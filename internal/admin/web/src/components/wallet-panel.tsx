@@ -494,14 +494,57 @@ function TopupModal({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<TopupResp | null>(null);
   const [copied, setCopied] = useState(false);
+  // settled flips true the instant the polling loop sees the order
+  // status go non-pending. Holds the modal in a "Payment received"
+  // confirmation frame for a beat before auto-closing — without it
+  // users would see the modal blink away with no visual ack.
+  const [settled, setSettled] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setResult(null);
       setBusy(false);
       setCopied(false);
+      setSettled(false);
     }
   }, [open]);
+
+  // Auto-detect payment. While the modal is showing a pending order,
+  // poll its status every 3s. The Z-Pay async notify is the source of
+  // truth (server-side credit happens there regardless of this loop) —
+  // this polling exists purely so the modal can self-close the moment
+  // the wallet flips, no "I've paid" click required.
+  useEffect(() => {
+    if (!open || !result || settled) return;
+    let cancelled = false;
+    const id = setInterval(async () => {
+      try {
+        const o = await loadWalletOrder(token, result.out_trade_no);
+        if (cancelled) return;
+        if (o.status === "paid") {
+          setSettled(true);
+          onCreated();
+          toast.success(`Payment received · +$${result.usd_credit.toFixed(2)}`);
+          // Hold the success frame briefly so the user can register what
+          // happened before the dialog vanishes.
+          setTimeout(() => {
+            if (!cancelled) onClose();
+          }, 1400);
+        } else if (o.status === "expired" || o.status === "failed") {
+          if (!cancelled) {
+            toast.error(`Order ${o.status} — please create a new one`);
+            onClose();
+          }
+        }
+      } catch {
+        // network blip — next tick retries; nothing to do
+      }
+    }, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [open, result, settled, token, onCreated, onClose]);
 
   const usdNum = Number(usd) || 0;
   const cnyEst = rate ? usdNum * rate.cny_per_usd : 0;
@@ -658,9 +701,25 @@ function TopupModal({
                 {result.qr_code}
               </div>
             ) : null}
-            <div className="flex justify-end gap-2 pt-1">
-              {(result.pay_url || result.qr_code) && (
-                <Button variant="outline" onClick={copyLink} className="gap-1.5">
+            <div className="flex items-center justify-between gap-2 pt-1">
+              {/* Live status pill replaces the manual "I've paid" button:
+                  the modal polls the order every 3s and closes itself
+                  when Z-Pay's notify lands. */}
+              {settled ? (
+                <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-mono text-sm">
+                  <CheckCircle2 className="h-4 w-4" /> Payment received
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-muted-foreground font-mono text-xs">
+                  <span className="relative inline-flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full rounded-full bg-primary opacity-75 animate-ping" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
+                  </span>
+                  Waiting for payment…
+                </span>
+              )}
+              {(result.pay_url || result.qr_code) && !settled && (
+                <Button variant="outline" size="sm" onClick={copyLink} className="gap-1.5">
                   {copied ? (
                     <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                   ) : (
@@ -669,18 +728,10 @@ function TopupModal({
                   {copied ? "Copied" : "Copy link"}
                 </Button>
               )}
-              <Button
-                onClick={() => {
-                  onClose();
-                  onCreated();
-                }}
-              >
-                I've paid
-              </Button>
             </div>
             <p className="text-[11px] text-muted-foreground text-center">
-              Pay within 15 minutes — pending orders auto-expire. The panel polls every
-              4s and updates your balance the moment payment lands.
+              Pay within 15 minutes — pending orders auto-expire. This dialog closes
+              the moment payment lands.
             </p>
           </div>
         )}
