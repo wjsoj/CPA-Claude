@@ -12,10 +12,12 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Wallet,
   X,
   XCircle,
 } from "lucide-react";
 import { StatusDashboardPanel } from "./status-dashboard-panel";
+import { WalletPanel } from "./wallet-panel";
 import {
   loadStatusDashboard,
   loadStatusOverview,
@@ -128,7 +130,7 @@ function Metric({
   );
 }
 
-type StatusTab = "dashboard" | "lookup";
+type StatusTab = "dashboard" | "wallet" | "lookup";
 
 export function StatusPage() {
   const [ov, setOv] = useState<StatusOverview | null>(null);
@@ -140,7 +142,10 @@ export function StatusPage() {
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<StatusTab>(() => {
     const stored = localStorage.getItem("cpa.status.tab");
-    return stored === "lookup" ? "lookup" : "dashboard";
+    if (stored === "lookup" || stored === "wallet" || stored === "dashboard") {
+      return stored;
+    }
+    return "dashboard";
   });
   const [refreshTick, setRefreshTick] = useState(0);
   useEffect(() => {
@@ -303,6 +308,7 @@ export function StatusPage() {
           <div className="flex overflow-x-auto gap-x-1 gap-y-2 items-end no-scrollbar">
             {([
               { key: "dashboard" as const, label: "Dashboard", hint: "CHARTS · AGGREGATE", icon: BarChart3 },
+              { key: "wallet" as const, label: "Wallet", hint: "BALANCE · TOPUP · ORDERS", icon: Wallet },
               { key: "lookup" as const, label: "Usage lookup", hint: "TOKEN · LEDGER", icon: Search },
             ]).map(({ key, label, hint, icon: Icon }) => {
               const active = tab === key;
@@ -342,6 +348,12 @@ export function StatusPage() {
         {tab === "dashboard" && (
           <div className="stagger pt-2 md:pt-4">
             <StatusDashboardPanel refreshTick={refreshTick} />
+          </div>
+        )}
+
+        {tab === "wallet" && (
+          <div className="stagger pt-2 md:pt-4">
+            <WalletPanel />
           </div>
         )}
 
@@ -564,7 +576,10 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
       </div>
     );
   }
-  const ratio = r.weekly_limit > 0 ? r.weekly_used_usd / r.weekly_limit : 0;
+  // Wallet-low ratio drives the "near limit" badge — replaces the old
+  // weekly-quota progress signal. Threshold is arbitrary; balance < $1
+  // is "topping up soon" territory.
+  const balanceLow = r.balance_usd > 0 && r.balance_usd < 1;
   const daily = r.daily || [];
   const lastRecent = r.recent && r.recent.length > 0 ? r.recent[0] : undefined;
   const lastAuthLabel = lastRecent?.auth_label
@@ -613,9 +628,9 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
         </div>
         {r.blocked ? (
           <Badge variant="destructive" className="gap-1">
-            <XCircle className="h-3 w-3" /> blocked
+            <XCircle className="h-3 w-3" /> empty
           </Badge>
-        ) : r.weekly_limit > 0 && ratio > 0.8 ? (
+        ) : balanceLow ? (
           <Badge
             className="gap-1"
             style={{
@@ -624,7 +639,7 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
               borderColor: "color-mix(in oklab, var(--warning) 40%, transparent)",
             }}
           >
-            <Gauge className="h-3 w-3" /> near limit
+            <Gauge className="h-3 w-3" /> low balance
           </Badge>
         ) : (
           <Badge
@@ -643,28 +658,18 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
       {/* KPI grid */}
       <div className="grid grid-cols-3 gap-2 text-center">
         <div className="border border-border rounded-sm py-2 px-1">
-          <div className="eyebrow mb-1">Week</div>
-          <div className="mono text-sm font-medium tabular">
-            ${r.weekly_used_usd.toFixed(4)}
+          <div className="eyebrow mb-1">Balance</div>
+          <div
+            className={cn(
+              "mono text-sm font-medium tabular",
+              r.blocked && "text-destructive",
+            )}
+          >
+            ${r.balance_usd.toFixed(4)}
           </div>
-          {r.weekly_limit > 0 && (
-            <div className="mt-1.5 h-1 w-full bg-muted rounded-full overflow-hidden">
-              <div
-                className="h-full transition-all"
-                style={{
-                  width: `${Math.min(100, Math.round(ratio * 100))}%`,
-                  background: r.blocked
-                    ? "var(--destructive)"
-                    : ratio > 0.8
-                      ? "var(--warning)"
-                      : "var(--success)",
-                }}
-              />
-            </div>
-          )}
-          {r.weekly_limit > 0 && (
+          {r.pricing_group && (
             <div className="text-[10px] mono opacity-60 mt-1">
-              limit ${r.weekly_limit.toFixed(2)}
+              {r.pricing_group}
             </div>
           )}
         </div>

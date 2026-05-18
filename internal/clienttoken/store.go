@@ -20,11 +20,12 @@ import (
 	"github.com/wjsoj/cc-core/auth"
 )
 
-// Token is one client access token.
+// Token is one client access token. Balance and pricing-group assignment
+// live in the SaaS SQLite store (internal/saas/db) — this struct is just
+// the registry of accepted tokens + their static metadata.
 type Token struct {
 	Token         string    `json:"token"`
 	Name          string    `json:"name"`
-	WeeklyUSD     float64   `json:"weekly_usd,omitempty"`
 	MaxConcurrent int       `json:"max_concurrent,omitempty"` // 0 = use global default
 	RPM           int       `json:"rpm,omitempty"`            // 0 = use global default
 	Group         string    `json:"group,omitempty"`          // credential group scope; empty = public
@@ -35,7 +36,6 @@ type Token struct {
 type View struct {
 	Token         string    `json:"token"`
 	Name          string    `json:"name"`
-	WeeklyUSD     float64   `json:"weekly_usd"`
 	MaxConcurrent int       `json:"max_concurrent,omitempty"`
 	RPM           int       `json:"rpm,omitempty"`
 	Group         string    `json:"group,omitempty"`
@@ -81,15 +81,15 @@ func Open(path string) (*Store, error) {
 }
 
 // Lookup reports whether tok is a known client token.
-func (s *Store) Lookup(tok string) (name string, weekly float64, maxConc int, group string, ok bool) {
+func (s *Store) Lookup(tok string) (name string, maxConc int, group string, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, t := range s.tokens {
 		if t.Token == tok {
-			return t.Name, t.WeeklyUSD, t.MaxConcurrent, t.Group, true
+			return t.Name, t.MaxConcurrent, t.Group, true
 		}
 	}
-	return "", 0, 0, "", false
+	return "", 0, "", false
 }
 
 // RPM returns the per-token RPM override if one is configured. Returns
@@ -120,7 +120,7 @@ func (s *Store) List() []View {
 	out := make([]View, 0, len(s.tokens))
 	for _, t := range s.tokens {
 		out = append(out, View{
-			Token: t.Token, Name: t.Name, WeeklyUSD: t.WeeklyUSD,
+			Token: t.Token, Name: t.Name,
 			MaxConcurrent: t.MaxConcurrent, RPM: t.RPM,
 			Group: t.Group, CreatedAt: t.CreatedAt,
 		})
@@ -133,9 +133,6 @@ func (s *Store) Add(t Token) error {
 	t.Token = strings.TrimSpace(t.Token)
 	if t.Token == "" {
 		return fmt.Errorf("token required")
-	}
-	if t.WeeklyUSD < 0 {
-		t.WeeklyUSD = 0
 	}
 	t.Name = strings.TrimSpace(t.Name)
 	t.Group = auth.NormalizeGroup(t.Group)
@@ -154,20 +151,13 @@ func (s *Store) Add(t Token) error {
 }
 
 // Update patches an existing token. nil fields mean "no change".
-func (s *Store) Update(token string, name *string, weekly *float64, maxConc *int, rpm *int, group *string) error {
+func (s *Store) Update(token string, name *string, maxConc *int, rpm *int, group *string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.tokens {
 		if s.tokens[i].Token == token {
 			if name != nil {
 				s.tokens[i].Name = strings.TrimSpace(*name)
-			}
-			if weekly != nil {
-				w := *weekly
-				if w < 0 {
-					w = 0
-				}
-				s.tokens[i].WeeklyUSD = w
 			}
 			if maxConc != nil {
 				mc := *maxConc

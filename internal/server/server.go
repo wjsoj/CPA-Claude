@@ -17,6 +17,8 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/pricing"
 	"github.com/wjsoj/CPA-Claude/internal/requestlog"
+	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
+	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/thinkingsig"
@@ -59,6 +61,13 @@ type Server struct {
 	// the prior account's signed `thinking` blocks before forwarding
 	// (they would 400 with "signature in thinking" on the new account).
 	switchTracker *thinkingsig.SwitchTracker
+	// saas is the per-token wallet + pricing-group store. nil when SaaS
+	// billing is disabled in config.yaml — in that mode proxy.go's balance
+	// pre-check is short-circuited and the upstream call goes through with
+	// no debit.
+	saas    *saasBilling
+	billing *billing.Handler
+	saasDB  *saasdb.DB
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -76,8 +85,37 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	})
 	s.switchTracker = thinkingsig.NewSwitchTracker()
 
+	// SaaS billing — token wallet + Z-Pay top-ups. Best-effort: if the
+	// DB can't be opened we log loudly and continue without billing so
+	// the proxy itself still serves requests. Operators who require
+	// strict billing should keep an eye on the startup log.
+	if cfg.SaaS.Enabled {
+		ddb, err := saasdb.Open(cfg.SaaS.DBPath)
+		if err != nil {
+			log.Errorf("saas: failed to open %s — billing disabled: %v", cfg.SaaS.DBPath, err)
+		} else {
+			s.saasDB = ddb
+			s.saas = &saasBilling{db: ddb}
+			rate := billing.NewRate("", cfg.SaaS.Exchange.FallbackCNYPerUSD)
+			if u := cfg.SaaS.Exchange.URL; u != "" {
+				rate = billing.NewRate(u, cfg.SaaS.Exchange.FallbackCNYPerUSD)
+			}
+			gw := buildPaymentGateway(cfg)
+			authFn := s.makeBearerAuth()
+			bh := billing.NewHandler(ddb, rate, gw, cfg.SaaS.Site, authFn)
+			s.billing = bh
+			go rate.RunRefresher(context.Background(),
+				time.Duration(cfg.SaaS.Exchange.RefreshIntervalMin)*time.Minute)
+			go bh.RunExpirySweeper(context.Background())
+			log.Infof("saas: billing enabled (db=%s, gateway=%T)", cfg.SaaS.DBPath, gw)
+		}
+	}
+
 	primary := pickPrimary(cfg)
 	adminH := admin.New(cfg, pool, store, cat, tokens)
+	if s.saasDB != nil {
+		adminH.WithSaaS(s.saasDB, s.billing)
+	}
 
 	if cfg.Endpoints.Claude.IsEnabled() {
 		eng := s.buildClaudeEngine(adminH, primary == "claude")
@@ -215,6 +253,7 @@ func (s *Server) buildClaudeEngine(adminH *admin.Handler, primary bool) *gin.Eng
 	if primary {
 		adminH.RegisterStatus(engine)
 		adminH.Register(engine)
+		s.mountBillingRoutes(engine)
 	}
 	return engine
 }
@@ -241,6 +280,7 @@ func (s *Server) buildCodexEngine(adminH *admin.Handler, primary bool) *gin.Engi
 	if primary {
 		adminH.RegisterStatus(engine)
 		adminH.Register(engine)
+		s.mountBillingRoutes(engine)
 	}
 	return engine
 }
@@ -285,7 +325,7 @@ func (s *Server) clientAuth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 			return
 		}
-		name, _, _, _, ok := s.tokens.Lookup(tok)
+		name, _, _, ok := s.tokens.Lookup(tok)
 		if !ok {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
@@ -363,7 +403,7 @@ func (s *Server) handleStatus(c *gin.Context) {
 // clientMaxConcurrent returns the effective max concurrent requests for this
 // client. Per-token override wins; otherwise the global default applies.
 func (s *Server) clientMaxConcurrent(clientToken string) int {
-	if _, _, maxConc, _, ok := s.tokens.Lookup(clientToken); ok && maxConc > 0 {
+	if _, maxConc, _, ok := s.tokens.Lookup(clientToken); ok && maxConc > 0 {
 		return maxConc
 	}
 	return s.cfg.ClientMaxConcurrent

@@ -25,6 +25,7 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
 
   const clients = summary?.clients || [];
   const totalWeekly = clients.reduce((s, c) => s + c.weekly_usd, 0);
+  const totalBalance = clients.reduce((s, c) => s + c.balance_usd, 0);
   const blockedCount = clients.filter((c) => c.blocked).length;
   const managedCount = clients.filter((c) => c.managed).length;
 
@@ -107,10 +108,12 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
           <p className="text-sm text-muted-foreground mt-1.5 mono tabular">
             {fmtInt(clients.length)} token(s) · weekly spend{" "}
             <span className="font-medium text-foreground">${totalWeekly.toFixed(4)}</span>
+            {" "}· wallet balance{" "}
+            <span className="font-medium text-foreground">${totalBalance.toFixed(2)}</span>
             {blockedCount > 0 && (
               <>
                 {" "}
-                · <span className="text-destructive">{blockedCount} blocked</span>
+                · <span className="text-destructive">{blockedCount} empty</span>
               </>
             )}
           </p>
@@ -183,7 +186,8 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
                   <th className="py-3 px-4 font-[inherit]">Token</th>
                   <th className="py-3 px-4 font-[inherit]">Group</th>
                   <th className="py-3 px-4 font-[inherit]">{sortHead("weekly", "Weekly spend")}</th>
-                  <th className="py-3 px-4 font-[inherit]">Limit</th>
+                  <th className="py-3 px-4 font-[inherit]">Balance</th>
+                  <th className="py-3 px-4 font-[inherit]">Pricing group</th>
                   <th
                     className="py-3 px-4 font-[inherit] cursor-help"
                     title="Lifetime cumulative spend per client — persisted in usage state, not derived from request logs."
@@ -196,7 +200,6 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
               </thead>
               <tbody>
                 {sorted.map((cl) => {
-                  const ratio = cl.weekly_limit > 0 ? cl.weekly_usd / cl.weekly_limit : 0;
                   return (
                     <tr
                       key={cl.token}
@@ -228,39 +231,31 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
                         <GroupBadge group={cl.group} />
                       </td>
                       <td className="py-3 px-4 mono text-sm">
+                        <div className="font-medium">${cl.weekly_usd.toFixed(4)}</div>
+                      </td>
+                      <td className="py-3 px-4 mono text-sm">
                         <div
-                          className="font-medium"
-                          style={{
-                            color: cl.blocked
-                              ? "var(--destructive)"
-                              : ratio > 0.8
-                                ? "var(--warning)"
-                                : undefined,
-                          }}
+                          className={cn(
+                            "font-medium",
+                            cl.blocked && "text-destructive",
+                            !cl.blocked && cl.balance_usd > 0 && "text-emerald-600 dark:text-emerald-400",
+                          )}
                         >
-                          ${cl.weekly_usd.toFixed(4)}
+                          ${cl.balance_usd.toFixed(4)}
                         </div>
-                        {cl.weekly_limit > 0 && (
-                          <div className="mt-1.5 h-1 w-28 bg-muted rounded-full overflow-hidden">
-                            <div
-                              className="h-full transition-all"
-                              style={{
-                                width: `${Math.min(100, Math.round(ratio * 100))}%`,
-                                background: cl.blocked
-                                  ? "var(--destructive)"
-                                  : ratio > 0.8
-                                    ? "var(--warning)"
-                                    : "var(--success)",
-                              }}
-                            />
+                        {cl.blocked && (
+                          <div className="text-[10px] uppercase tracking-wider text-destructive mt-0.5">
+                            empty
                           </div>
                         )}
                       </td>
                       <td className="py-3 px-4 mono text-sm">
-                        {cl.weekly_limit > 0 ? (
-                          "$" + cl.weekly_limit.toFixed(2)
+                        {cl.pricing_group ? (
+                          <Badge variant="outline" className="font-mono text-[10px]">
+                            {cl.pricing_group}
+                          </Badge>
                         ) : (
-                          <span className="text-muted-foreground">none</span>
+                          <span className="text-muted-foreground">default</span>
                         )}
                       </td>
                       <td className="py-3 px-4 mono text-sm">

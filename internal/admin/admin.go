@@ -28,6 +28,8 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/pricing"
 	"github.com/wjsoj/CPA-Claude/internal/requestlog"
+	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
+	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/CPA-Claude/internal/usage"
 )
 
@@ -48,6 +50,12 @@ type Handler struct {
 	usage   *usage.Store
 	pricing *pricing.Catalog
 	tokens  *clienttoken.Store
+	// wallets is the SaaS DB (per-token wallet, pricing groups, orders).
+	// nil when SaaS billing is disabled.
+	wallets *saasdb.DB
+	// billing exposes the payment handler — admin endpoints reuse it for
+	// reconciliation. nil when SaaS billing is disabled.
+	billing *billing.Handler
 
 	// Cache for the full-history log scan backing lifetime totals.
 	// Scanning every rotated file on each summary refresh would be
@@ -78,6 +86,16 @@ const requestsCacheMax = 16
 
 func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.Catalog, tokens *clienttoken.Store) *Handler {
 	return &Handler{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens}
+}
+
+// WithSaaS attaches the SaaS billing components (wallet DB + payment
+// handler). Wire from server.New once the SQLite store is open. The admin
+// panel adapts gracefully when these are nil — wallet columns just render
+// as zero/empty.
+func (h *Handler) WithSaaS(db *saasdb.DB, bh *billing.Handler) *Handler {
+	h.wallets = db
+	h.billing = bh
+	return h
 }
 
 func (h *Handler) lifetimeByAuth() map[string]requestlog.Aggregate {
@@ -159,6 +177,14 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.DELETE("/tokens/:token", h.handleDeleteToken)
 		api.POST("/tokens/:token/reset", h.handleResetToken)
 		api.POST("/tokens/:token/inherit", h.handleInheritToken)
+		// SaaS admin: pricing groups + wallet ledger inspection.
+		api.GET("/groups", h.handleListGroups)
+		api.POST("/groups", h.handleCreateGroup)
+		api.PATCH("/groups/:id", h.handlePatchGroup)
+		api.DELETE("/groups/:id", h.handleDeleteGroup)
+		api.GET("/orders", h.handleListAllOrders)
+		api.POST("/orders/:id/reconcile", h.handleReconcileOrder)
+		api.GET("/wallet/:token", h.handleAdminWallet)
 	}
 
 	// Static SPA. Vite emits a single entry HTML plus hashed chunks under
@@ -442,7 +468,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	currentWeek := h.usage.CurrentWeekKey()
 	clientRows := make([]clientRow, 0)
 	seen := make(map[string]bool)
-	addRow := func(token, label, group string, weeklyLimit float64, rpm int, fromConfig, managed bool) {
+	addRow := func(token, label, group string, rpm int, fromConfig, managed bool) {
 		seen[token] = true
 		pc, hasData := clientSnap[token]
 		weekly := 0.0
@@ -461,18 +487,28 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			}
 		}
 		row := clientRow{
-			Token:       maskToken(token),
-			Label:       label,
-			WeeklyUSD:   weekly,
-			WeeklyLimit: weeklyLimit,
-			Blocked:     weeklyLimit > 0 && weekly >= weeklyLimit,
-			FromConfig:  fromConfig,
-			Managed:     managed,
-			Group:       group,
-			RPM:         rpm,
-			Total:       total,
-			Weekly:      weeks,
-			LastUsed:    last,
+			Token:      maskToken(token),
+			Label:      label,
+			WeeklyUSD:  weekly,
+			FromConfig: fromConfig,
+			Managed:    managed,
+			Group:      group,
+			RPM:        rpm,
+			Total:      total,
+			Weekly:     weeks,
+			LastUsed:   last,
+		}
+		// SaaS wallet view (balance + pricing group). Best-effort —
+		// missing wallet row just leaves the fields zero.
+		if h.wallets != nil {
+			if w, err := h.wallets.GetWallet(c.Request.Context(), token); err == nil {
+				row.BalanceUSD = w.BalanceUSD
+				row.GroupID = w.GroupID
+				row.Blocked = w.BalanceUSD <= 0
+				if g, err := h.wallets.GetGroup(c.Request.Context(), w.GroupID); err == nil {
+					row.PricingGroup = g.Name
+				}
+			}
 		}
 		if managed || fromConfig {
 			row.FullToken = token
@@ -481,13 +517,13 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	}
 	// Rows for every configured or runtime-added access token.
 	for _, t := range h.tokens.List() {
-		addRow(t.Token, t.Name, t.Group, t.WeeklyUSD, t.RPM, false, true)
+		addRow(t.Token, t.Name, t.Group, t.RPM, false, true)
 	}
 	// Rows for every client we've actually seen that isn't already listed
 	// (e.g. open-mode requests keyed by IP).
 	for tok, pc := range clientSnap {
 		if !seen[tok] {
-			addRow(tok, pc.Label, "", 0, 0, false, false)
+			addRow(tok, pc.Label, "", 0, false, false)
 		}
 	}
 
@@ -517,19 +553,28 @@ type clientRow struct {
 	// Full token; only set for rows that correspond to a registered client
 	// token (not for the synthetic IP-keyed rows in open mode). The panel
 	// needs this to build PATCH/DELETE URLs — admin auth covers exposure.
-	FullToken   string            `json:"full_token,omitempty"`
-	Label       string            `json:"label,omitempty"`
-	WeeklyUSD   float64           `json:"weekly_usd"`
-	WeeklyLimit float64           `json:"weekly_limit"`
-	Blocked     bool              `json:"blocked"`
-	FromConfig  bool              `json:"from_config,omitempty"`
-	Managed     bool              `json:"managed,omitempty"` // true = panel can edit/delete
-	Group       string            `json:"group,omitempty"`
-	// RPM is the per-token requests-per-minute override. 0 = use global default.
-	RPM         int               `json:"rpm,omitempty"`
-	Total       usage.ClientCost  `json:"total"`
-	Weekly      []usage.WeekEntry `json:"weekly,omitempty"`
-	LastUsed    *time.Time        `json:"last_used,omitempty"`
+	FullToken    string            `json:"full_token,omitempty"`
+	Label        string            `json:"label,omitempty"`
+	// WeeklyUSD is the rolling-week USD spend (informational, derived from
+	// the usage ledger). The weekly *limit* is gone — billing is now
+	// balance-based, not budget-based.
+	WeeklyUSD    float64           `json:"weekly_usd"`
+	// BalanceUSD is the wallet balance, from the SaaS store. Zero when
+	// SaaS is disabled or the wallet was never created.
+	BalanceUSD   float64           `json:"balance_usd"`
+	// Blocked is true when SaaS billing is enabled AND the wallet is at
+	// or below zero (= the proxy refuses new requests). Stays false when
+	// SaaS billing is disabled, even with a zero "balance".
+	Blocked      bool              `json:"blocked"`
+	GroupID      int64             `json:"group_id,omitempty"`
+	PricingGroup string            `json:"pricing_group,omitempty"`
+	FromConfig   bool              `json:"from_config,omitempty"`
+	Managed      bool              `json:"managed,omitempty"` // true = panel can edit/delete
+	Group        string            `json:"group,omitempty"`
+	RPM          int               `json:"rpm,omitempty"` // per-token RPM override (0 = global default)
+	Total        usage.ClientCost  `json:"total"`
+	Weekly       []usage.WeekEntry `json:"weekly,omitempty"`
+	LastUsed     *time.Time        `json:"last_used,omitempty"`
 }
 
 func maskToken(t string) string {
@@ -563,7 +608,7 @@ func (h *Handler) resolveClientTokenLabels(tokens []string) []string {
 	for _, t := range tokens {
 		label := ""
 		if h.tokens != nil {
-			if name, _, _, _, ok := h.tokens.Lookup(t); ok && strings.TrimSpace(name) != "" {
+			if name, _, _, ok := h.tokens.Lookup(t); ok && strings.TrimSpace(name) != "" {
 				label = name
 			}
 		}
@@ -1392,13 +1437,16 @@ type tokenView struct {
 	Token         string     `json:"token"`
 	Masked        string     `json:"masked"`
 	Name          string     `json:"name"`
-	WeeklyUSD     float64    `json:"weekly_usd"`
 	MaxConcurrent int        `json:"max_concurrent,omitempty"`
 	RPM           int        `json:"rpm,omitempty"`
 	Group         string     `json:"group,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
-	// Live usage for the current ISO week, convenient for the panel row.
-	WeeklyUsedUSD float64 `json:"weekly_used_usd"`
+	// Wallet info (SaaS billing). Zero when SaaS is disabled or wallet has
+	// no row yet — the panel renders these as "—".
+	BalanceUSD     float64 `json:"balance_usd"`
+	GroupID        int64   `json:"group_id,omitempty"`
+	PricingGroup   string  `json:"pricing_group,omitempty"`
+	WeeklyUsedUSD  float64 `json:"weekly_used_usd"`
 }
 
 func (h *Handler) handleListTokens(c *gin.Context) {
@@ -1409,11 +1457,19 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 		v := tokenView{
 			Masked:        maskToken(t.Token),
 			Name:          t.Name,
-			WeeklyUSD:     t.WeeklyUSD,
 			MaxConcurrent: t.MaxConcurrent,
 			RPM:           t.RPM,
 			Group:         t.Group,
 			WeeklyUsedUSD: h.usage.WeeklyCostUSD(t.Token),
+		}
+		if h.wallets != nil {
+			if w, err := h.wallets.GetWallet(c.Request.Context(), t.Token); err == nil {
+				v.BalanceUSD = w.BalanceUSD
+				v.GroupID = w.GroupID
+				if g, err := h.wallets.GetGroup(c.Request.Context(), w.GroupID); err == nil {
+					v.PricingGroup = g.Name
+				}
+			}
 		}
 		if !t.CreatedAt.IsZero() {
 			ct := t.CreatedAt
@@ -1430,11 +1486,12 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 type createTokenBody struct {
 	Token         string  `json:"token"`
 	Name          string  `json:"name"`
-	WeeklyUSD     float64 `json:"weekly_usd"`
 	MaxConcurrent int     `json:"max_concurrent,omitempty"`
 	RPM           int     `json:"rpm,omitempty"`
 	Group         string  `json:"group,omitempty"`
-	Generate      bool    `json:"generate"` // if true and Token == "", mint a fresh sk-...
+	GroupID       int64   `json:"group_id,omitempty"`     // SaaS pricing group; 0 = default
+	InitialUSD    float64 `json:"initial_usd,omitempty"`  // optional starting balance credit (admin grant)
+	Generate      bool    `json:"generate"`               // if true and Token == "", mint a fresh sk-...
 }
 
 func (h *Handler) handleCreateToken(c *gin.Context) {
@@ -1459,7 +1516,6 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 	entry := clienttoken.Token{
 		Token:         tok,
 		Name:          body.Name,
-		WeeklyUSD:     body.WeeklyUSD,
 		MaxConcurrent: body.MaxConcurrent,
 		RPM:           body.RPM,
 		Group:         body.Group,
@@ -1468,20 +1524,34 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// Eager-create the wallet row so the panel can immediately show
+	// balance/group without waiting for the token's first request to
+	// trigger lazy creation.
+	if h.wallets != nil {
+		if _, err := h.wallets.EnsureWallet(c.Request.Context(), tok); err == nil {
+			if body.GroupID > 0 {
+				_ = h.wallets.SetWalletGroup(c.Request.Context(), tok, body.GroupID)
+			}
+			if body.InitialUSD > 0 {
+				_, _ = h.wallets.AddBalance(c.Request.Context(), tok, "adjust", body.InitialUSD, "admin-create", "initial credit", true)
+			}
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"status":     "ok",
-		"token":      tok, // return the full value once so the panel can show it
-		"name":       body.Name,
-		"weekly_usd": body.WeeklyUSD,
+		"status": "ok",
+		"token":  tok, // return the full value once so the panel can show it
+		"name":   body.Name,
 	})
 }
 
 type patchTokenBody struct {
 	Name          *string  `json:"name"`
-	WeeklyUSD     *float64 `json:"weekly_usd"`
 	MaxConcurrent *int     `json:"max_concurrent"`
 	RPM           *int     `json:"rpm"`
 	Group         *string  `json:"group"`
+	GroupID       *int64   `json:"group_id"`        // SaaS pricing-group reassignment
+	BalanceDelta  *float64 `json:"balance_delta"`   // signed admin adjustment in USD
+	BalanceNote   string   `json:"balance_note"`    // free-text note attached to the wallet_tx row
 }
 
 func (h *Handler) handlePatchToken(c *gin.Context) {
@@ -1491,9 +1561,27 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.tokens.Update(tok, body.Name, body.WeeklyUSD, body.MaxConcurrent, body.RPM, body.Group); err != nil {
+	if err := h.tokens.Update(tok, body.Name, body.MaxConcurrent, body.RPM, body.Group); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	if h.wallets != nil {
+		if body.GroupID != nil && *body.GroupID > 0 {
+			if err := h.wallets.SetWalletGroup(c.Request.Context(), tok, *body.GroupID); err != nil {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "group: " + err.Error()})
+				return
+			}
+		}
+		if body.BalanceDelta != nil && *body.BalanceDelta != 0 {
+			note := body.BalanceNote
+			if note == "" {
+				note = "admin manual adjustment"
+			}
+			if _, err := h.wallets.AddBalance(c.Request.Context(), tok, "adjust", *body.BalanceDelta, "admin-patch", note, true); err != nil {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "balance: " + err.Error()})
+				return
+			}
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
@@ -1579,13 +1667,13 @@ func (h *Handler) handleInheritToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "from required"})
 		return
 	}
-	if _, _, _, _, ok := h.tokens.Lookup(dst); !ok {
+	if _, _, _, ok := h.tokens.Lookup(dst); !ok {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "destination token not registered"})
 		return
 	}
 	// Refuse merging from a still-registered token: it's either a mistake
 	// or the caller should delete the source explicitly first.
-	if _, _, _, _, ok := h.tokens.Lookup(src); ok {
+	if _, _, _, ok := h.tokens.Lookup(src); ok {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "source token is still registered; delete it first or pick an orphan"})
 		return
 	}

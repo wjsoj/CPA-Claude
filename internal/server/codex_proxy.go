@@ -256,11 +256,15 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	}
 
 	var costUSD float64
+	var multiplier, billed float64 = 1, 0
 	if resp.StatusCode < 400 {
 		s.usage.Record(a.ID, a.Label, counts)
 		if counts.Requests > 0 && clientToken != "" {
 			costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, counts)
 			s.usage.RecordClient(clientToken, clientName, counts, costUSD)
+			multiplier, billed = s.saas.SettleCharge(c.Request.Context(),
+				clientToken, auth.ProviderOpenAI, model, costUSD,
+				"codex:"+a.ID)
 		}
 	}
 	errField := ""
@@ -280,6 +284,8 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		CacheRead:   counts.CacheReadTokens,
 		CacheCreate: counts.CacheCreateTokens,
 		CostUSD:     costUSD,
+		BilledUSD:   billed,
+		Multiplier:  multiplier,
 		Status:      resp.StatusCode,
 		DurationMs:  time.Since(start).Milliseconds(),
 		Stream:      stream,

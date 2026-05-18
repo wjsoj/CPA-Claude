@@ -74,9 +74,11 @@ export interface StatusTokenResult {
   found: boolean;
   name?: string;
   group?: string;
-  weekly_limit: number;
-  weekly_used_usd: number;
+  balance_usd: number;
   blocked: boolean;
+  weekly_used_usd: number;
+  pricing_group?: string;
+  group_id?: number;
   total: { tokens: Record<string, number>; cost_usd: number; requests: number };
   weekly?: StatusWeekEntry[];
   daily?: StatusDailyEntry[];
@@ -170,6 +172,126 @@ export function queryStatusHistory(args: {
     method: "POST",
     body: JSON.stringify(args),
   });
+}
+
+// ---- Wallet / SaaS billing ---------------------------------------------
+//
+// All wallet endpoints (except /rate, /notify, /groups) require the active
+// token in `Authorization: Bearer <token>`. The status SPA stores the
+// "active" token in localStorage under ACTIVE_TOKEN_KEY — see
+// loadActiveToken/saveActiveToken below.
+
+export interface WalletBalance {
+  balance_usd: number;
+  group_id: number;
+  group_name?: string;
+  claude_multiplier?: number;
+  codex_multiplier?: number;
+}
+
+export interface WalletTx {
+  id: number;
+  kind: "topup" | "charge" | "adjust" | "refund";
+  amount_usd: number;
+  ref: string;
+  note: string;
+  created_at: number;
+}
+
+export interface WalletOrder {
+  out_trade_no: string;
+  cny_amount: number;
+  usd_credit: number;
+  rate: number;
+  status: "pending" | "paid" | "expired" | "failed";
+  trade_no: string;
+  qr_code?: string;
+  pay_url?: string;
+  img?: string;
+  created_at: number;
+  paid_at: number;
+}
+
+export interface WalletPricingGroup {
+  id: number;
+  name: string;
+  description: string;
+  codex_multiplier: number;
+  claude_multiplier: number;
+  is_default: boolean;
+}
+
+export interface ExchangeRate {
+  cny_per_usd: number;
+  as_of: number;
+}
+
+export interface TopupResp {
+  out_trade_no: string;
+  cny_amount: number;
+  usd_credit: number;
+  rate: number;
+  method: string;
+  qr_code?: string;
+  pay_url?: string;
+  img?: string;
+}
+
+const ACTIVE_TOKEN_KEY = "cpa.status.active_token";
+export function loadActiveToken(): string {
+  try {
+    return localStorage.getItem(ACTIVE_TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+export function saveActiveToken(tok: string): void {
+  if (!tok) {
+    localStorage.removeItem(ACTIVE_TOKEN_KEY);
+  } else {
+    localStorage.setItem(ACTIVE_TOKEN_KEY, tok);
+  }
+}
+
+function authedJSON<T>(path: string, token: string, opts: RequestInit = {}): Promise<T> {
+  return fetchJSON<T>(path, {
+    ...opts,
+    headers: {
+      ...(opts.headers || {}),
+      Authorization: `Bearer ${token}`,
+    },
+  });
+}
+
+export function loadWalletBalance(token: string): Promise<WalletBalance> {
+  return authedJSON<WalletBalance>("/api/wallet/balance", token);
+}
+
+export function loadWalletTransactions(token: string): Promise<{ transactions: WalletTx[] }> {
+  return authedJSON<{ transactions: WalletTx[] }>("/api/wallet/transactions", token);
+}
+
+export function loadWalletOrders(token: string): Promise<{ orders: WalletOrder[] }> {
+  return authedJSON<{ orders: WalletOrder[] }>("/api/wallet/orders", token);
+}
+
+export function loadWalletOrder(token: string, outTradeNo: string): Promise<WalletOrder> {
+  return authedJSON<WalletOrder>(`/api/wallet/orders/${encodeURIComponent(outTradeNo)}`, token);
+}
+
+export function topupWallet(token: string, usd: number): Promise<TopupResp> {
+  return authedJSON<TopupResp>("/api/wallet/topup", token, {
+    method: "POST",
+    body: JSON.stringify({ usd }),
+  });
+}
+
+export function loadExchangeRate(): Promise<ExchangeRate> {
+  return fetchJSON<ExchangeRate>("/api/wallet/rate");
+}
+
+export function loadPricingGroups(): Promise<{ groups: WalletPricingGroup[] }> {
+  return fetchJSON<{ groups: WalletPricingGroup[] }>("/api/wallet/groups");
 }
 
 const TOKENS_KEY = "cpa.status.tokens";

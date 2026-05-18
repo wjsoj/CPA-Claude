@@ -111,6 +111,53 @@ type Config struct {
 	// Pricing overrides (optional). Built-in defaults cover claude-haiku-4-5,
 	// claude-opus-4-6, and claude-sonnet-4-6.
 	Pricing pricing.Config `yaml:"pricing"`
+
+	// SaaS billing — per-token wallet, pricing groups, Z-Pay top-ups. When
+	// SaaS.Enabled is false the proxy runs in legacy "no billing" mode:
+	// requests bypass the balance check and no wallet rows are touched.
+	SaaS SaaSConfig `yaml:"saas"`
+}
+
+// SaaSConfig configures the per-token wallet + Z-Pay top-up subsystem.
+type SaaSConfig struct {
+	// Enabled toggles balance-gated billing. When false, the proxy runs as
+	// before — no balance check, no wallet debit. Existing tokens keep
+	// working with no quota.
+	Enabled bool `yaml:"enabled"`
+
+	// DBPath is the SQLite file holding wallets, orders, and pricing
+	// groups. Defaults to <config-dir>/saas.db. Created with mode 0600.
+	DBPath string `yaml:"db_path,omitempty"`
+
+	// Site is the user-visible site name embedded in the payment "subject"
+	// shown to the payer in their Alipay/WeChat app. Defaults to
+	// "CPA-Claude".
+	Site string `yaml:"site,omitempty"`
+
+	// Payment is the Z-Pay merchant config. When PID/Key are empty the
+	// server falls back to MockGateway — useful for offline development
+	// since real money never moves.
+	Payment PaymentConfig `yaml:"payment"`
+
+	// Exchange controls how the live CNY/USD rate is fetched. Defaults
+	// are sane (jsdelivr-hosted free API, 1h refresh, fallback 7.2).
+	Exchange ExchangeConfig `yaml:"exchange"`
+}
+
+// PaymentConfig — Z-Pay merchant credentials. Never logged.
+type PaymentConfig struct {
+	BaseURL   string `yaml:"base_url,omitempty"`   // default https://zpayz.cn
+	PID       string `yaml:"pid,omitempty"`        // 商户ID
+	Key       string `yaml:"key,omitempty"`        // 商户密钥
+	NotifyURL string `yaml:"notify_url,omitempty"` // public webhook
+	ReturnURL string `yaml:"return_url,omitempty"` // optional post-pay redirect
+}
+
+// ExchangeConfig — live USD/CNY rate cache.
+type ExchangeConfig struct {
+	URL                string  `yaml:"url,omitempty"`
+	RefreshIntervalMin int     `yaml:"refresh_interval_min,omitempty"`
+	FallbackCNYPerUSD  float64 `yaml:"fallback_cny_per_usd,omitempty"`
 }
 
 func Load(path string) (*Config, error) {
@@ -179,6 +226,20 @@ func applyDefaults(c *Config, path string) {
 	}
 	if c.LogRetentionDays == 0 {
 		c.LogRetentionDays = 90
+	}
+	if c.SaaS.DBPath == "" {
+		c.SaaS.DBPath = filepath.Join(dir, "saas.db")
+	} else if !filepath.IsAbs(c.SaaS.DBPath) {
+		c.SaaS.DBPath = filepath.Join(dir, c.SaaS.DBPath)
+	}
+	if c.SaaS.Site == "" {
+		c.SaaS.Site = "CPA-Claude"
+	}
+	if c.SaaS.Exchange.RefreshIntervalMin == 0 {
+		c.SaaS.Exchange.RefreshIntervalMin = 60
+	}
+	if c.SaaS.Exchange.FallbackCNYPerUSD <= 0 {
+		c.SaaS.Exchange.FallbackCNYPerUSD = 7.2
 	}
 	p := strings.TrimSpace(c.AdminPath)
 	if p == "" {

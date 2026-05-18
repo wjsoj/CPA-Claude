@@ -311,9 +311,16 @@ type statusTokenResult struct {
 	Found         bool                  `json:"found"`
 	Name          string                `json:"name,omitempty"`
 	Group         string                `json:"group,omitempty"`
-	WeeklyLimit   float64               `json:"weekly_limit"`
-	WeeklyUsedUSD float64               `json:"weekly_used_usd"`
+	// BalanceUSD + Blocked replace the old WeeklyLimit/Blocked pair.
+	// Blocked is true when the wallet is at or below zero, which is what
+	// the proxy hot-path uses to refuse new requests.
+	BalanceUSD    float64               `json:"balance_usd"`
 	Blocked       bool                  `json:"blocked"`
+	// WeeklyUsedUSD is informational — current ISO-week spend from the
+	// usage ledger. Not a limit any more.
+	WeeklyUsedUSD float64               `json:"weekly_used_usd"`
+	PricingGroup  string                `json:"pricing_group,omitempty"`
+	GroupID       int64                 `json:"group_id,omitempty"`
 	Total         usage.ClientCost      `json:"total"`
 	Weekly        []usage.WeekEntry     `json:"weekly,omitempty"`
 	LastUsed      *time.Time            `json:"last_used,omitempty"`
@@ -380,7 +387,7 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 	for _, tok := range tokens {
 		masked := maskToken(tok)
 		r := statusTokenResult{Masked: masked}
-		name, weekly, _, group, ok := h.tokens.Lookup(tok)
+		name, _, group, ok := h.tokens.Lookup(tok)
 		if !ok {
 			results = append(results, r)
 			continue
@@ -388,7 +395,6 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 		r.Found = true
 		r.Name = name
 		r.Group = group
-		r.WeeklyLimit = weekly
 		if pc, hasData := clients[tok]; hasData {
 			r.Total = pc.Total
 			r.Weekly = pc.WeeklyOrdered(8)
@@ -400,8 +406,20 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 				r.WeeklyUsedUSD = w.CostUSD
 			}
 		}
-		if r.WeeklyLimit > 0 && r.WeeklyUsedUSD >= r.WeeklyLimit {
-			r.Blocked = true
+		// SaaS wallet — balance gates new requests. The proxy refuses
+		// further calls when balance <= 0, so surface that as `blocked`
+		// here for the status panel's "this token is paused" banner.
+		if h.wallets != nil {
+			if w, err := h.wallets.GetWallet(c.Request.Context(), tok); err == nil {
+				r.BalanceUSD = w.BalanceUSD
+				r.GroupID = w.GroupID
+				if g, err := h.wallets.GetGroup(c.Request.Context(), w.GroupID); err == nil {
+					r.PricingGroup = g.Name
+				}
+				if w.BalanceUSD <= 0 {
+					r.Blocked = true
+				}
+			}
 		}
 		// Use the masked form as the correlation key for the log scan — the
 		// request log itself stores only masked tokens, so this comparison
@@ -557,7 +575,7 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 	// Same ownership check as /query: the caller must present a token the
 	// store knows about. We don't reveal whether an unknown token was once
 	// valid or never existed.
-	if _, _, _, _, ok := h.tokens.Lookup(tok); !ok {
+	if _, _, _, ok := h.tokens.Lookup(tok); !ok {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "token not found"})
 		return
 	}

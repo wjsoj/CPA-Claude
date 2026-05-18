@@ -150,3 +150,33 @@ api_keys:
   #     claude-opus-4-6:    "[0.16]稳定喵/claude-opus-4-6"
   #     claude-sonnet-4-6:  "[0.1]高质量喵/claude-sonnet-4-6"
   #     claude-haiku-4-5:   "[aws按量]cf逆/claude-haiku-4-5-20251001"
+
+
+# ---- SaaS billing (per-token wallet + Z-Pay top-ups) -----------------------
+#
+# Enable to gate every request on a positive wallet balance and debit the
+# wallet on settle. Disable (the default) to run the proxy in legacy
+# "no billing" mode — tokens still work, no balance is checked, no orders
+# table exists.
+#
+# Schema lives in saas.db (next to state.json by default). Pricing groups
+# are seeded with claude=0.05 (1/20) and codex=0.0125 (1/80) — operators
+# tune these from /mgmt-console/groups.
+saas:
+  enabled: false
+  # db_path: saas.db            # SQLite file (default: <config-dir>/saas.db)
+  # site: CPA-Claude            # Shown in the payment subject line.
+
+  # Z-Pay (易支付) merchant credentials. Empty pid/key → MockGateway (dev).
+  payment:
+    base_url: https://zpayz.cn
+    pid: ""
+    key: ""
+    notify_url: "https://example.com/api/wallet/notify"   # MUST be publicly reachable
+    return_url: "https://example.com/status/"             # optional post-pay redirect
+
+  # Live USD/CNY rate. The default URL is a free jsdelivr-hosted mirror.
+  # fallback_cny_per_usd is used until the first successful refresh.
+  exchange:
+    refresh_interval_min: 60
+    fallback_cny_per_usd: 7.2

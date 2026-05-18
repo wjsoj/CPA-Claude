@@ -81,28 +81,36 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 		model = "unknown"
 	}
 
-	// Weekly-budget pre-check.
-	_, weeklyLimit, _, clientGroup, tokOK := s.tokens.Lookup(clientToken)
-	if tokOK && weeklyLimit > 0 {
-		spent := s.usage.WeeklyCostUSD(clientToken)
-		if spent >= weeklyLimit {
-			c.Header("Retry-After", "604800")
-			c.AbortWithStatusJSON(429, gin.H{
-				"error":     "weekly budget exceeded",
-				"spent_usd": spent,
-				"limit_usd": weeklyLimit,
-				"week":      s.usage.CurrentWeekKey(),
+	// Balance pre-check (SaaS billing). The pricing-group multiplier the
+	// charge is computed from also lives on the wallet row, so this same
+	// call also primes the group lookup we'll need at settle time. When
+	// SaaS is disabled (server constructed without a billing handle), the
+	// check is a no-op.
+	_, _, clientGroup, _ := s.tokens.Lookup(clientToken)
+	if s.saas != nil && clientToken != "" {
+		bal, err := s.saas.PrecheckBalance(c.Request.Context(), clientToken)
+		if err != nil {
+			c.AbortWithStatusJSON(500, gin.H{"error": "wallet lookup failed: " + err.Error()})
+			s.emitLog(requestlog.Record{
+				Client: clientName, ClientToken: maskClientToken(clientToken),
+				Provider: provider, Model: model, Stream: peek.Stream, Path: path,
+				Status: 500, DurationMs: time.Since(start).Milliseconds(),
+				Error: "wallet lookup failed",
+			})
+			return
+		}
+		if bal <= 0 {
+			c.Header("Retry-After", "60")
+			c.AbortWithStatusJSON(402, gin.H{
+				"error":       "insufficient balance",
+				"balance_usd": bal,
+				"hint":        "top up at /status/ then retry",
 			})
 			s.emitLog(requestlog.Record{
-				Client:      clientName,
-				ClientToken: maskClientToken(clientToken),
-				Provider:    provider,
-				Model:       model,
-				Stream:      peek.Stream,
-				Path:        path,
-				Status:      429,
-				DurationMs:  time.Since(start).Milliseconds(),
-				Error:       "weekly budget exceeded",
+				Client: clientName, ClientToken: maskClientToken(clientToken),
+				Provider: provider, Model: model, Stream: peek.Stream, Path: path,
+				Status: 402, DurationMs: time.Since(start).Milliseconds(),
+				Error: "insufficient balance",
 			})
 			return
 		}
@@ -589,6 +597,7 @@ recoveredFromSignature:
 	// requestlog gets a separate row per advisor model so by-model views
 	// don't conflate sonnet-orchestrator cost with opus-advisor cost.
 	advisorCost := s.recordSubUsage(a, authKind, clientToken, clientName, model, path, resp.StatusCode, sub)
+	var multiplier, billedMain float64 = 1, 0
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
 		// Single RecordClient call: weekly cost ledger should reflect the
 		// total dollar cost of this /v1/messages call, advisor included.
@@ -599,6 +608,13 @@ recoveredFromSignature:
 			clientCounts.Add(sc)
 		}
 		s.usage.RecordClient(clientToken, clientName, clientCounts, costUSD+advisorCost)
+		// SaaS settle — debit the per-request charge from the wallet.
+		// Advisor sub-charges are debited separately inside
+		// recordSubUsage so each row in the request log carries its own
+		// billed amount.
+		multiplier, billedMain = s.saas.SettleCharge(c.Request.Context(),
+			clientToken, auth.NormalizeProvider(a.Provider), model, costUSD,
+			"request:"+a.ID)
 	}
 	s.emitLog(requestlog.Record{
 		Client:      clientName,
@@ -613,6 +629,8 @@ recoveredFromSignature:
 		CacheRead:   counts.CacheReadTokens,
 		CacheCreate: counts.CacheCreateTokens,
 		CostUSD:     costUSD,
+		BilledUSD:   billedMain,
+		Multiplier:  multiplier,
 		Status:      resp.StatusCode,
 		DurationMs:  time.Since(start).Milliseconds(),
 		Stream:      stream,
@@ -751,6 +769,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	}
 
 	var costUSD float64
+	var multiplier, billedMain float64 = 1, 0
 	if resp.StatusCode < 400 {
 		s.usage.Record(a.ID, a.Label, counts)
 		if counts.Requests > 0 && clientToken != "" {
@@ -764,6 +783,9 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 				clientCounts.Add(sc)
 			}
 			s.usage.RecordClient(clientToken, clientName, clientCounts, costUSD+advisorCost)
+			multiplier, billedMain = s.saas.SettleCharge(c.Request.Context(),
+				clientToken, auth.NormalizeProvider(a.Provider), model, costUSD,
+				"request:"+a.ID)
 		}
 	}
 	errField := ""
@@ -783,6 +805,8 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		CacheRead:   counts.CacheReadTokens,
 		CacheCreate: counts.CacheCreateTokens,
 		CostUSD:     costUSD,
+		BilledUSD:   billedMain,
+		Multiplier:  multiplier,
 		Status:      resp.StatusCode,
 		DurationMs:  time.Since(start).Milliseconds(),
 		Stream:      stream,
@@ -1123,6 +1147,16 @@ func (s *Server) recordSubUsage(a *auth.Auth, authKind, clientToken, clientName,
 		s.usage.Record(a.ID, a.Label, sc)
 		cost := s.pricing.Cost(provider, subModel, sc)
 		total += cost
+		// SaaS settle: advisor sub-call is debited under the sub-model's
+		// own provider+model so the multiplier picked is correct (advisor
+		// is currently always Claude-side, but plumb provider through so
+		// future server-side OpenAI advisors still work).
+		var mult, billed float64 = 1, 0
+		if clientToken != "" {
+			mult, billed = s.saas.SettleCharge(context.Background(),
+				clientToken, provider, subModel, cost,
+				"advisor:"+a.ID)
+		}
 		s.emitLog(requestlog.Record{
 			Client:      clientName,
 			ClientToken: maskClientToken(clientToken),
@@ -1136,6 +1170,8 @@ func (s *Server) recordSubUsage(a *auth.Auth, authKind, clientToken, clientName,
 			CacheRead:   sc.CacheReadTokens,
 			CacheCreate: sc.CacheCreateTokens,
 			CostUSD:     cost,
+			BilledUSD:   billed,
+			Multiplier:  mult,
 			Status:      status,
 			// DurationMs/Stream/Attempts intentionally zero: this row is a
 			// sub-call summary, not an independent request — adding wall

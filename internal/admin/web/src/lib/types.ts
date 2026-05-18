@@ -104,9 +104,17 @@ export interface ClientRow {
   full_token?: string;
   label?: string;
   group?: string;
+  // Current rolling-week spend (informational; no quota any more).
   weekly_usd: number;
-  weekly_limit: number;
+  // SaaS wallet — balance + pricing-group assignment. Zero when SaaS
+  // billing is disabled or the wallet row hasn't been created yet.
+  balance_usd: number;
+  // True when the wallet is at/below zero — the proxy refuses new
+  // requests in that state. Derived client-side from balance_usd <= 0
+  // when SaaS billing is enabled; always false otherwise.
   blocked: boolean;
+  group_id?: number;
+  pricing_group?: string;
   // Per-token RPM override. 0 / absent = fall back to global default.
   rpm?: number;
   total: { cost_usd: number; requests: number };

@@ -517,9 +517,13 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 
 	s.usage.Record(a.ID, a.Label, counts)
 	var costUSD float64
+	var multiplier, billed float64 = 1, 0
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
 		costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, counts)
 		s.usage.RecordClient(clientToken, clientName, counts, costUSD)
+		multiplier, billed = s.saas.SettleCharge(c.Request.Context(),
+			clientToken, auth.ProviderOpenAI, model, costUSD,
+			"codex-oauth:"+a.ID)
 	}
 	s.emitLog(requestlog.Record{
 		Client:      clientName,
@@ -533,6 +537,8 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		Output:      counts.OutputTokens,
 		CacheRead:   counts.CacheReadTokens,
 		CostUSD:     costUSD,
+		BilledUSD:   billed,
+		Multiplier:  multiplier,
 		Status:      resp.StatusCode,
 		DurationMs:  time.Since(start).Milliseconds(),
 		Stream:      stream,

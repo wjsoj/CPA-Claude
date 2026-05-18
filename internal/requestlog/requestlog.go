@@ -30,6 +30,16 @@ type Record struct {
 	CacheRead   int64     `json:"cache_read_tokens"`
 	CacheCreate int64     `json:"cache_create_tokens"`
 	CostUSD     float64   `json:"cost_usd"`
+	// BilledUSD is what was actually debited from the client's wallet —
+	// CostUSD scaled by the pricing-group multiplier. Zero when SaaS
+	// billing is disabled, or when the request didn't settle (4xx, etc).
+	// Old rotated rows have no BilledUSD field; readers should default
+	// missing values to 0.
+	BilledUSD   float64   `json:"billed_usd,omitempty"`
+	// Multiplier is the pricing-group coefficient that produced
+	// BilledUSD. Stored alongside so historical audits don't need to
+	// look up the group config (which may have changed since).
+	Multiplier  float64   `json:"multiplier,omitempty"`
 	Status      int       `json:"status"`
 	DurationMs  int64     `json:"duration_ms"`
 	Stream      bool      `json:"stream"`

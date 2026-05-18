@@ -21,8 +21,9 @@ interface Props {
 export function AddTokenModal({ onClose, onSaved }: Props) {
   const [name, setName] = useState("");
   const [token, setTokenValue] = useState(() => generateSkToken());
-  const [weekly, setWeekly] = useState("");
+  const [initialUSD, setInitialUSD] = useState("");
   const [group, setGroup] = useState("");
+  const [groupID, setGroupID] = useState("");
   const [created, setCreated] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -52,8 +53,10 @@ export function AddTokenModal({ onClose, onSaved }: Props) {
         name: name.trim(),
         group: group.trim(),
       };
-      const w = parseFloat(weekly);
-      if (!isNaN(w) && w > 0) body.weekly_usd = w;
+      const w = parseFloat(initialUSD);
+      if (!isNaN(w) && w > 0) body.initial_usd = w;
+      const gid = parseInt(groupID, 10);
+      if (!isNaN(gid) && gid > 0) body.group_id = gid;
       const d = await api<{ token: string }>("/admin/api/tokens", {
         method: "POST",
         body: JSON.stringify(body),
@@ -120,15 +123,30 @@ export function AddTokenModal({ onClose, onSaved }: Props) {
               </p>
             </div>
             <div className="space-y-1.5">
-              <Label>Weekly USD limit</Label>
+              <Label>Initial balance (USD)</Label>
               <Input
                 type="number"
                 min={0}
                 step={0.01}
                 className="mono text-sm"
-                placeholder="0 = unlimited"
-                value={weekly}
-                onChange={(e) => setWeekly(e.currentTarget.value)}
+                placeholder="0 = no initial credit"
+                value={initialUSD}
+                onChange={(e) => setInitialUSD(e.currentTarget.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Admin-granted credit. The user can top up via the Wallet tab on /status.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Pricing group ID</Label>
+              <Input
+                type="number"
+                min={0}
+                step={1}
+                className="mono text-sm"
+                placeholder="leave empty for default group"
+                value={groupID}
+                onChange={(e) => setGroupID(e.currentTarget.value)}
               />
             </div>
             <div className="space-y-1.5">

@@ -25,9 +25,12 @@ interface Props {
 
 export function EditTokenModal({ row, onClose, onSaved }: Props) {
   const [name, setName] = useState(row.label || "");
-  const [weekly, setWeekly] = useState(row.weekly_limit > 0 ? String(row.weekly_limit) : "");
   const [rpm, setRpm] = useState(row.rpm && row.rpm > 0 ? String(row.rpm) : "");
   const [group, setGroup] = useState(row.group || "");
+  // SaaS — admin balance adjustment + pricing-group reassignment.
+  const [balanceDelta, setBalanceDelta] = useState("");
+  const [balanceNote, setBalanceNote] = useState("");
+  const [groupID, setGroupID] = useState<string>(row.group_id ? String(row.group_id) : "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -59,10 +62,15 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
     setErr("");
     try {
       const body: Record<string, unknown> = { name, group };
-      const w = parseFloat(weekly);
-      body.weekly_usd = !isNaN(w) && w > 0 ? w : 0;
       const r = parseInt(rpm, 10);
       body.rpm = !isNaN(r) && r > 0 ? r : 0;
+      const gid = parseInt(groupID, 10);
+      if (!isNaN(gid) && gid > 0) body.group_id = gid;
+      const bd = parseFloat(balanceDelta);
+      if (!isNaN(bd) && bd !== 0) {
+        body.balance_delta = bd;
+        if (balanceNote.trim()) body.balance_note = balanceNote.trim();
+      }
       await api(`/admin/api/tokens/${encodeURIComponent(row.full_token)}`, {
         method: "PATCH",
         body: JSON.stringify(body),
@@ -163,15 +171,44 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
               <Input value={name} onChange={(e) => setName(e.currentTarget.value)} />
             </div>
             <div className="space-y-1.5">
-              <Label>Weekly USD limit</Label>
+              <Label>Wallet adjust (USD)</Label>
+              <Input
+                type="number"
+                step={0.01}
+                className="mono text-sm"
+                placeholder="+5 to credit · -3 to debit · empty = no change"
+                value={balanceDelta}
+                onChange={(e) => setBalanceDelta(e.currentTarget.value)}
+              />
+              {balanceDelta && (
+                <Input
+                  className="mono text-sm"
+                  placeholder="note (optional)"
+                  value={balanceNote}
+                  onChange={(e) => setBalanceNote(e.currentTarget.value)}
+                />
+              )}
+              <div className="text-[11px] text-muted-foreground">
+                Current balance:{" "}
+                <span className="font-mono">${row.balance_usd.toFixed(4)}</span>
+                {row.pricing_group && (
+                  <span>
+                    {" "}
+                    · group <span className="font-mono">{row.pricing_group}</span>
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Pricing group ID</Label>
               <Input
                 type="number"
                 min={0}
-                step={0.01}
+                step={1}
                 className="mono text-sm"
-                placeholder="0 = unlimited"
-                value={weekly}
-                onChange={(e) => setWeekly(e.currentTarget.value)}
+                placeholder="leave empty to keep current"
+                value={groupID}
+                onChange={(e) => setGroupID(e.currentTarget.value)}
               />
             </div>
             <div className="space-y-1.5">
