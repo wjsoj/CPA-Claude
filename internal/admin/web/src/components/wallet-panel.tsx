@@ -383,26 +383,26 @@ function OrdersCard({
                 <span>{fmtTime(o.created_at)}</span>
                 <span>{fmtCNY(o.cny_amount)} @ ¥{o.rate.toFixed(4)}</span>
               </div>
-              {o.status === "pending" && (o.pay_url || o.qr_code) && (
-                <div className="mt-2 flex gap-2">
+              {o.status === "pending" && (o.img || o.pay_url || o.qr_code) && (
+                <div className="mt-2 flex gap-3 flex-wrap">
+                  {o.img && (
+                    <a
+                      href={o.img}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                    >
+                      <ExternalLink className="h-3 w-3" /> show QR
+                    </a>
+                  )}
                   {o.pay_url && (
                     <a
                       href={o.pay_url}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-primary hover:underline"
                     >
-                      <ExternalLink className="h-3 w-3" /> open payment page
-                    </a>
-                  )}
-                  {!o.pay_url && o.qr_code && (
-                    <a
-                      href={o.qr_code}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                    >
-                      <ExternalLink className="h-3 w-3" /> open QR
+                      <ExternalLink className="h-3 w-3" /> open in Alipay app
                     </a>
                   )}
                 </div>
@@ -614,7 +614,36 @@ function TopupModal({
                 </span>
               </div>
             </div>
-            {result.pay_url ? (
+            {/* Render order: QR image > pay_url link > raw code string.
+                The pay_url that Z-Pay hands back is the alipay-app-only
+                "qr.alipay.com/bax…" URL — opening it in a desktop browser
+                shows the "please use the Alipay app" stub, not a QR. The
+                actual scannable QR is the hosted .jpg under result.img,
+                so prefer that when present. */}
+            {result.img ? (
+              <div className="flex flex-col items-center gap-3">
+                <img
+                  src={result.img}
+                  alt="payment QR"
+                  className="rounded-md border border-border bg-white p-2"
+                  style={{ width: 240, height: 240 }}
+                />
+                <div className="text-[11px] text-center text-muted-foreground font-mono">
+                  Scan with Alipay 支付宝 to pay {fmtCNY(result.cny_amount)}
+                </div>
+                {result.pay_url && (
+                  <a
+                    href={result.pay_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    or open in Alipay app
+                  </a>
+                )}
+              </div>
+            ) : result.pay_url ? (
               <a
                 href={result.pay_url}
                 target="_blank"
@@ -622,17 +651,8 @@ function TopupModal({
                 className="block w-full text-center rounded-md bg-primary text-primary-foreground px-4 py-2.5 font-medium hover:bg-primary/90"
               >
                 <ExternalLink className="inline h-4 w-4 mr-2" />
-                Open payment page
+                Open in Alipay app
               </a>
-            ) : result.img ? (
-              <div className="flex justify-center">
-                <img
-                  src={result.img}
-                  alt="payment QR"
-                  className="rounded-md border border-border"
-                  style={{ width: 220, height: 220 }}
-                />
-              </div>
             ) : result.qr_code ? (
               <div className="text-center font-mono text-xs break-all px-2 py-3 rounded-md border border-border/60 bg-muted/30">
                 {result.qr_code}
