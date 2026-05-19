@@ -127,13 +127,24 @@ func (h *Handler) handleListAllOrders(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"orders": []any{}})
 		return
 	}
-	os, err := h.wallets.ListAllOrders(c.Request.Context(), 200)
+	limit := 500
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 2000 {
+			limit = n
+		}
+	}
+	statusFilter := c.Query("status") // optional: "paid", "pending", "expired", "failed"
+	os, err := h.wallets.ListAllOrders(c.Request.Context(), limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	out := make([]gin.H, 0, len(os))
+	var sumCNY, sumUSD float64
 	for _, o := range os {
+		if statusFilter != "" && string(o.Status) != statusFilter {
+			continue
+		}
 		out = append(out, gin.H{
 			"out_trade_no": o.OutTradeNo,
 			"token":        maskToken(o.Token),
@@ -150,8 +161,17 @@ func (h *Handler) handleListAllOrders(c *gin.Context) {
 				return o.PaidAt.Unix()
 			}(),
 		})
+		if o.Status == saasdb.OrderPaid {
+			sumCNY += o.CNYAmount
+			sumUSD += o.USDCredit
+		}
 	}
-	c.JSON(http.StatusOK, gin.H{"orders": out})
+	c.JSON(http.StatusOK, gin.H{
+		"orders":    out,
+		"total_cny": sumCNY,
+		"total_usd": sumUSD,
+		"count":     len(out),
+	})
 }
 
 func (h *Handler) handleReconcileOrder(c *gin.Context) {
