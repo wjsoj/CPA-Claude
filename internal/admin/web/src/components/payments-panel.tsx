@@ -8,6 +8,7 @@ import { cn, fmtDate, fmtUSD } from "@/lib/utils";
 interface AdminPaidOrder {
   out_trade_no: string;
   token: string; // masked
+  label: string; // human-readable name from the tokens store (may be empty)
   cny_amount: number;
   usd_credit: number;
   rate: number;
@@ -68,7 +69,8 @@ export function PaymentsPanel({ refreshTick }: { refreshTick: number }) {
           </h2>
           <p className="mt-2 text-sm text-muted-foreground max-w-2xl">
             Successful Z-Pay top-ups across all tokens. Pending and expired orders are hidden.
-            Tokens are masked — cross-reference via the Tokens tab.
+            Tokens are masked; the label column is joined from the active token registry —
+            paid orders whose token has since been deleted show as "unregistered".
           </p>
         </div>
         <Button variant="outline" onClick={load} className="gap-2">
@@ -130,6 +132,7 @@ export function PaymentsPanel({ refreshTick }: { refreshTick: number }) {
               <thead className="text-left border-b border-border-strong">
                 <tr className="eyebrow">
                   <th className="py-3 px-4 font-[inherit]">Paid at</th>
+                  <th className="py-3 px-4 font-[inherit]">Label</th>
                   <th className="py-3 px-4 font-[inherit]">Token</th>
                   <th className="py-3 px-4 font-[inherit] text-right">CNY</th>
                   <th className="py-3 px-4 font-[inherit] text-right">USD</th>
@@ -146,6 +149,13 @@ export function PaymentsPanel({ refreshTick }: { refreshTick: number }) {
                   >
                     <td className="py-2.5 px-4 mono text-xs whitespace-nowrap">
                       {fmtUnix(o.paid_at || o.created_at)}
+                    </td>
+                    <td className="py-2.5 px-4 text-sm">
+                      {o.label ? (
+                        <span className="font-medium">{o.label}</span>
+                      ) : (
+                        <span className="text-muted-foreground italic opacity-60">unregistered</span>
+                      )}
                     </td>
                     <td className="py-2.5 px-4 mono text-xs">{o.token}</td>
                     <td className="py-2.5 px-4 mono text-sm text-right tabular">

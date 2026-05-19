@@ -56,6 +56,10 @@ type Handler struct {
 	// billing exposes the payment handler — admin endpoints reuse it for
 	// reconciliation. nil when SaaS billing is disabled.
 	billing *billing.Handler
+	// reqLog is the live request-log writer. We hold a reference so token
+	// reset can quiesce + rewrite the masked client_token in rotated files.
+	// nil when request logging is disabled.
+	reqLog *requestlog.Writer
 
 	// Cache for the full-history log scan backing lifetime totals.
 	// Scanning every rotated file on each summary refresh would be
@@ -95,6 +99,14 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.C
 func (h *Handler) WithSaaS(db *saasdb.DB, bh *billing.Handler) *Handler {
 	h.wallets = db
 	h.billing = bh
+	return h
+}
+
+// WithRequestLog attaches the request-log writer. Wire from server.New;
+// optional — admin operates fine without it, but token-reset rewrite of
+// historical client_token masks won't run.
+func (h *Handler) WithRequestLog(w *requestlog.Writer) *Handler {
+	h.reqLog = w
 	return h
 }
 
@@ -1638,15 +1650,81 @@ func (h *Handler) handleResetToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "generate: " + err.Error()})
 		return
 	}
+
+	// SAFETY ORDERING — production billing data, do NOT reorder:
+	//
+	//   1. Wallet rekey FIRST (with pre-mutation backup + post-commit
+	//      readback). If this fails the token-store rotation has not
+	//      happened yet, so we can fail loudly and leave both sides
+	//      attached to the OLD token. The user is uninterrupted.
+	//
+	//   2. Token-store rotation: the moment this commits, requests with
+	//      the old key stop working and requests with the new key start
+	//      working. After this point the wallet must already point at
+	//      newTok or charges/balance checks will misbill.
+	//
+	//   3. Usage store + request-log mask rewrite: cosmetic dashboard
+	//      stitching. Best-effort — the wallet (source of truth for
+	//      money) is already migrated.
+	if h.wallets != nil {
+		rep, err := h.wallets.RekeyToken(c.Request.Context(), tok, newTok)
+		if err != nil {
+			log.Errorf("admin: wallet rekey %s→%s ABORTED reset: %v",
+				maskToken(tok), maskToken(newTok), err)
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+				"error":     "wallet rekey failed; token NOT rotated (no state changed)",
+				"detail":    err.Error(),
+				"old_token": maskToken(tok),
+			})
+			return
+		}
+		log.Infof("admin: wallet rekey %s→%s ok: wallets=%d tx=%d orders=%d balance=$%.4f backup=%s",
+			maskToken(tok), maskToken(newTok),
+			rep.WalletRowsAffected, rep.WalletTxRowsAffected, rep.OrdersRowsAffected,
+			rep.OldBalanceUSD, rep.BackupPath)
+	}
+
 	if err := h.tokens.Reset(tok, newTok); err != nil {
+		// Wallet already moved to newTok but the new key isn't registered —
+		// roll the wallet back so we don't strand billing data on a token
+		// no one can use. If the rollback itself fails we surface BOTH
+		// errors to the operator.
+		if h.wallets != nil {
+			if _, rbErr := h.wallets.RekeyToken(c.Request.Context(), newTok, tok); rbErr != nil {
+				log.Errorf("admin: CRITICAL wallet rollback %s→%s also failed: %v (wallet stranded on %s; restore from backup)",
+					maskToken(newTok), maskToken(tok), rbErr, maskToken(newTok))
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+					"error":             "token rotation failed AND wallet rollback failed",
+					"token_store_error": err.Error(),
+					"rollback_error":    rbErr.Error(),
+				})
+				return
+			}
+		}
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	// Rename usage after the token store commits; if this fails the old
-	// usage history stays under the old key (surfaces as orphan), but the
-	// new token already works — non-fatal.
+
+	// Cosmetic stitching below — failures only mean some history surface
+	// still references the old key; we log + continue rather than 500.
 	if err := h.usage.RenameClient(tok, newTok); err != nil {
 		log.Warnf("admin: reset usage rename %s→%s: %v", maskToken(tok), maskToken(newTok), err)
+	}
+	if h.reqLog != nil {
+		oldMask, newMask := maskToken(tok), maskToken(newTok)
+		if oldMask != newMask && oldMask != "***" {
+			if n, err := h.reqLog.RewriteClientMask(oldMask, newMask); err != nil {
+				log.Warnf("admin: reset reqlog rewrite %s→%s: %v", oldMask, newMask, err)
+			} else if n > 0 {
+				log.Infof("admin: reset reqlog rewrite %s→%s (%d records)", oldMask, newMask, n)
+				h.lifetimeMu.Lock()
+				h.lifetimeCache = nil
+				h.lifetimeMu.Unlock()
+				h.reqCacheMu.Lock()
+				h.reqCache = nil
+				h.reqCacheMu.Unlock()
+			}
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "token": newTok})
 }

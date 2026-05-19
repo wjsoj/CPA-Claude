@@ -116,6 +116,9 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	if s.saasDB != nil {
 		adminH.WithSaaS(s.saasDB, s.billing)
 	}
+	if reqLog != nil {
+		adminH.WithRequestLog(reqLog)
+	}
 
 	if cfg.Endpoints.Claude.IsEnabled() {
 		eng := s.buildClaudeEngine(adminH, primary == "claude")

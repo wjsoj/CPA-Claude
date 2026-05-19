@@ -139,6 +139,16 @@ func (h *Handler) handleListAllOrders(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// Label join: build a full-token → name map so the operator can see
+	// who paid without having to cross-reference Tokens tab manually.
+	// Tokens not currently registered (deleted or never-existed) fall
+	// back to empty string.
+	labels := make(map[string]string)
+	for _, t := range h.tokens.List() {
+		if t.Name != "" {
+			labels[t.Token] = t.Name
+		}
+	}
 	out := make([]gin.H, 0, len(os))
 	var sumCNY, sumUSD float64
 	for _, o := range os {
@@ -148,6 +158,7 @@ func (h *Handler) handleListAllOrders(c *gin.Context) {
 		out = append(out, gin.H{
 			"out_trade_no": o.OutTradeNo,
 			"token":        maskToken(o.Token),
+			"label":        labels[o.Token],
 			"cny_amount":   o.CNYAmount,
 			"usd_credit":   o.USDCredit,
 			"rate":         o.Rate,

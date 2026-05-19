@@ -221,3 +221,95 @@ func (w *Writer) gc() {
 		}
 	}
 }
+
+// RewriteClientMask rewrites every record with ClientToken == oldMask to
+// have ClientToken == newMask, across all rotated JSONL files in the log
+// directory. Used by admin token-reset to migrate historical telemetry
+// when a token is rotated.
+//
+// The current-day file is closed under mutex before rewrite and will be
+// recreated on the next Log() call. Each file is rewritten via a temp
+// file + atomic rename so a crash mid-rewrite never produces a half-
+// rewritten log. Returns the number of rewritten records.
+func (w *Writer) RewriteClientMask(oldMask, newMask string) (int, error) {
+	if oldMask == "" || newMask == "" || oldMask == newMask {
+		return 0, fmt.Errorf("oldMask and newMask must differ and be non-empty")
+	}
+	// Quiesce: close the current file so we can safely rewrite it. The
+	// next Log() will reopen for today.
+	w.mu.Lock()
+	w.closeFileLocked()
+	w.mu.Unlock()
+
+	entries, err := os.ReadDir(w.dir)
+	if err != nil {
+		return 0, err
+	}
+	total := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(w.dir, e.Name())
+		n, err := rewriteMaskFile(path, oldMask, newMask)
+		if err != nil {
+			return total, fmt.Errorf("rewrite %s: %w", e.Name(), err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+func rewriteMaskFile(path, oldMask, newMask string) (int, error) {
+	in, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer in.Close()
+	tmpPath := path + ".rewrite.tmp"
+	out, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return 0, err
+	}
+	dec := json.NewDecoder(in)
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
+	hits := 0
+	for dec.More() {
+		var r Record
+		if err := dec.Decode(&r); err != nil {
+			out.Close()
+			os.Remove(tmpPath)
+			return 0, err
+		}
+		if r.ClientToken == oldMask {
+			r.ClientToken = newMask
+			hits++
+		}
+		if err := enc.Encode(&r); err != nil {
+			out.Close()
+			os.Remove(tmpPath)
+			return 0, err
+		}
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tmpPath)
+		return 0, err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmpPath)
+		return 0, err
+	}
+	if hits == 0 {
+		// Skip the rename if nothing changed; preserves mtime + avoids
+		// touching files that don't need it.
+		os.Remove(tmpPath)
+		return 0, nil
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return 0, err
+	}
+	return hits, nil
+}

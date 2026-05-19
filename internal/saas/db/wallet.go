@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -189,4 +190,127 @@ func (db *DB) FleetTotals(ctx context.Context) (*FleetWalletTotals, error) {
 		return nil, err
 	}
 	return &t, nil
+}
+
+// RekeyTokenReport tells the caller exactly what was migrated.
+type RekeyTokenReport struct {
+	WalletRowsAffected     int64
+	WalletTxRowsAffected   int64
+	OrdersRowsAffected     int64
+	OldBalanceUSD          float64
+	NewBalanceUSDAfterMove float64
+	BackupPath             string
+}
+
+// RekeyToken migrates all wallet-side state from oldToken to newToken
+// inside a single transaction (the wallets row, all wallet_tx ledger
+// entries, and all alipay_orders). Used by admin token-reset to keep
+// history attached to a rotated token.
+//
+// Safety invariants (this is production billing data):
+//
+//   - Pre-mutation backup via SQLite `VACUUM INTO` to a timestamped
+//     .bak file. If the backup fails, the rekey aborts before touching
+//     any row.
+//   - All UPDATEs run inside one BEGIN..COMMIT. WAL + synchronous=FULL
+//     guarantees all-or-nothing on power loss.
+//   - Conservation check: wallet_tx + alipay_orders rows-affected must
+//     match the pre-mutation counts; mismatch rolls back.
+//   - Post-commit readback verifies the new wallet row's balance equals
+//     the pre-mutation balance; mismatch returns an error so the
+//     operator can restore from the backup file.
+//   - Refuses if newToken already has a wallet (would either violate
+//     PK or silently merge balances).
+func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*RekeyTokenReport, error) {
+	if oldToken == "" || newToken == "" || oldToken == newToken {
+		return nil, errors.New("oldToken and newToken must differ and be non-empty")
+	}
+	rep := &RekeyTokenReport{}
+	var hadWallet bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT balance_usd FROM wallets WHERE token = ?`, oldToken).Scan(&rep.OldBalanceUSD); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	} else {
+		hadWallet = true
+	}
+	var oldTxCount, oldOrderCount, dstWalletCount int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM wallet_tx WHERE token = ?`, oldToken).Scan(&oldTxCount); err != nil {
+		return nil, err
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM alipay_orders WHERE token = ?`, oldToken).Scan(&oldOrderCount); err != nil {
+		return nil, err
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM wallets WHERE token = ?`, newToken).Scan(&dstWalletCount); err != nil {
+		return nil, err
+	}
+	if dstWalletCount > 0 {
+		return nil, errors.New("destination token already has a wallet; refusing to overwrite")
+	}
+
+	if db.path != "" {
+		bk := db.path + ".pre-rekey-" + time.Now().UTC().Format("20060102-150405") + ".bak"
+		if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, bk); err != nil {
+			return nil, fmt.Errorf("pre-rekey backup failed (refusing to mutate): %w", err)
+		}
+		rep.BackupPath = bk
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if hadWallet {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE wallets SET token = ?, updated_at = ? WHERE token = ?`,
+			newToken, time.Now().Unix(), oldToken)
+		if err != nil {
+			return nil, err
+		}
+		rep.WalletRowsAffected, _ = res.RowsAffected()
+		if rep.WalletRowsAffected != 1 {
+			return nil, fmt.Errorf("wallets rekey expected 1 row, got %d", rep.WalletRowsAffected)
+		}
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE wallet_tx SET token = ? WHERE token = ?`, newToken, oldToken)
+	if err != nil {
+		return nil, err
+	}
+	rep.WalletTxRowsAffected, _ = res.RowsAffected()
+	if rep.WalletTxRowsAffected != oldTxCount {
+		return nil, fmt.Errorf("wallet_tx conservation broken: pre=%d post=%d", oldTxCount, rep.WalletTxRowsAffected)
+	}
+	res, err = tx.ExecContext(ctx,
+		`UPDATE alipay_orders SET token = ? WHERE token = ?`, newToken, oldToken)
+	if err != nil {
+		return nil, err
+	}
+	rep.OrdersRowsAffected, _ = res.RowsAffected()
+	if rep.OrdersRowsAffected != oldOrderCount {
+		return nil, fmt.Errorf("alipay_orders conservation broken: pre=%d post=%d", oldOrderCount, rep.OrdersRowsAffected)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	if hadWallet {
+		if err := db.QueryRowContext(ctx,
+			`SELECT balance_usd FROM wallets WHERE token = ?`, newToken).Scan(&rep.NewBalanceUSDAfterMove); err != nil {
+			return rep, fmt.Errorf("post-commit balance readback failed: %w", err)
+		}
+		// Both reads pull the same scalar untouched by arithmetic; exact
+		// equality is the right check here.
+		if rep.NewBalanceUSDAfterMove != rep.OldBalanceUSD {
+			return rep, fmt.Errorf("post-commit balance mismatch: pre=%.10f post=%.10f (backup at %s)",
+				rep.OldBalanceUSD, rep.NewBalanceUSDAfterMove, rep.BackupPath)
+		}
+	}
+	return rep, nil
 }
