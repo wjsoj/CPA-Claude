@@ -165,13 +165,20 @@ func (h *Handler) transactions(c *gin.Context) {
 	if !ok {
 		return
 	}
-	txs, err := h.DB.ListWalletTx(c.Request.Context(), tok, 200)
+	// Fetch a wider window because we filter out per-request 'charge'
+	// rows here — they dominate the ledger by volume and aren't useful
+	// to end users. The status page only shows topups + admin adjustments
+	// + refunds; per-request consumption is summarised elsewhere.
+	txs, err := h.DB.ListWalletTx(c.Request.Context(), tok, 1000)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	out := make([]gin.H, 0, len(txs))
 	for _, t := range txs {
+		if t.Kind == db.TxKindCharge {
+			continue
+		}
 		out = append(out, gin.H{
 			"id":         t.ID,
 			"kind":       t.Kind,
