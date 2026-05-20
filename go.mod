@@ -7,8 +7,9 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/sirupsen/logrus v1.9.4
-	github.com/wjsoj/cc-core v0.1.5
+	github.com/wjsoj/cc-core v0.1.6
 	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.50.1
 )
 
 require (
@@ -46,5 +47,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.50.1 // indirect
 )
