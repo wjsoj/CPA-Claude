@@ -717,6 +717,55 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	// Accept-Encoding; without this the captured snippet is binary.
 	maybeDecompressResponse(resp)
 
+	// Reactive signature-error recovery — the API-key twin of the OAuth
+	// path above. Relay API keys fan out across their own backend account
+	// pool and rotate per request, so a `thinking` signature minted on one
+	// backend turn lands on a different backend the next turn → 400
+	// "Invalid `signature` in `thinking` block". switchTracker only ever
+	// sees OUR credential (always the same relay key), so the proactive
+	// sanitize in doForward never fires for relay-internal rotation; this
+	// reactive replay is the only rescue on this path. Done before
+	// writeResponseHeaders so the client never sees the transient 400.
+	if resp.StatusCode == 400 && path == "/v1/messages" {
+		errBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		recovered := false
+		if thinkingsig.IsSignatureError(errBody) {
+			if sanitized := thinkingsig.SanitizeForSwitch(body); !bytes.Equal(sanitized, body) {
+				retryUpstream := sanitized
+				if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
+					if rewritten, rerr := rewriteModelField(retryUpstream, upstreamModel); rerr == nil {
+						retryUpstream = rewritten
+					}
+				}
+				log.Warnf("proxy(apikey): %s returned 400 signature-in-thinking — sanitizing and retrying once on same credential", a.ID)
+				if retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(retryUpstream)); rerr == nil {
+					copyForwardableHeaders(c.Request.Header, retryReq.Header)
+					stripIngressHeaders(retryReq.Header)
+					retryReq.Header.Set("x-api-key", token)
+					if retryResp, derr := client.Do(retryReq); derr == nil {
+						maybeDecompressResponse(retryResp)
+						if retryResp.StatusCode < 400 {
+							log.Infof("proxy(apikey): %s signature retry succeeded", a.ID)
+							resp = retryResp
+							recovered = true
+						} else {
+							_ = retryResp.Body.Close()
+							log.Warnf("proxy(apikey): %s signature retry still %d — surfacing original error", a.ID, retryResp.StatusCode)
+						}
+					} else {
+						log.Warnf("proxy(apikey): %s signature retry transport error: %v", a.ID, derr)
+					}
+				}
+			}
+		}
+		if !recovered {
+			// Hand the original (already-consumed) error body back to the
+			// unchanged code below as if nothing happened.
+			resp.Body = io.NopCloser(bytes.NewReader(errBody))
+		}
+	}
+
 	writeResponseHeaders(c, resp)
 	var counts usage.Counts
 	var sub subUsage
