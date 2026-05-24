@@ -1573,7 +1573,7 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.tokens.Update(tok, body.Name, nil /*weekly*/, body.MaxConcurrent, body.RPM, body.Group); err != nil {
+	if err := h.tokens.Update(tok, body.Name, nil /*weekly*/, body.MaxConcurrent, body.RPM, body.Group, nil /*groups — CPA-Claude is single-channel; nil keeps cc-core v0.8.0 Update sig happy*/); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
