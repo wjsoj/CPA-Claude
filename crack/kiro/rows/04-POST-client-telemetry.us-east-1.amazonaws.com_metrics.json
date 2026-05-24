@@ -1,0 +1,41 @@
+{
+  "idx": 4,
+  "rowId": "1779609864727-007",
+  "startTime": 1779609864727,
+  "url": "https://client-telemetry.us-east-1.amazonaws.com/metrics",
+  "method": "POST",
+  "statusCode": 200,
+  "reqHeaders": {
+    "content-type": "application/json",
+    "content-length": "363",
+    "user-agent": "aws-sdk-rust/1.3.16 os/linux lang/rust/1.92.0",
+    "x-amz-user-agent": "aws-sdk-rust/1.3.16 ua/2.1 api/toolkittelemetry/1.0.0 os/linux lang/rust/1.92.0 app/AmazonQ-For-CLI",
+    "x-amz-date": "20260524T080424Z",
+    "authorization": "AWS4-HMAC-SHA256 Credential=ASIAREDACTEDAWSAKID0/20260524/us-east-1/execute-api/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-user-agent, Signature=REDACTED_SIGNATURE_HEX_64",
+    "x-amz-security-token": "IQoJb3JpZ2luX2Vj_STS_SESSION_TOKEN_REDACTED",
+    "amz-sdk-request": "attempt=1; max=1",
+    "amz-sdk-invocation-id": "00000000-0000-0000-0000-000000000050",
+    "accept": "*/*",
+    "accept-encoding": "gzip",
+    "host": "client-telemetry.us-east-1.amazonaws.com",
+    "connection": "close"
+  },
+  "resHeaders": {
+    "content-type": "application/json",
+    "content-length": "0",
+    "connection": "close",
+    "date": "Sun, 24 May 2026 08:04:25 GMT",
+    "x-amzn-trace-id": "Root=1-6a12b109-17faf9a45563afca4764ad67",
+    "x-amzn-requestid": "3eef2cbb-b451-4936-8597-cda5d4d13dd5",
+    "access-control-allow-origin": "*",
+    "x-amz-apigw-id": "d3CZlG9YIAMEZQw=",
+    "x-cache": "Miss from cloudfront",
+    "via": "1.1 544ef62f4f978150b1046f6301e68852.cloudfront.net (CloudFront)",
+    "x-amz-cf-pop": "JFK50-P14",
+    "x-amz-cf-id": "OaH9-eLJulJFJK_HbUbqpvApVVdd9diiN5vBBhNv1y0o_eRmzHqJYA=="
+  },
+  "reqSize": 363,
+  "resSize": 0,
+  "reqBody": "{\"AWSProduct\":\"CodeWhisperer for Terminal\",\"AWSProductVersion\":\"2.4.1\",\"ClientID\":\"00000000-0000-0000-0000-000000000041\",\"MetricData\":[{\"MetricName\":\"amazonqcli_dailyHeartbeat\",\"EpochTimestamp\":1779609863355,\"Unit\":\"None\",\"Value\":1.0,\"Metadata\":[{\"Key\":\"source\",\"Value\":\"\"}]}],\"OS\":\"linux\",\"OSArchitecture\":\"x86_64\",\"OSVersion\":\"Linux 7.0.9-arch1-1 - Arch Linux\"}",
+  "resBody": null
+}

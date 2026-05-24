@@ -1,0 +1,39 @@
+{
+  "idx": 7,
+  "rowId": "1779609882014-013",
+  "startTime": 1779609882015,
+  "url": "https://q.us-east-1.amazonaws.com/",
+  "method": "POST",
+  "statusCode": 200,
+  "reqHeaders": {
+    "content-type": "application/x-amz-json-1.0",
+    "x-amz-target": "AmazonCodeWhispererService.SendTelemetryEvent",
+    "content-length": "1089",
+    "user-agent": "aws-sdk-rust/1.3.16 ua/2.1 api/codewhispererruntime/0.1.16551 os/linux lang/rust/1.92.0 md/appVersion-2.4.1 app/AmazonQ-For-CLI",
+    "x-amz-user-agent": "aws-sdk-rust/1.3.16 ua/2.1 api/codewhispererruntime/0.1.16551 os/linux lang/rust/1.92.0 m/F app/AmazonQ-For-CLI",
+    "x-amzn-codewhisperer-optout": "false",
+    "authorization": "Bearer aoaAAAAAREDACTED_KIRO_ACCESS_TOKEN",
+    "amz-sdk-request": "attempt=1; max=3",
+    "amz-sdk-invocation-id": "00000000-0000-0000-0000-000000000050",
+    "accept": "*/*",
+    "accept-encoding": "gzip",
+    "host": "q.us-east-1.amazonaws.com",
+    "connection": "close"
+  },
+  "resHeaders": {
+    "date": "Sun, 24 May 2026 08:04:43 GMT",
+    "content-type": "application/x-amz-json-1.0",
+    "content-length": "2",
+    "connection": "close",
+    "x-amzn-requestid": "c8795f3f-f572-430b-a15d-77454ca7b24c",
+    "x-xss-protection": "1; mode=block",
+    "strict-transport-security": "max-age=47304000; includeSubDomains",
+    "x-frame-options": "DENY",
+    "cache-control": "no-cache",
+    "x-content-type-options": "nosniff"
+  },
+  "reqSize": 1089,
+  "resSize": 2,
+  "reqBody": "{\"clientToken\":\"00000000-0000-0000-0000-000000000042\",\"telemetryEvent\":{\"chatAddMessageEvent\":{\"conversationId\":\"7bb9c137-f057-4b63-baa6-b7a5607e27c5\",\"messageId\":\"17ae4a0c-02f5-40f4-a7bd-19916c80eb8d\",\"timeToFirstChunkMilliseconds\":3246.315064,\"timeBetweenChunks\":[0.022115,0.0123,44.246665,51.734898,79.52331699999999,29.980451000000002,52.881695,53.180243000000004,52.91982,55.254453000000005,50.484336,52.225041,54.937478999999996,77.001955,24.66254,53.588874000000004,51.316465,55.92482,49.841325999999995,51.721927,54.424961,51.362749,94.408691,9.067323,52.483076,52.992343,50.573294,94.002351,12.273433,51.331585,50.604572,55.144874,47.469556000000004,51.0825,51.704555,51.473074000000004,54.38565,52.020745,55.410689,53.804878,50.162571,52.924074000000005,0.03232,0.105651],\"responseLength\":293}},\"optOutPreference\":\"OPTIN\",\"userContext\":{\"ideCategory\":\"CLI\",\"operatingSystem\":\"LINUX\",\"product\":\"CodeWhisperer\",\"clientId\":\"00000000-0000-0000-0000-000000000041\",\"ideVersion\":\"2.4.1\"},\"profileArn\":\"arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK\",\"modelId\":\"auto\"}",
+  "resBody": "{}"
+}

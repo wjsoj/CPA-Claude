@@ -1,0 +1,41 @@
+{
+  "idx": 28,
+  "rowId": "1779609966483-055",
+  "startTime": 1779609966483,
+  "url": "https://client-telemetry.us-east-1.amazonaws.com/metrics",
+  "method": "POST",
+  "statusCode": 200,
+  "reqHeaders": {
+    "content-type": "application/json",
+    "content-length": "1766",
+    "user-agent": "aws-sdk-rust/1.3.16 os/linux lang/rust/1.92.0",
+    "x-amz-user-agent": "aws-sdk-rust/1.3.16 ua/2.1 api/toolkittelemetry/1.0.0 os/linux lang/rust/1.92.0 app/AmazonQ-For-CLI",
+    "x-amz-date": "20260524T080606Z",
+    "authorization": "AWS4-HMAC-SHA256 Credential=ASIAREDACTEDAWSAKID0/20260524/us-east-1/execute-api/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-user-agent, Signature=REDACTED_SIGNATURE_HEX_64",
+    "x-amz-security-token": "IQoJb3JpZ2luX2Vj_STS_SESSION_TOKEN_REDACTED",
+    "amz-sdk-request": "attempt=1; max=1",
+    "amz-sdk-invocation-id": "00000000-0000-0000-0000-000000000050",
+    "accept": "*/*",
+    "accept-encoding": "gzip",
+    "host": "client-telemetry.us-east-1.amazonaws.com",
+    "connection": "close"
+  },
+  "resHeaders": {
+    "content-type": "application/json",
+    "content-length": "0",
+    "connection": "close",
+    "date": "Sun, 24 May 2026 08:06:07 GMT",
+    "x-amzn-trace-id": "Root=1-6a12b16f-1f438beb1dfc5a485ba3e524",
+    "x-amzn-requestid": "808c56b6-7b61-4f02-bbdc-62fdfcac95f9",
+    "access-control-allow-origin": "*",
+    "x-amz-apigw-id": "d3CpeEbSoAMElPQ=",
+    "x-cache": "Miss from cloudfront",
+    "via": "1.1 cd348454cc72e01992f0a16dc939a8ae.cloudfront.net (CloudFront)",
+    "x-amz-cf-pop": "JFK50-P14",
+    "x-amz-cf-id": "RUtl6u8APuAJV6pgcmPhIXYP8xQjj_PgCHT5NgKdI_dL1N0efQOjbw=="
+  },
+  "reqSize": 1766,
+  "resSize": 0,
+  "reqBody": "{\"AWSProduct\":\"CodeWhisperer for Terminal\",\"AWSProductVersion\":\"2.4.1\",\"ClientID\":\"00000000-0000-0000-0000-000000000041\",\"MetricData\":[{\"MetricName\":\"codewhispererterminal_toolUseSuggested\",\"EpochTimestamp\":1779609962554,\"Unit\":\"None\",\"Value\":1.0,\"Metadata\":[{\"Key\":\"credentialStartUrl\",\"Value\":\"\"},{\"Key\":\"amazonqConversationId\",\"Value\":\"7bb9c137-f057-4b63-baa6-b7a5607e27c5\"},{\"Key\":\"codewhispererterminal_utteranceId\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_userInputId\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_toolUseId\",\"Value\":\"tooluse_mQXanWWGxJijK8Ht2V8js1\"},{\"Key\":\"codewhispererterminal_toolName\",\"Value\":\"read\"},{\"Key\":\"codewhispererterminal_isToolUseAccepted\",\"Value\":\"true\"},{\"Key\":\"codewhispererterminal_isToolValid\",\"Value\":\"true\"},{\"Key\":\"codewhispererterminal_toolUseIsSuccess\",\"Value\":\"true\"},{\"Key\":\"reasonDesc\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_isCustomTool\",\"Value\":\"false\"},{\"Key\":\"codewhispererterminal_customToolInputTokenSize\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_customToolOutputTokenSize\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_customToolLatency\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_model\",\"Value\":\"auto\"},{\"Key\":\"codewhispererterminal_toolExecutionDurationMs\",\"Value\":\"53\"},{\"Key\":\"codewhispererterminal_toolTurnDurationMs\",\"Value\":\"53\"},{\"Key\":\"codewhispererterminal_isToolUseTrusted\",\"Value\":\"false\"},{\"Key\":\"codewhispererterminal_clientApplication\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_AwsServiceName\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_AwsOperationName\",\"Value\":\"\"},{\"Key\":\"kirocli_appType\",\"Value\":\"V2\"},{\"Key\":\"kirocli_acpClientName\",\"Value\":\"kiro-tui\"},{\"Key\":\"kirocli_acpClientVersion\",\"Value\":\"2.4.1\"}]}],\"OS\":\"linux\",\"OSArchitecture\":\"x86_64\",\"OSVersion\":\"Linux 7.0.9-arch1-1 - Arch Linux\"}",
+  "resBody": null
+}

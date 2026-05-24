@@ -1,0 +1,39 @@
+{
+  "idx": 42,
+  "rowId": "1779610005389-083",
+  "startTime": 1779610005389,
+  "url": "https://q.us-east-1.amazonaws.com/",
+  "method": "POST",
+  "statusCode": 200,
+  "reqHeaders": {
+    "content-type": "application/x-amz-json-1.0",
+    "x-amz-target": "AmazonCodeWhispererService.SendTelemetryEvent",
+    "content-length": "1808",
+    "user-agent": "aws-sdk-rust/1.3.16 ua/2.1 api/codewhispererruntime/0.1.16551 os/linux lang/rust/1.92.0 md/appVersion-2.4.1 app/AmazonQ-For-CLI",
+    "x-amz-user-agent": "aws-sdk-rust/1.3.16 ua/2.1 api/codewhispererruntime/0.1.16551 os/linux lang/rust/1.92.0 m/F app/AmazonQ-For-CLI",
+    "x-amzn-codewhisperer-optout": "false",
+    "authorization": "Bearer aoaAAAAAREDACTED_KIRO_ACCESS_TOKEN",
+    "amz-sdk-request": "attempt=1; max=3",
+    "amz-sdk-invocation-id": "00000000-0000-0000-0000-000000000050",
+    "accept": "*/*",
+    "accept-encoding": "gzip",
+    "host": "q.us-east-1.amazonaws.com",
+    "connection": "close"
+  },
+  "resHeaders": {
+    "date": "Sun, 24 May 2026 08:06:46 GMT",
+    "content-type": "application/x-amz-json-1.0",
+    "content-length": "2",
+    "connection": "close",
+    "x-amzn-requestid": "b4708a2f-89df-4eb3-8933-bc8753397057",
+    "x-xss-protection": "1; mode=block",
+    "strict-transport-security": "max-age=47304000; includeSubDomains",
+    "x-frame-options": "DENY",
+    "cache-control": "no-cache",
+    "x-content-type-options": "nosniff"
+  },
+  "reqSize": 1808,
+  "resSize": 2,
+  "reqBody": "{\"clientToken\":\"458d05ba-afce-44aa-f59c-8bed3cba7865\",\"telemetryEvent\":{\"chatAddMessageEvent\":{\"conversationId\":\"7bb9c137-f057-4b63-baa6-b7a5607e27c5\",\"messageId\":\"6a1f9481-5390-4b23-a807-12e41c5fa1ca\",\"timeToFirstChunkMilliseconds\":3605.04333,\"timeBetweenChunks\":[0.016228000000000003,0.005373,0.009592999999999999,0.007618,23.501258,55.866544999999995,56.047957000000004,49.687366,50.193883,52.308343,53.832877,52.23176,51.120501999999995,51.175132,52.360598,228.767384,0.056385000000000005,4.74077,80.974683,24.912903,51.351472,52.867405999999995,50.679571,52.58848,52.061814999999996,53.421055,54.473243,50.388728,51.571467000000005,51.679705,52.275174,51.256906,52.174985,50.116539,52.766515,77.39754599999999,262.832671,0.024238,0.00843,0.007757999999999999,22.461549,182.73931900000002,0.074016,0.007798,23.694708,107.341431,50.234348999999995,52.436678,57.642958,48.856725,50.446224,51.863071,51.370457,105.09255,51.555308000000004,52.593342,51.833331,51.856444,50.904396999999996,53.252553,53.517886,51.386956999999995,54.519723,51.234723,50.909458,78.98561099999999,26.80395,125.40552699999999,1.506401,29.727117,52.361318,52.673643999999996,50.931401,84.03632900000001,17.672324,55.377036999999994,57.269197,51.767022000000004,53.696932000000004,52.990689,53.157156,51.560990000000004,50.172461,96.58897900000001,4.783301,53.925426,55.021079,49.686503,54.595072,51.301331999999995,51.120601,51.889824000000004,53.88522,48.623729,148.719398,0.018685,7.525187,52.309996,54.024834,50.625911],\"responseLength\":2923}},\"optOutPreference\":\"OPTIN\",\"userContext\":{\"ideCategory\":\"CLI\",\"operatingSystem\":\"LINUX\",\"product\":\"CodeWhisperer\",\"clientId\":\"00000000-0000-0000-0000-000000000041\",\"ideVersion\":\"2.4.1\"},\"profileArn\":\"arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK\",\"modelId\":\"auto\"}",
+  "resBody": "{}"
+}

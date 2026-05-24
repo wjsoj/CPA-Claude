@@ -1,0 +1,31 @@
+{
+  "idx": 2,
+  "rowId": "1779611076741-099",
+  "startTime": 1779611076742,
+  "url": "https://cognito-identity.us-east-1.amazonaws.com/",
+  "method": "POST",
+  "statusCode": 200,
+  "reqHeaders": {
+    "content-type": "application/x-amz-json-1.1",
+    "x-amz-target": "AWSCognitoIdentityService.GetCredentialsForIdentity",
+    "content-length": "63",
+    "user-agent": "aws-sdk-rust/1.3.10 os/linux lang/rust/1.92.0",
+    "x-amz-user-agent": "aws-sdk-rust/1.3.10 ua/2.1 api/cognitoidentity/1.91.0 os/linux lang/rust/1.92.0 m/E md/http#hyper-1.x app/AmazonQ-For-CLI",
+    "amz-sdk-request": "attempt=1; max=1",
+    "amz-sdk-invocation-id": "00000000-0000-0000-0000-000000000050",
+    "host": "cognito-identity.us-east-1.amazonaws.com",
+    "connection": "close"
+  },
+  "resHeaders": {
+    "date": "Sun, 24 May 2026 08:24:37 GMT",
+    "content-type": "application/x-amz-json-1.1",
+    "content-length": "1756",
+    "connection": "close",
+    "x-amzn-requestid": "6878e79e-645b-4123-a9ab-29e9bf95618a",
+    "strict-transport-security": "max-age=31536000; includeSubDomains"
+  },
+  "reqSize": 63,
+  "resSize": 1756,
+  "reqBody": "{\"IdentityId\":\"us-east-1:00000000-0000-0000-0000-000000000051\"}",
+  "resBody": "{\"Credentials\":{\"AccessKeyId\":\"ASIAREDACTEDAWSAKID1\",\"Expiration\":1.779614677E9,\"SecretKey\":\"AWS_SECRET_KEY_REDACTED_____40_chars_v1\",\"SessionToken\":\"IQoJb3JpZ2luX2Vj_STS_SESSION_TOKEN_REDACTED\"},\"IdentityId\":\"us-east-1:00000000-0000-0000-0000-000000000051\"}"
+}

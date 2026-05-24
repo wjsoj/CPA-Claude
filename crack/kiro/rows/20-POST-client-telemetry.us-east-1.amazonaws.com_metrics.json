@@ -1,0 +1,41 @@
+{
+  "idx": 20,
+  "rowId": "1779609934465-039",
+  "startTime": 1779609934465,
+  "url": "https://client-telemetry.us-east-1.amazonaws.com/metrics",
+  "method": "POST",
+  "statusCode": 200,
+  "reqHeaders": {
+    "content-type": "application/json",
+    "content-length": "2338",
+    "user-agent": "aws-sdk-rust/1.3.16 os/linux lang/rust/1.92.0",
+    "x-amz-user-agent": "aws-sdk-rust/1.3.16 ua/2.1 api/toolkittelemetry/1.0.0 os/linux lang/rust/1.92.0 app/AmazonQ-For-CLI",
+    "x-amz-date": "20260524T080534Z",
+    "authorization": "AWS4-HMAC-SHA256 Credential=ASIAREDACTEDAWSAKID0/20260524/us-east-1/execute-api/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-user-agent, Signature=REDACTED_SIGNATURE_HEX_64",
+    "x-amz-security-token": "IQoJb3JpZ2luX2Vj_STS_SESSION_TOKEN_REDACTED",
+    "amz-sdk-request": "attempt=1; max=1",
+    "amz-sdk-invocation-id": "00000000-0000-0000-0000-000000000050",
+    "accept": "*/*",
+    "accept-encoding": "gzip",
+    "host": "client-telemetry.us-east-1.amazonaws.com",
+    "connection": "close"
+  },
+  "resHeaders": {
+    "content-type": "application/json",
+    "content-length": "0",
+    "connection": "close",
+    "date": "Sun, 24 May 2026 08:05:35 GMT",
+    "x-amzn-trace-id": "Root=1-6a12b14f-75ae639363b7d43f1ce313ea",
+    "x-amzn-requestid": "719eaf54-3d2c-42a3-9b11-9ff9fbc98d3a",
+    "access-control-allow-origin": "*",
+    "x-amz-apigw-id": "d3CkfG0ZIAMEQog=",
+    "x-cache": "Miss from cloudfront",
+    "via": "1.1 fadab620a5a774c0fdc4cf86b9944f92.cloudfront.net (CloudFront)",
+    "x-amz-cf-pop": "JFK50-P14",
+    "x-amz-cf-id": "uojrI2IMuzBvpfNtq8i_7nH-JrmXxvo1G3yhgxSceF6AGc3Ru0-A8w=="
+  },
+  "reqSize": 2338,
+  "resSize": 0,
+  "reqBody": "{\"AWSProduct\":\"CodeWhisperer for Terminal\",\"AWSProductVersion\":\"2.4.1\",\"ClientID\":\"00000000-0000-0000-0000-000000000041\",\"MetricData\":[{\"MetricName\":\"codewhispererterminal_addChatMessage\",\"EpochTimestamp\":1779609933121,\"Unit\":\"None\",\"Value\":1.0,\"Metadata\":[{\"Key\":\"amazonqConversationId\",\"Value\":\"7bb9c137-f057-4b63-baa6-b7a5607e27c5\"},{\"Key\":\"codewhispererterminal_utteranceId\",\"Value\":\"05a0e866-3dbb-450f-8400-28aff86f7e3b\"},{\"Key\":\"credentialStartUrl\",\"Value\":\"\"},{\"Key\":\"ssoRegion\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_inCloudshell\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_contextFileLength\",\"Value\":\"\"},{\"Key\":\"requestId\",\"Value\":\"a007afaa-a97d-4862-a026-2ffc42d317ca\"},{\"Key\":\"result\",\"Value\":\"Succeeded\"},{\"Key\":\"reason\",\"Value\":\"\"},{\"Key\":\"reasonDesc\",\"Value\":\"\"},{\"Key\":\"statusCode\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_model\",\"Value\":\"auto\"},{\"Key\":\"codewhispererterminal_timeToFirstChunksMs\",\"Value\":\"3264.390\"},{\"Key\":\"codewhispererterminal_timeBetweenChunksMs\",\"Value\":\"0.020,0.036,0.056,117.330,0.112,33.856,56.377,50.160,52.833,169.977,0.073,0.008,51.261,36.246,51.930,51.114,50.820,53.087,50.329,52.932,50.965,53.382,54.903,51.468,54.932,51.774,52.101,47.648,51.508,51.939,51.488,55.121,51.538,53.309,58.006,65.697,36.325,49.176,53.954,51.088,52.604,51.722,51.026,55.311,53.097,47.730,74.264,34.825,47.362,52.011,53.524,51.133,52.870,54.518,52.661,52.153,51.030,52.998,50.494,56.247,39.820,0.026,0.127\"},{\"Key\":\"codewhispererterminal_chatConversationType\",\"Value\":\"NotToolUse\"},{\"Key\":\"codewhispererterminal_toolUseId\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_toolName\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_assistantResponseLength\",\"Value\":\"473\"},{\"Key\":\"codewhispererterminal_chatMessageMetaTags\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_clientApplication\",\"Value\":\"\"},{\"Key\":\"kirocli_appType\",\"Value\":\"V2\"},{\"Key\":\"kirocli_acpClientName\",\"Value\":\"kiro-tui\"},{\"Key\":\"kirocli_acpClientVersion\",\"Value\":\"2.4.1\"},{\"Key\":\"codewhispererterminal_totalTokens\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_uncachedInputTokens\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_outputTokens\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_cacheReadInputTokens\",\"Value\":\"\"},{\"Key\":\"codewhispererterminal_cacheWriteInputTokens\",\"Value\":\"\"}]}],\"OS\":\"linux\",\"OSArchitecture\":\"x86_64\",\"OSVersion\":\"Linux 7.0.9-arch1-1 - Arch Linux\"}",
+  "resBody": null
+}

@@ -1,0 +1,29 @@
+{
+  "idx": 1,
+  "rowId": "1779609861496-001",
+  "startTime": 1779609861499,
+  "url": "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken",
+  "method": "POST",
+  "statusCode": 200,
+  "reqHeaders": {
+    "host": "prod.us-east-1.auth.desktop.kiro.dev",
+    "content-type": "application/json",
+    "user-agent": "Kiro-CLI",
+    "accept": "*/*",
+    "accept-encoding": "gzip",
+    "content-length": "249"
+  },
+  "resHeaders": {
+    "content-type": "application/json",
+    "date": "Sun, 24 May 2026 08:04:22 GMT",
+    "x-amzn-requestid": "65821852-92c5-488f-b96a-30676f0d2aa3",
+    "x-cache": "Miss from cloudfront",
+    "via": "1.1 9feee68c149ffc812d2a7f5683100dd2.cloudfront.net (CloudFront)",
+    "x-amz-cf-pop": "JFK52-P5",
+    "x-amz-cf-id": "tNm1ek21FFMJAOjyKjYsTFPz8mQVU5GdK7Y03uYZbMq4c4is_hZOJg=="
+  },
+  "reqSize": 249,
+  "resSize": 596,
+  "reqBody": "{\"refreshToken\":\"aorAAAAAREDACTED_KIRO_REFRESH_TOKEN\"}",
+  "resBody": "{\"accessToken\":\"aoaAAAAAREDACTED_KIRO_ACCESS_TOKEN\",\"expiresIn\":3600,\"profileArn\":\"arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK\",\"refreshToken\":\"aorAAAAAREDACTED_KIRO_REFRESH_TOKEN\"}"
+}
