@@ -13,3 +13,6 @@
 /internal/admin/web/dist/*
 !/internal/admin/web/dist/.gitkeep
 .claude/
+
+# crack/ — local-only redaction map with real captured secrets
+crack/scripts/redaction_map.json

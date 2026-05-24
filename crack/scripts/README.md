@@ -1,14 +1,14 @@
 # crack/scripts/
 
 Helper scripts for the capture archive — keep separate from the capture data
-itself (`raw/`, `oauth/`, `apikey/`, `login/`).
+itself (`raw/`, `oauth/`, `apikey/`, `login/`, `kiro/`).
 
 ## Files
 
 | Script | Purpose |
 |---|---|
-| `split.py <mode>` | Decode `crack/raw/<mode>-session-full.json` into `crack/<mode>/rows/NN-METHOD-host_path.json`. `<mode>` ∈ `oauth` / `apikey` / `login`. The `login` mode additionally filters down to only the 12 login-flow requests. |
-| `gen.py <mode>` | Render the per-row JSONs as per-request markdown under `crack/<mode>/docs/`. Embeds NOTES + EXTRA depth tables specific to each mode. |
+| `split.py <mode>` | Decode `crack/raw/<mode>-session-full.json` (or per-mode raw path) into `crack/.../<mode>/rows/NN-METHOD-host_path.json`. `<mode>` ∈ `oauth` / `apikey` / `login` / `kiro` / `kiro-login`. The `login` mode filters down to only the 12 Anthropic PKCE login-flow requests. The `kiro-login` mode reads `crack/kiro/login/raw/kiro-login-session-full.json` and filters by rowId ≥ `KIRO_LOGIN_START_ROWID` (constant inside split.py) — update that constant when re-capturing. |
+| `gen.py <mode>` | Render the per-row JSONs as per-request markdown under `crack/<mode>/docs/`. Embeds NOTES + EXTRA depth tables specific to each mode (Anthropic modes share one note dictionary; `kiro` has its own dictionary because the protocol is entirely different). |
 | `sanitize.py` | Idempotent in-place redaction across **every** json/md under `crack/` (excluding `archive/`). Replaces tokens, UUIDs, emails, device id, OAuth `code/state/verifier/challenge`, CF cookies, hostname, paths, etc. Run after any new capture import. |
 
 All three scripts anchor paths to their own location (`os.path.dirname(__file__)/..`),

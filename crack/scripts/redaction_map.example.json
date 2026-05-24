@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Per-capture-session redaction map. Copy to redaction_map.json and fill in.",
+    "Keys are real values pulled from your local Whistle dump that MUST be replaced.",
+    "Values are the placeholder strings that will appear in the published rows/docs.",
+    "",
+    "WORKFLOW:",
+    "  1. Capture a fresh kiro / anthropic session into crack/.../raw/*.json.",
+    "  2. cp crack/scripts/redaction_map.example.json crack/scripts/redaction_map.json",
+    "  3. Open the raw dump, identify tokens/UUIDs/secrets, add them as key→placeholder.",
+    "  4. python3 crack/scripts/sanitize.py  (idempotent; refuses to run without map).",
+    "  5. crack/scripts/redaction_map.json is gitignored — never commit it."
+  ],
+  "literals": {
+    "sk-ant-oat01-REDACTED": "sk-ant-oat01-REDACTED",
+    "ASIA_AWS_TEMP_KEY_ID_FROM_CAPTURE": "ASIAREDACTEDAWSAKID0",
+    "REAL_AWS_SECRET_40_CHAR_BASE64_FROM_CAPTURE___": "AWS_SECRET_KEY_REDACTED_____40_chars___",
+    "1225ef802a7a88454489035a63d1966e11f2ba2065128262b7ff8ca3cd9afe0b": "0000000000000000000000000000000000000000000000000000000000000000",
+    "ccd4b34d-b955-4435-af57-bf1bbeba91e7": "00000000-0000-0000-0000-000000000003"
+  }
+}

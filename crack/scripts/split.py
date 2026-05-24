@@ -5,6 +5,8 @@
     python3 crack/scripts/split.py oauth     # → crack/oauth/rows/
     python3 crack/scripts/split.py apikey    # → crack/apikey/rows/
     python3 crack/scripts/split.py login     # → crack/login/rows/，仅保留登录链路相关请求
+    python3 crack/scripts/split.py kiro      # → crack/kiro/rows/  (Kiro/Amazon-Q CLI capture)
+    python3 crack/scripts/split.py kiro-login # → crack/kiro/login/rows/  (Kiro login/logout PKCE 流程)
 
 任何一个 mode 都从同一份脚本走，只在 login 模式开启额外的链路筛选。
 """
@@ -14,7 +16,12 @@ import json, base64, os, gzip, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRACK_ROOT = os.path.dirname(HERE)
 
-VALID_MODES = ('oauth', 'apikey', 'login')
+VALID_MODES = ('oauth', 'apikey', 'login', 'kiro', 'kiro-login')
+
+# kiro-login: start key is the FIRST request after the long gap that captures the login/logout sequence.
+# Empirically the new session opens with `Cognito GetId`, so we anchor on the URL = exact cognito host AND
+# require rowId >= a configurable cutoff. The cutoff lives in this file so re-captures need updating only here.
+KIRO_LOGIN_START_ROWID = '1779611075530'
 
 # login 模式下保留的 host + path 前缀（其余视作业务/噪声）
 LOGIN_HOSTS = (
@@ -66,6 +73,9 @@ def decode(rec):
 
 def select_keys(mode: str, rows_all: dict) -> list:
     keys = sorted(rows_all.keys())
+    if mode == 'kiro-login':
+        # 仅保留登录/登出 session 部分（按 rowId 时间戳前缀过滤）
+        return [k for k in keys if k >= KIRO_LOGIN_START_ROWID]
     if mode != 'login':
         return keys
     # login: 从最早的 /api/hello 开始，到第一条业务 /v1/messages 之前；中间只保留登录链路相关 url
@@ -94,12 +104,16 @@ def main(mode: str) -> None:
     if mode not in VALID_MODES:
         sys.exit(f"unknown mode {mode!r}; expected one of {VALID_MODES}")
 
-    # oauth + apikey 共用 crack/raw/，login 走自己的 crack/login/raw/（数据布局沿袭旧版）
+    # oauth + apikey + kiro 共用 crack/raw/，其它每模式自带 raw/
     if mode == 'login':
         src_path = os.path.join(CRACK_ROOT, 'login', 'raw', 'login-session-full.json')
+        out_dir  = os.path.join(CRACK_ROOT, 'login', 'rows')
+    elif mode == 'kiro-login':
+        src_path = os.path.join(CRACK_ROOT, 'kiro', 'login', 'raw', 'kiro-login-session-full.json')
+        out_dir  = os.path.join(CRACK_ROOT, 'kiro', 'login', 'rows')
     else:
         src_path = os.path.join(CRACK_ROOT, 'raw', f'{mode}-session-full.json')
-    out_dir = os.path.join(CRACK_ROOT, mode, 'rows')
+        out_dir  = os.path.join(CRACK_ROOT, mode, 'rows')
     os.makedirs(out_dir, exist_ok=True)
 
     src = json.load(open(src_path))

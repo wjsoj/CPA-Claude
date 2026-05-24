@@ -15,8 +15,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CRACK_ROOT = os.path.dirname(HERE)
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else 'oauth'
-ROWS_DIR = os.path.join(CRACK_ROOT, MODE, 'rows')
-DOCS_DIR = os.path.join(CRACK_ROOT, MODE, 'docs')
+# 多数 mode 都是 crack/<mode>/{rows,docs}，但 kiro-login 是 kiro 的子流程，落在 crack/kiro/login/{rows,docs}
+if MODE == 'kiro-login':
+    ROWS_DIR = os.path.join(CRACK_ROOT, 'kiro', 'login', 'rows')
+    DOCS_DIR = os.path.join(CRACK_ROOT, 'kiro', 'login', 'docs')
+else:
+    ROWS_DIR = os.path.join(CRACK_ROOT, MODE, 'rows')
+    DOCS_DIR = os.path.join(CRACK_ROOT, MODE, 'docs')
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 # ---------- 每条 row 的人写注释（按 mode 切分） ----------
@@ -813,6 +818,554 @@ EXTRA[11] = """
 """
 
 EXTRA_BY_MODE['login'] = EXTRA
+
+# ============================================================
+# ============== Kiro / Amazon-Q CLI mode ====================
+# ============================================================
+# 抓包对象：Kiro-CLI (Amazon Q for CLI 2.4.1)，从启动 → 同一会话 11 个对话 turn → 退出
+# 共 48 条请求，4 个 host：
+#   prod.us-east-1.auth.desktop.kiro.dev   ← Kiro 自家身份服务（1 条 refreshToken）
+#   cognito-identity.us-east-1.amazonaws.com  ← AWS Cognito（1 条 GetCredentialsForIdentity）
+#   q.us-east-1.amazonaws.com              ← CodeWhisperer Runtime + Streaming（Bearer = Kiro accessToken）
+#   client-telemetry.us-east-1.amazonaws.com  ← Amazon Toolkit Telemetry（SigV4 with STS creds）
+
+NOTES_BY_MODE['kiro'] = {
+    1:  ("**Kiro 身份刷新（核心入口）**。`POST prod.us-east-1.auth.desktop.kiro.dev/refreshToken`，body `{refreshToken}` → 响应 `{accessToken, refreshToken, expiresAt, ...}`。这是 Kiro 自己实现的 token endpoint（不是 AWS Cognito 也不是 OAuth），UA 写死 `Kiro-CLI`。Kiro 的 `accessToken` 之后会作为 **Bearer** 直接打 CodeWhisperer 接口。",
+         "启动 — 身份"),
+    2:  ("**AWS STS 凭据交换**。`AWSCognitoIdentityService.GetCredentialsForIdentity`（content-type `application/x-amz-json-1.1`）。把已有的 `IdentityId` 换成临时 STS（`AccessKeyId/SecretKey/SessionToken/Expiration`）。这套 STS **只用于打 client-telemetry**（SigV4），不影响 CodeWhisperer 的 Bearer 认证。",
+         "启动 — 身份"),
+    3:  ("**模型列表探测**。`AmazonCodeWhispererService.ListAvailableModels`（x-amz-json-1.0）。query 上带 `origin=KIRO_CLI&profileArn=arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK`（该 profileArn 是 Amazon Q for Free Tier 的公共 profile，所有 Kiro 用户共享）。响应返回 `{defaultModel, models[]}`，含 `auto / claude-sonnet-4 / claude-3.7 / ...` 及各自的 `promptCaching` 元信息。",
+         "启动 — bootstrap"),
+    4:  ("**Toolkit Telemetry 第 1 弹**：`amazonqcli_dailyHeartbeat`（每天上报一次的存活心跳）。POST `client-telemetry.us-east-1.amazonaws.com/metrics`，body 是 JSON `{AWSProduct, AWSProductVersion, ClientID, MetricData[], OS, OSArchitecture, OSVersion, ParentProduct, ParentProductVersion}`。**SigV4 签名**用 #02 拿到的 STS 临时凭据（不是 Bearer）。响应 200 + 空 body。",
+         "启动 — Telemetry"),
+    5:  ("**Toolkit Telemetry 第 2 弹**：`codewhispererterminal_cliSubcommandExecuted`（CLI 子命令执行打点）。MetricData 多带 `credentialStartUrl` / `credentialSourceId` / `result=Succeeded` 等元信息。",
+         "启动 — Telemetry"),
+    6:  ("**首条业务消息（核心）**。`AmazonCodeWhispererStreamingService.GenerateAssistantResponse`。body 顶层两字段：`conversationState` + `profileArn`。`conversationState` 包含 `{conversationId, history[], currentMessage, chatTriggerType, customizationArn}`。响应是 **AWS eventstream** 二进制帧（`application/vnd.amazon.eventstream`），需要按 12-byte 头 + headers + payload 的标准帧式解码。",
+         "业务 — Turn 1"),
+    7:  ("**Turn 1 完成后上报**：`AmazonCodeWhispererService.SendTelemetryEvent`，`telemetryEvent.chatAddMessageEvent`。包含 `conversationId / messageId / timeToFirstChunkMilliseconds / timeBetweenChunks[] / chatTriggerInteraction / hasCodeSnippet / customizationArn / activeEditorTotalCharacters / cwsprChatPromptLength / cwsprChatConversationType`。**通过 CodeWhisperer 自家接口上报，不是 client-telemetry** —— 跟 toolkit telemetry 是两套并行通道。",
+         "业务 — Turn 1 Telemetry"),
+    8:  ("Toolkit telemetry：`codewhispererterminal_addedMessage`（chat 用户消息加入）。", "业务 — Telemetry"),
+    9:  ("Toolkit telemetry：`amazonq_promptToCompletion`（提示→完成耗时）。", "业务 — Telemetry"),
+    10: ("Turn 2 GenerateAssistantResponse。`conversationState.history` 累加上一轮的 user/assistant 消息。", "业务 — Turn 2"),
+    11: ("Turn 2 SendTelemetryEvent。", "业务 — Turn 2 Telemetry"),
+    12: ("Toolkit telemetry：`codewhispererterminal_addedMessage`。", "业务 — Telemetry"),
+    13: ("Toolkit telemetry：`amazonq_promptToCompletion`。", "业务 — Telemetry"),
+    14: ("Turn 3 GenerateAssistantResponse。", "业务 — Turn 3"),
+    15: ("Turn 3 SendTelemetryEvent。", "业务 — Turn 3 Telemetry"),
+    16: ("Turn 4 GenerateAssistantResponse（请求体涨到 65 KB）。", "业务 — Turn 4"),
+    17: ("Toolkit telemetry：`codewhispererterminal_addedMessage`。", "业务 — Telemetry"),
+    18: ("Toolkit telemetry：`amazonq_promptToCompletion`。", "业务 — Telemetry"),
+    19: ("Turn 4 SendTelemetryEvent（晚到 —— Kiro 的 telemetry 上报并不严格跟随 turn 顺序）。", "业务 — Turn 4 Telemetry"),
+    20: ("Toolkit telemetry。", "业务 — Telemetry"),
+    21: ("Toolkit telemetry。", "业务 — Telemetry"),
+    22: ("Turn 5 GenerateAssistantResponse（请求体仅 1.3 KB —— 可能是新 conversationId 或继续上一轮工具调用而无新 history）。", "业务 — Turn 5"),
+    23: ("Turn 6 GenerateAssistantResponse（67 KB —— 累计 history 增长）。", "业务 — Turn 6"),
+    24: ("Turn 6 SendTelemetryEvent。", "业务 — Turn 6 Telemetry"),
+    25: ("Turn 7 GenerateAssistantResponse（119 KB）。", "业务 — Turn 7"),
+    26: ("Toolkit telemetry。", "业务 — Telemetry"),
+    27: ("Toolkit telemetry。", "业务 — Telemetry"),
+    28: ("Toolkit telemetry。", "业务 — Telemetry"),
+    29: ("Turn 8 GenerateAssistantResponse（124 KB）。", "业务 — Turn 8"),
+    30: ("Turn 8 SendTelemetryEvent。", "业务 — Turn 8 Telemetry"),
+    31: ("Toolkit telemetry。", "业务 — Telemetry"),
+    32: ("Toolkit telemetry。", "业务 — Telemetry"),
+    33: ("Turn 7 SendTelemetryEvent（更晚到 —— 印证 telemetry 与对话流是异步解耦的）。", "业务 — Turn 7 Telemetry"),
+    34: ("Turn 9 GenerateAssistantResponse（130 KB）。", "业务 — Turn 9"),
+    35: ("Toolkit telemetry。", "业务 — Telemetry"),
+    36: ("Toolkit telemetry。", "业务 — Telemetry"),
+    37: ("**Turn 10 GenerateAssistantResponse（最长一次，请求 134 KB / 响应 53 KB）**。", "业务 — Turn 10"),
+    38: ("Turn 10 SendTelemetryEvent，**aborted** —— 上一次响应未完整结束/被 Ctrl-C 打断，CLI 直接丢弃这次发包。", "业务 — Turn 10 Telemetry"),
+    39: ("Turn 10 SendTelemetryEvent 重试，成功。", "业务 — Turn 10 Telemetry"),
+    40: ("Toolkit telemetry。", "业务 — Telemetry"),
+    41: ("Toolkit telemetry。", "业务 — Telemetry"),
+    42: ("SendTelemetryEvent（推断为补传上一轮的事件）。", "业务 — Telemetry"),
+    43: ("Toolkit telemetry（本批 4.4 KB，明显比常规批次大 —— 可能附带了 `chatInteractWithMessageEvent` 类的扩展事件）。", "业务 — Telemetry"),
+    44: ("Toolkit telemetry。", "业务 — Telemetry"),
+    45: ("**Turn 11（最后一轮）GenerateAssistantResponse**。", "业务 — Turn 11"),
+    46: ("Turn 11 SendTelemetryEvent。", "业务 — Turn 11 Telemetry"),
+    47: ("Toolkit telemetry。", "业务 — Telemetry"),
+    48: ("末尾 Toolkit telemetry，**aborted** —— Kiro CLI 进程退出时还有未发完的批次。", "退出"),
+}
+
+EXTRA = {}
+
+EXTRA[1] = """
+**Kiro 自有身份服务**：`prod.us-east-1.auth.desktop.kiro.dev` 是 Kiro Desktop 的独立 token endpoint，跟 AWS Cognito 没关系（Cognito 在下一步只用来换 STS）。
+
+**Request**
+- `Content-Type: application/json`
+- `User-Agent: Kiro-CLI`（**写死无版本号**，跟 AWS SDK UA 完全不同）
+- **无 Authorization**（用 body 里的 refreshToken 自证身份）
+
+```json
+{ "refreshToken": "aor..." }
+```
+
+`refreshToken` 是约 220 char 的 Kiro 私有格式：`{prefix}AAAAA{base64}:{ECDSA-sig}` —— 形如 OAuth2 refresh token 但带签名校验。
+
+**Response**
+```json
+{
+  "accessToken":  "aoa...",       // ~220 char, 同样带签名
+  "refreshToken": "aor...",       // 一次性轮换（rolling refresh），下次必须用新的
+  "expiresAt":    "ISO8601",      // 通常 1 小时
+  "...":          "..."
+}
+```
+
+**CPA-Claude 对接备注**：如要把 Kiro 凭据接进 pool，要做：
+1. 落盘 `refreshToken`（必须用最新的，每次刷新都要持久化）
+2. 每次过期前用同一 endpoint refresh，**body 严格 `{refreshToken}`，不带 client_id/grant_type**
+3. accessToken 直接当 Bearer 用，目标只有 `q.us-east-1.amazonaws.com`
+"""
+
+EXTRA[2] = """
+**AWS Cognito Identity Pool 标准调用**：`AWSCognitoIdentityService.GetCredentialsForIdentity`
+
+**Request**
+- `Content-Type: application/x-amz-json-1.1`（注意 1.1，不是 1.0）
+- `X-Amz-Target: AWSCognitoIdentityService.GetCredentialsForIdentity`
+- `User-Agent: aws-sdk-rust/1.3.16 os/linux lang/rust/1.92.0`（rust SDK）
+- `X-Amz-User-Agent: aws-sdk-rust/1.3.16 ua/2.1 api/cognitoidentity/1.100.0 ... app/AmazonQ-For-CLI`
+- `Amz-Sdk-Invocation-Id: <uuid>`、`Amz-Sdk-Request: attempt=1; max=3`
+- **无 Authorization**（Cognito Identity 这一步本身是 "unauthenticated/identity-only" 模式）
+
+```json
+{ "IdentityId": "us-east-1:<uuid>" }
+```
+
+`IdentityId` 是 Cognito 给本设备分配的稳定 ID（首次启动时通过另一个 `GetId` 调用拿到，本抓包没出现，说明本机已有缓存）。
+
+**Response**：
+```json
+{
+  "IdentityId": "us-east-1:<uuid>",
+  "Credentials": {
+    "AccessKeyId":  "ASIA...",
+    "Expiration":   <epoch_float>,
+    "SecretKey":    "<40 char>",
+    "SessionToken": "IQoJb3JpZ2luX2VjEIH//..."  // 长达 1500 char 的 STS session token
+  }
+}
+```
+
+**只服务 toolkit telemetry**：这套 STS 临时凭据**只**用于给 `client-telemetry.us-east-1.amazonaws.com/metrics` 做 SigV4（见 #04 起的 telemetry 请求头里的 `x-amz-security-token`）。CodeWhisperer 业务接口（`q.us-east-1.amazonaws.com`）走的是 Kiro accessToken Bearer，不用这套 STS。
+"""
+
+EXTRA[3] = """
+**AmazonCodeWhispererService.ListAvailableModels**
+
+**Request**
+- URL：`POST https://q.us-east-1.amazonaws.com/?origin=KIRO_CLI&profileArn=...`（**query 也带 profileArn，body 内还会再带一次**）
+- `Content-Type: application/x-amz-json-1.0`
+- `X-Amz-Target: AmazonCodeWhispererService.ListAvailableModels`
+- `Authorization: Bearer <Kiro accessToken from #01>`（**Bearer，不是 SigV4**）
+- `X-Amz-User-Agent: aws-sdk-rust/1.3.16 ua/2.1 api/codewhispererruntime/0.1.16551 os/linux lang/rust/1.92.0 m/F,C app/AmazonQ-For-CLI`
+
+```json
+{
+  "origin": "KIRO_CLI",
+  "profileArn": "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"
+}
+```
+
+`profileArn` 的 account `699475941385` 是 Amazon 自家的 Q-for-Free-Tier profile（所有 Kiro 用户共享，**不是用户自己的 AWS account**）。CPA-Claude 转发时这个 arn 应当原样透传或直接 hard-code。
+
+**Response** — 模型清单（节选）：
+```json
+{
+  "defaultModel": { "modelId": "auto" },
+  "models": [
+    { "modelId": "auto",                "modelName": "auto",                "promptCaching": {...} },
+    { "modelId": "CLAUDE_SONNET_4_5_V1_0", "modelName": "claude-sonnet-4-5", "promptCaching": {...} },
+    { "modelId": "CLAUDE_SONNET_4_V1_0",   "modelName": "claude-sonnet-4",   "promptCaching": {...} },
+    { "modelId": "CLAUDE_3_7_SONNET_V1_0", "modelName": "claude-3.7-sonnet", "promptCaching": {...} },
+    ...
+  ]
+}
+```
+
+每个模型条目可能带：
+- `modelName` —— 展示名
+- `description`
+- `promptCaching.maximumCacheCheckpointsAllowed` —— prompt cache 上限
+- `supportedContentMediaType[]` / `supportedFeatureFlags[]`
+
+**CPA-Claude 设计提示**：客户端是先 `ListAvailableModels` → 才在后续 `GenerateAssistantResponse` 里指定 `modelId`。代理时如要做 model rewrite，要拦住 ListAvailableModels 给出"只允许的"白名单。
+"""
+
+EXTRA[4] = """
+**Toolkit Telemetry endpoint — SigV4 路径**
+
+**鉴权**：与 CodeWhisperer 接口完全独立的认证机制——用 #02 拿到的 STS 临时凭据做 SigV4 签名。请求头里能看到：
+- `X-Amz-Date: 20260524T080424Z`
+- `X-Amz-Security-Token: IQoJb3JpZ2luX2Vj...`（同 #02 响应里的 SessionToken）
+- `Authorization: AWS4-HMAC-SHA256 Credential=ASIA.../20260524/us-east-1/execute-api/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-user-agent, Signature=<hex>`
+
+注意 service 是 **`execute-api`**（API Gateway），region `us-east-1`。
+
+**Request body**（JSON，**非 Smithy 协议**）：
+
+```json
+{
+  "AWSProduct":         "CodeWhisperer for Terminal",
+  "AWSProductVersion":  "2.4.1",
+  "ClientID":           "<uuid>",          // 设备级稳定 ID（同 Cognito IdentityId 派生）
+  "MetricData": [
+    {
+      "MetricName":     "amazonqcli_dailyHeartbeat",
+      "EpochTimestamp": 1779609863355,
+      "Unit":           "None",
+      "Value":          1.0,
+      "Metadata": [
+        { "Key": "source", "Value": "" },
+        ...
+      ]
+    }
+  ],
+  "OS":                 "linux",
+  "OSArchitecture":     "x86_64",
+  "OSVersion":          "<kernel>",
+  "ParentProduct":      "CodeWhisperer for Terminal",
+  "ParentProductVersion": "2.4.1"
+}
+```
+
+**Response**：HTTP 200，**空 body**。
+
+**事件清单（本会话观察到的 MetricName）**
+- `amazonqcli_dailyHeartbeat`
+- `codewhispererterminal_cliSubcommandExecuted`
+- `codewhispererterminal_addedMessage`
+- `amazonq_promptToCompletion`
+- `codewhispererterminal_userLoggedIn` / `_userLoggedOut`（启动/退出时）
+- `codewhispererterminal_dialogDismissed`、`codewhispererterminal_dialogShown`
+
+**`Metadata[]` 常见 Key**：
+`credentialStartUrl` / `credentialSourceId` / `result` / `reason` /
+`source` / `cwsprChatConversationType` / `cwsprChatHasCodeSnippet` /
+`cwsprChatTriggerInteraction` / `cwsprChatProgrammingLanguage` /
+`amazonqConversationId` / `amazonqMessageId` / `amazonqRequestId` /
+`duration` / `durationMicroseconds` / `inputTokenCount` / `outputTokenCount` /
+`cacheReadTokenCount` / `cacheWriteTokenCount`
+"""
+
+EXTRA[6] = """
+**核心业务：`AmazonCodeWhispererStreamingService.GenerateAssistantResponse`**
+
+**Request**
+- `Content-Type: application/x-amz-json-1.0`
+- `X-Amz-Target: AmazonCodeWhispererStreamingService.GenerateAssistantResponse`
+- `Authorization: Bearer <Kiro accessToken>`
+- `X-Amz-User-Agent: aws-sdk-rust/1.3.16 ua/2.1 api/codewhispererstreaming/0.1.16551 os/linux lang/rust/1.92.0 m/F app/AmazonQ-For-CLI`
+
+**Body 顶层**：
+```json
+{
+  "conversationState": {
+    "conversationId":    "<uuid>",
+    "currentMessage": {
+      "userInputMessage": {
+        "content":             "<user text + context dump>",
+        "userInputMessageContext": {
+          "envState":   { "operatingSystem": "linux", "currentWorkingDirectory": "...", "envVariables": [...] },
+          "shellState": { "shellName": "zsh", "shellHistory": [...] },
+          "gitState":   { ... },
+          "toolResults": [ ... ]      // 工具回合时这里塞上一轮的 tool 结果
+        },
+        "modelId":             "CLAUDE_SONNET_4_5_V1_0" | "auto",
+        "origin":              "CLI"
+      }
+    },
+    "history": [
+      { "userInputMessage":      { ... } },
+      { "assistantResponseMessage": { "content": "...", "toolUses": [...] } },
+      ...
+    ],
+    "chatTriggerType":   "MANUAL",
+    "customizationArn":  null
+  },
+  "profileArn": "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"
+}
+```
+
+注意 Kiro 的 prompt 工程：
+- **用户消息里手动塞了"CONTEXT ENTRY"段**：把项目内的 README、关键源码作为 `--- CONTEXT ENTRY BEGIN ---` 块拼在用户输入前。这是 Kiro 的上下文注入方式（vs Claude Code 用 system block）。
+- **没有 system prompt 字段** —— Kiro 把所有"系统指令"也内联在 `userInputMessage.content` 里。
+- **没有显式的 tools 列表** —— 工具定义在 CodeWhisperer 服务端按 `modelId` 配置，客户端不传 schema，只在 `toolResults` 里回上一轮工具产物。
+
+**Response**：`Content-Type: application/vnd.amazon.eventstream`（AWS event-stream 二进制帧）。
+
+每帧结构（标准 AWS event-stream）：
+```
++--------+------------+------------+------+---------+------+
+| 4 byte | 4 byte     | 4 byte     | hdrs | payload | 4 byte
+| total  | hdrs-len   | prelude-crc|      |         | msg-crc
++--------+------------+------------+------+---------+------+
+```
+
+Headers 里有 `:event-type` / `:content-type` / `:message-type` 等字段，常见 event-type：
+- `initial-response` —— 首帧，含 `conversationId / messageId / requestId`
+- `assistantResponseEvent` —— 文本增量，payload 为 JSON `{ "content": "..." }`
+- `toolUseEvent` —— 工具调用，payload 为 JSON `{ "toolUseId", "name", "input": "<JSON-as-string>", "stop": bool }`
+- `codeReferenceEvent` —— 代码引用合规元数据
+- `messageMetadataEvent` —— 终态，含 usage `{inputTokenCount, outputTokenCount, cacheReadTokenCount, cacheWriteTokenCount}`
+
+**CPA-Claude 转发提示**：
+1. 上行只需要透传 `conversationState + profileArn`。
+2. 下行要做 event-stream → SSE 的协议翻译（如果想把 Kiro 当 Anthropic 上游用）。
+3. 计费 token 在 `messageMetadataEvent` 末帧，要解析二进制帧才能拿到。
+"""
+
+EXTRA[7] = """
+**AmazonCodeWhispererService.SendTelemetryEvent —— 业务侧 telemetry（不是 toolkit telemetry）**
+
+注意这条**和 #04/#05 的 client-telemetry 是两套独立通道**：
+- 本条走 `q.us-east-1.amazonaws.com` + Bearer kiro token + Smithy x-amz-json-1.0
+- client-telemetry 走 `client-telemetry.us-east-1.amazonaws.com` + SigV4 STS + 纯 JSON
+
+**Body**：
+```json
+{
+  "clientToken":        "<uuid>",            // 会话 nonce
+  "telemetryEvent": {
+    "chatAddMessageEvent": {
+      "conversationId":              "<uuid>",
+      "messageId":                   "<uuid>",
+      "timeToFirstChunkMilliseconds": 3246.31,
+      "timeBetweenChunks":            [0.02, 0.01, 44.24, 51.73, ...],
+      "chatTriggerInteraction":      "manual",
+      "hasCodeSnippet":              false,
+      "customizationArn":            null,
+      "activeEditorTotalCharacters": 0,
+      "cwsprChatPromptLength":       <int>,
+      "cwsprChatConversationType":   "Chat",
+      "result":                      "Succeeded"
+    }
+  },
+  "optOutPreference":  "OPTIN",
+  "userContext": {
+    "clientId":         "<uuid>",
+    "ideCategory":      "CLI",
+    "operatingSystem":  "LINUX",
+    "product":          "CodeWhisperer for Terminal"
+  },
+  "profileArn":         "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK",
+  "modelId":            "CLAUDE_SONNET_4_5_V1_0"
+}
+```
+
+**telemetryEvent 还可以是其它子类型**：`chatInteractWithMessageEvent` / `terminalUserInteractionEvent` / `userTriggerDecisionEvent` / `codeCoverageEvent` / `userModificationEvent` 等。Kiro 当前抓包里只看到 `chatAddMessageEvent`。
+
+**Response**：`{}`（空对象）。
+
+**为什么两套 telemetry**：
+- `client-telemetry` 是 Amazon 通用的 Toolkit Telemetry（很多 AWS IDE 插件共用），度量"用了什么子命令"等基础指标。
+- `SendTelemetryEvent` 是 CodeWhisperer/Q 业务专用，度量"对话质量" —— 服务端要用它做 RLHF / 模型评估。
+"""
+
+EXTRA_BY_MODE['kiro'] = EXTRA
+
+# ============================================================
+# ============== Kiro Login/Logout (PKCE) mode ===============
+# ============================================================
+# 14 条请求，覆盖 一次 `kiro login` → `kiro logout` → 再 `kiro login` 完整循环。
+# 浏览器侧入口：https://app.kiro.dev/signin?state=<10char>&code_challenge=<base64url43>&
+#               code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A3128&
+#               redirect_from=kirocli
+# CLI 监听 localhost:3128，回调 path `/oauth/callback?login_option=github`（IdP 选择附加在 query）。
+# 完成后 CLI POST `/oauth/token` 换 access/refresh token；logout 时 POST `/logout` 带 refresh token。
+
+NOTES_BY_MODE['kiro-login'] = {
+    1:  ("**Cognito `GetId`**：用 IdentityPoolId `us-east-1:820fd6d1-95c0-4ca4-bffb-3f01d32da842` 拿一个匿名 IdentityId。**这是无身份联邦（unauthenticated）模式** —— 每次冷启动 / 切账户都会发起一次，每次返回的 IdentityId 都不同（本会话 3 次 GetId 拿到 3 个 ID），仅用于给 toolkit telemetry 签 SigV4。",
+         "登录前 — Cognito 识别"),
+    2:  ("**Cognito `GetCredentialsForIdentity`**：用上一步的 IdentityId 换 STS 临时凭据（AccessKeyId / SecretKey / SessionToken），用于后续 `client-telemetry.us-east-1` 的 SigV4 签名。", "登录前 — Cognito 换 STS"),
+    3:  ("**Toolkit telemetry — 子命令打点**：`MetricName=codewhispererterminal_cliSubcommandExecuted`，`subcommand=login` —— 标记用户跑了 `kiro login`。在 OAuth 流程**开始之前**就发，体现产品使用。",
+         "登录前 — Telemetry"),
+    4:  ("**OAuth Token Exchange（核心 #1）**：`POST prod.us-east-1.auth.desktop.kiro.dev/oauth/token`，body `{code, code_verifier, redirect_uri}` —— **没有 client_id、没有 grant_type、没有 state**。响应 `{accessToken, expiresIn:3600, profileArn, refreshToken}` —— **极简，没有 token_type / scope / id_token / email / account 信息**。详见字段深挖。",
+         "登录 — Token Exchange"),
+    5:  ("**Toolkit telemetry — 登录成功**：`MetricName=codewhispererterminal_userLoggedIn`，标记 OAuth 流程已结束。", "登录 — Telemetry"),
+    6:  ("**Logout（核心 #2）**：`POST prod.us-east-1.auth.desktop.kiro.dev/logout`，body 仅 `{refreshToken}`（**带的是 refresh token，不是 access token；服务端会主动让两条都失效**）。响应 200 + 空 body。",
+         "登出 — 撤销"),
+    7:  ("Cognito GetId（**第二次**） —— `kiro logout` 完成后，Cognito 缓存被一并清空，需要重新拿匿名 identity 继续上报 telemetry。", "登出 — Cognito 识别"),
+    8:  ("Cognito GetCredentialsForIdentity（**第二次**），同上。", "登出 — Cognito 换 STS"),
+    9:  ("Toolkit telemetry：`subcommand=logout` —— 标记用户跑了 `kiro logout`。注意是在拿到新的 STS 后才发，所以**第 9 条而不是第 7 条**才是登出动作的真正『用户视角时间点』。",
+         "登出 — Telemetry"),
+    10: ("Cognito GetId（**第三次**）—— 再次执行 `kiro login` 触发的又一轮匿名 identity 申请。", "再登录 — Cognito 识别"),
+    11: ("Cognito GetCredentialsForIdentity（**第三次**）。", "再登录 — Cognito 换 STS"),
+    12: ("Toolkit telemetry：`subcommand=login`（再一次）。", "再登录 — Telemetry"),
+    13: ("**OAuth Token Exchange 第二轮**：跟 #04 同 endpoint 同 body 结构；新 code + 新 code_verifier，签发出新的一对 access/refresh token。", "再登录 — Token Exchange"),
+    14: ("Toolkit telemetry：`userLoggedIn` 第二次。", "再登录 — Telemetry"),
+}
+
+EXTRA = {}
+
+EXTRA[1] = """
+**Cognito Identity Pool 是公共共享的**
+
+`IdentityPoolId = us-east-1:820fd6d1-95c0-4ca4-bffb-3f01d32da842` —— Amazon 自家给 Q for CLI 用户共享的匿名 identity pool（**所有 Kiro 用户都用这一个 pool ID**）。配合 #02 的 `GetCredentialsForIdentity`，等价于：
+> Kiro CLI 在 Amazon 控股的 AWS 账号下，以"匿名访客"身份获得了一小段 STS 凭据，唯一权限是签名调用 `client-telemetry.us-east-1.amazonaws.com/metrics`。
+
+**Request**
+- `Content-Type: application/x-amz-json-1.1`
+- `X-Amz-Target: AWSCognitoIdentityService.GetId`
+- `User-Agent: aws-sdk-rust/1.3.10 os/linux lang/rust/1.92.0`（注意是 **1.3.10**，而 chat 路径用的是 1.3.16 —— 不同子模块独立指定 SDK 版本）
+- **无 Authorization**（IdentityPool 设为 "unauthenticated"）
+
+```json
+{ "IdentityPoolId": "us-east-1:820fd6d1-95c0-4ca4-bffb-3f01d32da842" }
+```
+
+**Response**
+```json
+{ "IdentityId": "us-east-1:<uuid>" }
+```
+
+**注意**：本会话 3 次 GetId 返回了 3 个不同的 IdentityId（622b0cc5-14d1-... / 622b0cc5-1493-... / 622b0cc5-1409-...）。前 8 char 前缀重复说明 pool 内部按 prefix 分桶，但每次发出实际是新 ID —— 这是**匿名 pool 默认行为**（无 login 关联，每次都是新会话）。
+
+**和首次 chat 会话的差异**：[`crack/kiro/docs/02`](../../docs/02-POST-cognito-identity.us-east-1.amazonaws.com_.md) 没有 `GetId` 调用，是因为 Kiro 把 IdentityId **持久化缓存到磁盘**（`~/.config/amazon-q/cache/cognito.json` 之类的位置），冷启动有缓存就直接走 `GetCredentialsForIdentity`；本次抓包是登录链路，CLI 主动清缓存（或缓存过期）后才会触发 `GetId`。
+"""
+
+EXTRA[4] = """
+**核心：Kiro `/oauth/token` 端点**
+
+URL: `POST https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token`
+
+**Request Headers**
+| Header | Value |
+|---|---|
+| `Content-Type` | `application/json` |
+| `User-Agent` | `Kiro-CLI`（**写死无版本号**） |
+| `Authorization` | _无_ —— OAuth code-for-token 自证 |
+
+**Request Body**（仅 3 字段，示例值已脱敏）
+```json
+{
+  "code":         "KIRO_OAUTH_CODE_X_REDACTED",
+  "code_verifier":"KIRO_CODE_VERIFIER_X_REDACTED",
+  "redirect_uri": "http://localhost:3128/oauth/callback?login_option=github"
+}
+```
+
+| Field | 含义 | 是否随机 |
+|---|---|---|
+| `code` | 浏览器回调里拿到的一次性 code，**标准 UUIDv4 格式** —— Kiro 服务端用 uuid 生成 code，不是 base64 随机串 | 每次新生成 |
+| `code_verifier` | 32 字节随机数 base64url 编码（43 char），与浏览器侧 `code_challenge` 应满足 `BASE64URL(SHA256(verifier)) == challenge` | 每次新生成 |
+| `redirect_uri` | **必须与授权时一致**（包括 query 里的 `login_option`）；服务端会精确字符串校验 | 固定 host:port + 浮动 login_option |
+
+**没有的字段**（vs 标准 OAuth2 RFC 6749）
+- ❌ `grant_type` —— 这个 endpoint 只支持 code exchange，所以省略
+- ❌ `client_id` —— 端点本身就绑死给 Kiro CLI 用，不区分客户端
+- ❌ `state` —— state 是 CSRF 防护，CLI 在浏览器回调时已经校验过（state 不出现在到 Kiro 服务端的请求里，只在 CLI ↔ 浏览器侧流转）
+
+---
+
+**Response Body**（4 字段，示例值已脱敏）
+```json
+{
+  "accessToken":  "aoaAAAAAREDACTED_KIRO_ACCESS_TOKEN",
+  "expiresIn":    3600,
+  "profileArn":   "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK",
+  "refreshToken": "aorAAAAAREDACTED_KIRO_REFRESH_TOKEN"
+}
+```
+
+| Field | 含义 |
+|---|---|
+| `accessToken` | 形如 `aoaAAAAA{base64}:{ECDSA-sig}`，约 220 char；之后直接当 Bearer 打 `q.us-east-1.amazonaws.com` |
+| `expiresIn` | **3600（1 小时）** —— 过期后用 [`/refreshToken`](../../docs/01-POST-prod.us-east-1.auth.desktop.kiro.dev_refreshToken.md) 端点（**注意是另一个 endpoint，不是 `/oauth/token`**）换新 token |
+| `profileArn` | 固定 `arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK`（Amazon Q free-tier 公共 profile，**所有用户都是这个串**） |
+| `refreshToken` | 形如 `aorAAAAA{base64}:{ECDSA-sig}`，约 220 char；用于 `/refreshToken` 端点；**rolling refresh**（每次刷新都换新的 refresh token，老的立刻失效） |
+
+**没有的字段**（vs 标准 OAuth2）
+- ❌ `token_type` —— 默认就是 Bearer
+- ❌ `scope` —— Kiro 没有 scope 概念
+- ❌ `id_token` —— Kiro 不发 OIDC id_token
+- ❌ `email` / `account_uuid` / `organization_uuid` —— 跟 Anthropic OAuth 不同，Kiro 不在 token-exchange 阶段返回任何账户元信息（账户信息只能从 accessToken 自身的内部结构 / 后续 API 调用拿到）
+
+---
+
+**Response Headers**
+| Header | Value | 含义 |
+|---|---|---|
+| `Content-Type` | `application/json` | |
+| `Server` | _空_ | Kiro 服务端不暴露具体 server 软件 |
+| `Connection` | `keep-alive` | |
+
+注意 **响应没有 set-cookie、没有 Cloudflare 头、没有 `request-id` / `traceresponse`** —— 这是个非常"裸"的 endpoint，不走 CDN（直接 ALB / Lambda 推测）。
+
+---
+
+**浏览器侧授权流程**（CLI 不抓包，仅复述）
+
+CLI `kiro login` → spawn 浏览器打开：
+```
+https://app.kiro.dev/signin
+    ?state=KIRO_OAUTH_STATE
+    &code_challenge=KIRO_CODE_CHALLENGE_REDACTED
+    &code_challenge_method=S256
+    &redirect_uri=http%3A%2F%2Flocalhost%3A3128
+    &redirect_from=kirocli
+```
+
+| 参数 | 含义 |
+|---|---|
+| `state` | 10 char 随机字符串（CSRF + 关联 challenge↔verifier） |
+| `code_challenge` | `BASE64URL(SHA256(code_verifier))`，43 char |
+| `code_challenge_method` | `S256`（不接受 `plain`） |
+| `redirect_uri` | **host:port 固定为 `http://localhost:3128`（注意端口 3128 是 hard-coded，不像 Claude Code 那样随机端口）** |
+| `redirect_from` | 固定 `kirocli` —— 让 app.kiro.dev 知道是 CLI 触发的，渲染对应的 UI 提示 |
+
+用户在 `app.kiro.dev/signin` 选 IdP（GitHub / Google / Builder ID）→ 完成 IdP 登录 → 浏览器 302 到：
+```
+http://localhost:3128/oauth/callback?code=<uuid>&state=<echo>&login_option=github
+```
+
+CLI 监听端口 3128 拿到 `code`，**把 `?login_option=github` 也拼回到 `redirect_uri` 里**（这就是为什么 #04 的 `redirect_uri` 包含 `?login_option=github`，是浏览器侧加上的），然后 POST `/oauth/token`。
+
+---
+
+**CPA-Claude 对接备注**
+
+| 任务 | 实现方式 |
+|---|---|
+| 落盘 token 对 | 存 `accessToken / refreshToken / expiresAt = now + 3600s / profileArn`；**accessToken 和 refreshToken 一定要原子写**（rolling refresh 一旦丢失 refreshToken，账户死） |
+| 刷新前阈值 | 建议过期前 5min 触发 `/refreshToken`（用另一个 endpoint，body `{refreshToken}`） |
+| 多账户 | 一个 OAuth 账户对应一组 `(accessToken, refreshToken)`；profileArn 全部一样 = `arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK`，可全局常量 |
+| 代理触发登录 | CPA 后端要承担 CLI 角色：driver 浏览器 → 监听 localhost:3128 → 自动复现 PKCE。⚠️ 注意 localhost:3128 是写死的，如果服务器有 3128 占用（squid 默认端口！）必须先释放或让 CLI 改端口 |
+"""
+
+EXTRA[6] = """
+**Logout endpoint — Kiro 自家撤销**
+
+URL: `POST https://prod.us-east-1.auth.desktop.kiro.dev/logout`
+
+**Request Headers**：同 [`/refreshToken`](../../docs/01-POST-prod.us-east-1.auth.desktop.kiro.dev_refreshToken.md) —— `Content-Type: application/json`、`User-Agent: Kiro-CLI`、无 Authorization。
+
+**Request Body**
+```json
+{ "refreshToken": "aorAAAAAREDACTED_KIRO_REFRESH_TOKEN" }
+```
+
+注意是**带 refreshToken**，不是 accessToken。原因：refreshToken 在服务端有数据库记录（rolling 链表），可被精确撤销；access token 是签名 token 没有服务端状态，只能等过期。**撤销 refreshToken 后，对应的 accessToken 也立即失效**（服务端会把同一个会话标记为 revoked，accessToken 即便没过期也会被拒）。
+
+**Response**：HTTP 200，**空 body**。
+
+**CPA-Claude 对接备注**：
+- 如果 CPA 删除一个 OAuth 凭据，**应主动调用 `/logout`** 把服务端的 refresh chain 也撤销，否则该 token 在服务端继续占用 quota 池。
+- `/logout` 不需要 Bearer，所以即便 accessToken 已经过期也能调（只要 refreshToken 还有效）。
+- 错误处理：refreshToken 已失效时返回什么？本次没抓到，CPA 实现时应当容忍 4xx 当作"已撤销" treated as success。
+"""
+
+EXTRA[7] = """
+**为什么 logout 后又两次 GetId / GetCredentialsForIdentity？**
+
+Kiro CLI 把 Cognito 临时凭据**关联到 OAuth 会话**：登出意味着销毁全部凭据状态，包括 Cognito 缓存的 IdentityId。再启动后必须重新走 GetId → GetCredentialsForIdentity 拿一份新的匿名 STS，否则 toolkit telemetry 无 SigV4 可签。
+
+匿名 pool 的 IdentityId **不能复用** —— 它在服务端只是"无关联的临时 handle"，每次 GetId 都是新的（甚至没有去重）。所以 #07/#10 拿到的两个 IdentityId 互不相同。
+"""
+
+EXTRA_BY_MODE['kiro-login'] = EXTRA
 
 # ---------- 选择当前 mode 的 NOTES/EXTRA ----------
 NOTES = NOTES_BY_MODE.get(MODE, {})

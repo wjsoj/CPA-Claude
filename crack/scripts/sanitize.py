@@ -1,51 +1,52 @@
 #!/usr/bin/env python3
 """跨整个 crack/ 的统一脱敏脚本。
 
-合并了之前分散的 _sanitize.py + _sanitize_global.py + login/_sanitize.py 三段
-逻辑：把所有"原始本机 / 账号 / 浏览器会话敏感值"按固定占位符表替换，再用一组
-正则做兜底（CF cookie、未识别的 oauth token 长尾、裸主机名等）。
-
+把抓包里的真实账号 / 会话 / token / STS 凭据值替换为固定占位符；再用一组
+正则做兜底（CF cookie、未识别的 oauth token 长尾、裸主机名、AWS STS 等）。
 幂等：在已经脱敏过的文件上再跑一次，输出 0 changed。
 
-用法：
-    python3 crack/scripts/sanitize.py
+**重要：** 字面量替换映射存放在同目录的 `redaction_map.json`（gitignored）。
+这是为了避免脚本自身把"待替换的真值"作为映射 key 暴露到公网 —— GitHub
+secret-scanning 会正确地把它们识别为泄漏。
+
+工作流：
+    1. 抓新 session：dump 落到 crack/.../raw/*.json
+    2. cp crack/scripts/redaction_map.example.json crack/scripts/redaction_map.json
+    3. 把新 dump 里出现的真值填进 literals 字典
+    4. python3 crack/scripts/sanitize.py   # 没有 map 文件会报错
+    5. 提交 crack/.../{rows,docs} —— redaction_map.json 永远不进 git
 """
+import json
 import os
 import re
 import glob
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRACK_ROOT = os.path.dirname(HERE)
+MAP_PATH = os.path.join(HERE, 'redaction_map.json')
+EXAMPLE_PATH = os.path.join(HERE, 'redaction_map.example.json')
 
-# ---------- 字符串字面替换：来自本次抓包的真实账号 / 会话值 ----------
-LITERAL_SUBS = {
-    # access / refresh tokens（完整长度，新登录抓到的那一对）
-    'sk-ant-oat01-REDACTED': 'sk-ant-oat01-REDACTED',
-    'sk-ant-ort01-REDACTED': 'sk-ant-ort01-REDACTED',
-    # 真实三方 apikey（历史残留在 oauth/apikey/login/raw 里）
-    'sk-REDACTED':                    'sk-REDACTED',
-    # uuid / 邮箱 / 用户名 / device_id
-    'ccd4b34d-b955-4435-af57-bf1bbeba91e7':                          '00000000-0000-0000-0000-000000000003',
-    '4fe8ffc6-4b58-4454-859d-1a6aa823154b':                          '00000000-0000-0000-0000-000000000001',
-    'dda51f19-a74e-4372-bc86-218118aff6e2':                          '00000000-0000-0000-0000-000000000002',
-    'bcd78271-3d93-47ec-bd1f-295c22d52b10':                          '00000000-0000-0000-0000-000000000010',
-    '1225ef802a7a88454489035a63d1966e11f2ba2065128262b7ff8ca3cd9afe0b': '0' * 64,
-    'redacted@example.com':                                       'redacted@example.com',
-    'Noah':                                                          'REDACTED_USER',
-    # OAuth 一次性参数
-    '4yeQmwf3clQIziavZ6HztbPk6ImsGXSIrAQTBOXzZzOfAZTQ':              'OAUTH_CODE_REDACTED',
-    'cisycjrl7qZ7sWbxbM4GiS5TiEssw-N5FqbdhOHypjc':                   'CODE_VERIFIER_REDACTED',
-    'RjeUoo1SwyOBY8gM-VwOp5MIu0YTShr1taUxf8pp9mo':                   'OAUTH_STATE_REDACTED',
-    'X8P9cgU16oMG6WbdwznwwVEaxFeaQ4m_lc61Bx4dUY0':                   'CODE_CHALLENGE_REDACTED',
-    # uuid 截断前缀（在 docs / COMPARE.md 里出现的"4fe8ffc6-..."形式）
-    '4fe8ffc6-...':                                                  '00000000-...',
-    'dda51f19-...':                                                  '00000000-...',
-    # 单独 8-char 前缀（出现在比较表 anthropic-organization-id: dda51f19-... 等位置）
-    '4fe8ffc6':                                                      '00000000',
-    'dda51f19':                                                      '00000000',
-}
 
-# ---------- 正则兜底：覆盖未在名单内的 token / cookie / 裸主机名等 ----------
+def load_literal_subs() -> dict:
+    if not os.path.exists(MAP_PATH):
+        sys.stderr.write(
+            f'error: {os.path.relpath(MAP_PATH, CRACK_ROOT)} not found.\n'
+            f'  This file holds the real-secret → placeholder map; it is gitignored.\n'
+            f'  Copy {os.path.relpath(EXAMPLE_PATH, CRACK_ROOT)} to redaction_map.json\n'
+            f'  and fill in the captured secrets before running sanitize.\n'
+        )
+        sys.exit(2)
+    with open(MAP_PATH, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    subs = data.get('literals') or {}
+    if not isinstance(subs, dict):
+        sys.stderr.write(f'error: {MAP_PATH}: "literals" must be an object\n')
+        sys.exit(2)
+    return subs
+
+
+# ---------- 正则兜底：与具体抓包无关的通用模式 ----------
 REGEX_SUBS = [
     # 任意 oauth bearer / refresh token 残留
     (re.compile(r'sk-ant-oat01-(?!REDACTED)[A-Za-z0-9_\-]{20,}'),    'sk-ant-oat01-REDACTED'),
@@ -70,6 +71,25 @@ REGEX_SUBS = [
     # LAN IP
     (re.compile(r'10\.3\.31\.133'),                                  '10.0.0.10'),
     (re.compile(r'10\.129\.81\.88'),                                 '10.0.0.20'),
+    # -------- Kiro/Amazon-Q 抓包通用正则 --------
+    # Kiro accessToken（形如 `aoaAAAAA...:base64sig`，~220 char）；幂等：跳过已替换
+    (re.compile(r'aoaAAAAA(?!REDACTED)[A-Za-z0-9_+/\-]{20,}(?::[A-Za-z0-9_+/=\-]+)?'),
+                                                                     'aoaAAAAAREDACTED_KIRO_ACCESS_TOKEN'),
+    # Kiro refreshToken（`aorAAAAA...`）
+    (re.compile(r'aorAAAAA(?!REDACTED)[A-Za-z0-9_+/\-]{20,}(?::[A-Za-z0-9_+/=\-]+)?'),
+                                                                     'aorAAAAAREDACTED_KIRO_REFRESH_TOKEN'),
+    # 任意 AWS STS AccessKeyId 残留（前缀 ASIA + 16 字母数字）
+    (re.compile(r'ASIA(?!REDACTED)[A-Z0-9]{16}'),                    'ASIAREDACTEDAWSAKID0'),
+    # AWS SessionToken（IQoJ 开头的 base64，~1500 char）；幂等
+    (re.compile(r'IQoJb3JpZ2luX2Vj(?!_STS)[A-Za-z0-9+/=]{50,}'),     'IQoJb3JpZ2luX2Vj_STS_SESSION_TOKEN_REDACTED'),
+    # SigV4 Authorization 里的 Signature=hex
+    (re.compile(r'Signature=(?!REDACTED)[0-9a-f]{64}'),              'Signature=REDACTED_SIGNATURE_HEX_64'),
+    # amz-sdk-invocation-id（每请求随机 uuid），仅在 header / amz-sdk-invocation-id JSON 字段里替换
+    (re.compile(r'(amz-sdk-invocation-id["\s:=]+)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+                re.IGNORECASE),                                      r'\g<1>00000000-0000-0000-0000-000000000050'),
+    # x-amz-security-token header 值（与 SessionToken 同源；冗余兜底，防止某些 header 截断的 IQoJ 前缀不完整）
+    (re.compile(r'(x-amz-security-token["\s:=]+)(?!IQoJb3JpZ2luX2Vj_STS)[A-Za-z0-9+/=_\-]{200,}',
+                re.IGNORECASE),                                      r'\g<1>IQoJb3JpZ2luX2Vj_STS_SESSION_TOKEN_REDACTED'),
 ]
 
 # README 文件是手写文档，里面的"脱敏说明表"故意保留原始值用作映射查阅。
@@ -78,8 +98,8 @@ REGEX_SUBS = [
 SKIP_RELPATHS = {'README.md', 'login/README.md'}
 
 
-def sanitize_text(text: str) -> str:
-    for old, new in LITERAL_SUBS.items():
+def sanitize_text(text: str, literal_subs: dict) -> str:
+    for old, new in literal_subs.items():
         text = text.replace(old, new)
     for pat, rep in REGEX_SUBS:
         text = pat.sub(rep, text)
@@ -87,10 +107,16 @@ def sanitize_text(text: str) -> str:
 
 
 def main() -> None:
+    literal_subs = load_literal_subs()
     targets = []
     for pat in ('**/*.json', '**/*.md'):
         targets += glob.glob(os.path.join(CRACK_ROOT, pat), recursive=True)
-    targets = sorted(set(p for p in targets if 'archive' not in p))
+    # exclude the redaction_map itself + anything in scripts/
+    targets = sorted(set(
+        p for p in targets
+        if 'archive' not in p
+        and not p.startswith(HERE + os.sep)
+    ))
 
     changed = 0
     skipped = 0
@@ -103,13 +129,13 @@ def main() -> None:
             text = open(fn, 'rb').read().decode('utf-8', errors='replace')
         except OSError:
             continue
-        new = sanitize_text(text)
+        new = sanitize_text(text, literal_subs)
         if new != text:
             with open(fn, 'w', encoding='utf-8') as f:
                 f.write(new)
             changed += 1
             print(f'  redacted: {rel}')
-    print(f'changed {changed}/{len(targets) - skipped} files (skipped {skipped} README)')
+    print(f'changed {changed}/{len(targets) - skipped} files (skipped {skipped} README, {len(literal_subs)} literals)')
 
 
 if __name__ == '__main__':

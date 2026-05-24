@@ -1,34 +1,64 @@
-# Claude Code 抓包档案
+# CPA-Claude 抓包档案
+
+本目录收集 CPA-Claude 关注的所有第三方 CLI 客户端的网络流量抓包。**按客户端 / 鉴权姿势分目录**，互不交叉：
+
+## 顶层分支
+
+### A. Anthropic Claude Code（`oauth/` `apikey/` `login/`）
 
 `claude-cli/2.1.126` 在 Linux + bun + Node v24.3.0 下，从**进程启动**到**首条用户消息发出**的全部网络流量，对比两种鉴权姿势：
 
 - **OAuth 官方订阅**（`Bearer sk-ant-oat01-...` → `api.anthropic.com`）
 - **三方 API Key**（`Bearer sk-REDACTED...` → `www.fucheers.top` 网关）
 
+并配套捕获了完整的 **PKCE 登录链路**（`login/`，12 条请求，覆盖 `claude.com/cai/oauth/authorize` → `platform.claude.com/v1/oauth/token`）。
+
+### B. Kiro CLI / Amazon Q for CLI（`kiro/`）
+
+`kiro-cli 2.4.1`（Rust + `aws-sdk-rust/1.3.16`）一次完整会话（11 个对话 turn），上游是 AWS Cognito + CodeWhisperer + Amazon Toolkit Telemetry，协议是 **AWS Smithy + event-stream**，**与 Anthropic Claude Code 是完全不同的产品**，所以独立成目录、不放进 COMPARE.md。
+
+详见 [`kiro/README.md`](kiro/README.md)。
+
 ## 目录
 
 ```
 crack/
-├── README.md         ← 本文件（双模式入口）
-├── COMPARE.md        ← OAuth vs ApiKey 全方位对比 ★ 重点
-├── scripts/          ← 所有处理脚本（split / gen / sanitize），见 scripts/README.md
-├── raw/              ← Whistle 原始 dump（两次会话的全量 + 单次会话带 body）
+├── README.md          ← 本文件（顶层入口，分支 A/B）
+├── COMPARE.md         ← (A) OAuth vs ApiKey 全方位对比 ★ Anthropic 专属
+├── scripts/           ← 所有处理脚本（split / gen / sanitize），见 scripts/README.md
+├── raw/               ← Whistle 原始 dump
 │   ├── oauth-dump-full.json
 │   ├── oauth-session-full.json
 │   ├── apikey-dump-full.json
-│   └── apikey-session-full.json
-├── oauth/            ← OAuth 模式（32 条请求）
-│   ├── docs/         ← 32 个独立 markdown
-│   └── rows/         ← 32 个 JSON 原文（已 gunzip/brotli 解码）
-├── apikey/           ← ApiKey 模式（26 条请求）
-│   ├── docs/         ← 26 个独立 markdown
-│   └── rows/         ← 26 个 JSON 原文
-├── login/            ← OAuth PKCE 登录链路（12 条请求 + 自带 raw/）
-│   ├── README.md     ← PKCE 流程总览
+│   ├── apikey-session-full.json
+│   └── kiro-session-full.json        ← (B) Kiro 原始 dump
+│
+├── (A) Anthropic Claude Code ─────────────────
+├── oauth/             ← OAuth 模式（32 条请求）
+│   ├── docs/          ← 32 个独立 markdown
+│   └── rows/          ← 32 个 JSON 原文（已 gunzip/brotli 解码）
+├── apikey/            ← ApiKey 模式（26 条请求）
+│   ├── docs/          ← 26 个独立 markdown
+│   └── rows/          ← 26 个 JSON 原文
+├── login/             ← OAuth PKCE 登录链路（12 条请求 + 自带 raw/）
+│   ├── README.md      ← PKCE 流程总览
 │   ├── docs/
 │   ├── rows/
 │   └── raw/
-└── .archive/         ← 旧的单文档汇总（已废弃）
+├── advisor/           ← `advisor-tool-2026-03-01` 两段真实 sub-call wire 样本
+│
+├── (B) Kiro CLI / Amazon Q ──────────────────
+├── kiro/              ← Kiro 抓包（48 条业务请求 + 14 条登录/登出流）
+│   ├── README.md      ← 4 host / 双轨鉴权 / 时序总览 ★ 入口
+│   ├── docs/          ← 48 个独立 markdown (业务流)
+│   ├── rows/          ← 48 个 JSON 原文 (业务流)
+│   └── login/         ← Login / Logout PKCE 子档案 (14 条)
+│       ├── README.md  ← 三端点对比 + 与 Anthropic login 对比 ★
+│       ├── raw/kiro-login-session-full.json
+│       ├── rows/      ← 14 个 JSON
+│       └── docs/      ← 14 个 markdown
+│
+└── .archive/          ← 旧的单文档汇总（已废弃）
 ```
 
 ## 脱敏说明
@@ -81,10 +111,14 @@ crack/
 python3 crack/scripts/split.py oauth      # raw/oauth-session-full.json → oauth/rows/
 python3 crack/scripts/split.py apikey     # raw/apikey-session-full.json → apikey/rows/
 python3 crack/scripts/split.py login      # login/raw/login-session-full.json → login/rows/
+python3 crack/scripts/split.py kiro       # raw/kiro-session-full.json → kiro/rows/  (Kiro/Amazon-Q 业务流)
+python3 crack/scripts/split.py kiro-login # kiro/login/raw/kiro-login-session-full.json → kiro/login/rows/  (Kiro 登录/登出 PKCE)
 python3 crack/scripts/sanitize.py         # 跨 crack/ 全量脱敏（幂等）
 python3 crack/scripts/gen.py oauth        # oauth/rows/ → oauth/docs/
 python3 crack/scripts/gen.py apikey       # apikey/rows/ → apikey/docs/
 python3 crack/scripts/gen.py login        # login/rows/ → login/docs/
+python3 crack/scripts/gen.py kiro         # kiro/rows/ → kiro/docs/  (Kiro/Amazon-Q 业务流)
+python3 crack/scripts/gen.py kiro-login   # kiro/login/rows/ → kiro/login/docs/  (Kiro 登录/登出)
 ```
 
 修改 `scripts/gen.py` 里的 `NOTES_BY_MODE['<mode>']` / `EXTRA_BY_MODE['<mode>']` 可调整每条 markdown 的注释和"字段深挖"附录。
