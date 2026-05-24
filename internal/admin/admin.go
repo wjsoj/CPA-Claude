@@ -56,6 +56,10 @@ type Handler struct {
 	// billing exposes the payment handler — admin endpoints reuse it for
 	// reconciliation. nil when SaaS billing is disabled.
 	billing *billing.Handler
+	// invoice is the per-deploy invoice surface (PDF dir + Resend client).
+	// nil when SaaS billing is disabled or when the operator hasn't set
+	// any invoice-related config.
+	invoice *InvoiceAdmin
 	// reqLog is the live request-log writer. We hold a reference so token
 	// reset can quiesce + rewrite the masked client_token in rotated files.
 	// nil when request logging is disabled.
@@ -99,6 +103,14 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.C
 func (h *Handler) WithSaaS(db *saasdb.DB, bh *billing.Handler) *Handler {
 	h.wallets = db
 	h.billing = bh
+	return h
+}
+
+// WithInvoice attaches the per-deploy invoice config (PDF dir + Resend
+// client). Optional; absence degrades issuance to a config-error response
+// while leaving the listing endpoints functional.
+func (h *Handler) WithInvoice(ia *InvoiceAdmin) *Handler {
+	h.invoice = ia
 	return h
 }
 
@@ -197,6 +209,11 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.GET("/orders", h.handleListAllOrders)
 		api.POST("/orders/:id/reconcile", h.handleReconcileOrder)
 		api.GET("/wallet/:token", h.handleAdminWallet)
+		// Invoices: list / issue (PDF upload) / reject / re-download.
+		api.GET("/invoices", h.handleListInvoices)
+		api.POST("/invoices/:id/issue", h.handleIssueInvoice)
+		api.POST("/invoices/:id/reject", h.handleRejectInvoice)
+		api.GET("/invoices/:id/download", h.handleAdminInvoiceDownload)
 	}
 
 	// Static SPA. Vite emits a single entry HTML plus hashed chunks under

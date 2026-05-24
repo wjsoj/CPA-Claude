@@ -69,6 +69,7 @@ type Server struct {
 	// no debit.
 	saas    *saasBilling
 	billing *billing.Handler
+	invoice *billing.InvoiceHandler
 	saasDB  *saasdb.DB
 }
 
@@ -106,6 +107,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 			authFn := s.makeBearerAuth()
 			bh := billing.NewHandler(ddb, rate, gw, cfg.SaaS.Site, authFn)
 			s.billing = bh
+			s.invoice = buildInvoiceHandler(s, cfg)
 			go rate.RunRefresher(context.Background(),
 				time.Duration(cfg.SaaS.Exchange.RefreshIntervalMin)*time.Minute)
 			go bh.RunExpirySweeper(context.Background())
@@ -117,6 +119,12 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	adminH := admin.New(cfg, pool, store, cat, tokens)
 	if s.saasDB != nil {
 		adminH.WithSaaS(s.saasDB, s.billing)
+		if s.invoice != nil {
+			adminH.WithInvoice(&admin.InvoiceAdmin{
+				PDFDir: cfg.SaaS.Invoice.PDFDir,
+				Resend: s.invoice.Resend,
+			})
+		}
 	}
 	if reqLog != nil {
 		adminH.WithRequestLog(reqLog)

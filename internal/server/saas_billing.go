@@ -11,6 +11,7 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
+	"github.com/wjsoj/CPA-Claude/internal/saas/resend"
 )
 
 // buildPaymentGateway picks a Z-Pay or MockGateway based on whether the
@@ -58,6 +59,9 @@ func (s *Server) mountBillingRoutes(engine *gin.Engine) {
 	g := engine.Group("/api/wallet")
 	s.billing.UserRoutes(g)
 	s.billing.PublicRoutes(g)
+	if s.invoice != nil {
+		s.invoice.UserRoutes(g)
+	}
 	// Pricing-group catalog. Exposed for the status SPA so a user can see
 	// which group their token belongs to without admin access.
 	g.GET("/groups", func(c *gin.Context) {
@@ -107,6 +111,32 @@ func (s *Server) makeBearerAuth() billing.TokenAuthFunc {
 // operator has SaaS disabled in config.yaml.
 type saasBilling struct {
 	db *saasdb.DB
+}
+
+// buildInvoiceHandler returns the per-deploy invoice handler when SaaS is
+// enabled, or nil when it isn't. Encapsulates the cfg.SaaS.Invoice →
+// runtime-deps wiring so server.New stays linear.
+func buildInvoiceHandler(s *Server, cfg *config.Config) *billing.InvoiceHandler {
+	if s.saasDB == nil {
+		return nil
+	}
+	var rc *resend.Client
+	if cfg.SaaS.Invoice.ResendAPIKey != "" {
+		rc = resend.New(cfg.SaaS.Invoice.ResendAPIKey, cfg.SaaS.Invoice.ResendFrom)
+	} else {
+		// Construct a no-key client so the rest of the surface can call
+		// .Send unconditionally — it'll return ErrDisabled and the
+		// caller treats that as a soft warning.
+		rc = resend.New("", cfg.SaaS.Invoice.ResendFrom)
+	}
+	return billing.NewInvoiceHandler(
+		s.saasDB,
+		s.makeBearerAuth(),
+		rc,
+		cfg.SaaS.Invoice.PDFDir,
+		cfg.SaaS.Invoice.OpsEmail,
+		cfg.SaaS.Invoice.TitleSuggestURL,
+	)
 }
 
 // PrecheckBalance returns the current wallet balance for token, creating

@@ -308,6 +308,105 @@ export function loadPricingGroups(): Promise<{ groups: WalletPricingGroup[] }> {
   return fetchJSON<{ groups: WalletPricingGroup[] }>("/api/wallet/groups");
 }
 
+// ---- Invoicing --------------------------------------------------------
+
+export interface InvoiceSummary {
+  paid_cny: number;
+  locked_cny: number;
+  issued_cny: number;
+  available_cny: number;
+}
+
+export interface InvoiceTitle {
+  id?: number;
+  name: string;
+  tax_no?: string;
+  address?: string;
+  phone?: string;
+  bank?: string;
+  bank_account?: string;
+  last_used_at?: number;
+  source?: "local" | "remote";
+}
+
+export interface Invoice {
+  id: number;
+  cny_amount: number;
+  title_name: string;
+  contact_email: string;
+  status: "pending" | "issued" | "rejected";
+  note: string;
+  created_at: number;
+  issued_at?: number;
+  rejected_at?: number;
+  downloadable?: boolean;
+  title?: {
+    name?: string;
+    tax_no?: string;
+    address?: string;
+    phone?: string;
+    bank?: string;
+    bank_account?: string;
+  };
+}
+
+export function loadInvoiceSummary(token: string): Promise<InvoiceSummary> {
+  return authedJSON<InvoiceSummary>("/api/wallet/invoice/summary", token);
+}
+
+export function loadInvoiceTitles(token: string, q?: string): Promise<{ titles: InvoiceTitle[] }> {
+  const path = q && q.trim()
+    ? `/api/wallet/invoice/titles?q=${encodeURIComponent(q)}`
+    : "/api/wallet/invoice/titles";
+  return authedJSON<{ titles: InvoiceTitle[] }>(path, token);
+}
+
+export function suggestInvoiceTitles(token: string, q: string): Promise<{ titles: InvoiceTitle[] }> {
+  return authedJSON<{ titles: InvoiceTitle[] }>(
+    `/api/wallet/invoice/title-suggest?q=${encodeURIComponent(q)}`,
+    token,
+  );
+}
+
+export function saveInvoiceTitle(token: string, body: InvoiceTitle): Promise<{ status: string }> {
+  return authedJSON<{ status: string }>("/api/wallet/invoice/titles", token, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteInvoiceTitle(token: string, id: number): Promise<{ status: string }> {
+  return authedJSON<{ status: string }>(`/api/wallet/invoice/titles/${id}`, token, {
+    method: "DELETE",
+  });
+}
+
+export function loadInvoices(token: string): Promise<{ invoices: Invoice[] }> {
+  return authedJSON<{ invoices: Invoice[] }>("/api/wallet/invoices", token);
+}
+
+export function createInvoice(token: string, body: {
+  cny_amount: number;
+  title: InvoiceTitle;
+  contact_email: string;
+}): Promise<Invoice> {
+  return authedJSON<Invoice>("/api/wallet/invoices", token, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function downloadInvoicePDF(token: string, id: number): Promise<Blob> {
+  const res = await fetch(`/api/wallet/invoices/${id}/download`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new ApiError(text || `HTTP ${res.status}`, res.status);
+  }
+  return await res.blob();
+}
+
 const TOKENS_KEY = "cpa.status.tokens";
 export function loadSavedTokens(): string[] {
   try {

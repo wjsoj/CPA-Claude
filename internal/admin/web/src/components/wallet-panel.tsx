@@ -5,7 +5,7 @@
 // transactions, and orders, with a Recharge button that opens a modal
 // driving the Z-Pay top-up flow.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   CreditCard,
@@ -20,6 +20,9 @@ import {
   AlertTriangle,
   XCircle,
   Trash2,
+  FileText,
+  Download,
+  Search,
 } from "lucide-react";
 import {
   loadActiveToken,
@@ -31,11 +34,19 @@ import {
   cancelWalletOrder,
   topupWallet,
   loadExchangeRate,
+  loadInvoiceSummary,
+  loadInvoices,
+  createInvoice,
+  suggestInvoiceTitles,
+  downloadInvoicePDF,
   type WalletBalance,
   type WalletTx,
   type WalletOrder,
   type ExchangeRate,
   type TopupResp,
+  type InvoiceSummary,
+  type Invoice,
+  type InvoiceTitle,
 } from "@/lib/status-api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -274,6 +285,9 @@ export function WalletPanel() {
         />
         <TransactionsCard txs={txs} />
       </div>
+
+      <InvoiceSection token={activeToken} />
+
 
       <TopupModal
         open={showTopup}
@@ -516,7 +530,15 @@ function TopupModal({
   rate: ExchangeRate | null;
   onCreated: () => void;
 }) {
+  // Two inputs bound to the same underlying USD amount, kept in sync via
+  // `lastEdited` so the user can recharge by typing either side. Submit
+  // is always in USD — CNY is informational and re-derived from rate on
+  // server side at order creation.
   const [usd, setUsd] = useState("10");
+  const [cnyInput, setCnyInput] = useState(() => {
+    return rate ? (10 * rate.cny_per_usd).toFixed(2) : "";
+  });
+  const [lastEdited, setLastEdited] = useState<"usd" | "cny">("usd");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<TopupResp | null>(null);
   const [copied, setCopied] = useState(false);
@@ -575,6 +597,20 @@ function TopupModal({
   const usdNum = Number(usd) || 0;
   const cnyEst = rate ? usdNum * rate.cny_per_usd : 0;
 
+  // Keep the *other* field in sync whenever rate changes or the user
+  // types. `lastEdited` is the source-of-truth selector: never overwrite
+  // the field the user just touched.
+  useEffect(() => {
+    if (!rate) return;
+    if (lastEdited === "usd") {
+      const n = Number(usd);
+      if (Number.isFinite(n) && n >= 0) setCnyInput((n * rate.cny_per_usd).toFixed(2));
+    } else {
+      const n = Number(cnyInput);
+      if (Number.isFinite(n) && n >= 0) setUsd((n / rate.cny_per_usd).toFixed(2));
+    }
+  }, [usd, cnyInput, lastEdited, rate]);
+
   const submit = async () => {
     if (usdNum < 1 || usdNum > 1000) {
       toast.error("Amount must be between $1 and $1000");
@@ -612,33 +648,63 @@ function TopupModal({
         </DialogHeader>
         {!result ? (
           <div className="space-y-4">
-            <div>
-              <label className="eyebrow text-[10px] opacity-70">amount (USD)</label>
-              <div className="mt-1 flex items-baseline gap-2">
-                <span className="font-mono text-2xl">$</span>
-                <Input
-                  type="number"
-                  inputMode="decimal"
-                  min="1"
-                  max="1000"
-                  step="1"
-                  value={usd}
-                  onInput={(e) => setUsd((e.target as HTMLInputElement).value)}
-                  className="font-mono text-2xl tabular flex-1"
-                />
-              </div>
-              {rate && usdNum > 0 && (
-                <div className="mt-1 text-xs text-muted-foreground font-mono">
-                  ≈ ¥{cnyEst.toFixed(2)} at 1 USD = ¥{rate.cny_per_usd.toFixed(4)}
+            <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-3">
+              <div>
+                <label className="eyebrow text-[10px] opacity-70">USD (charged)</label>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="font-mono text-xl">$</span>
+                  <Input
+                    type="number"
+                    inputMode="decimal"
+                    min="1"
+                    max="1000"
+                    step="0.01"
+                    value={usd}
+                    onInput={(e) => {
+                      setUsd((e.target as HTMLInputElement).value);
+                      setLastEdited("usd");
+                    }}
+                    className="font-mono text-2xl tabular flex-1"
+                  />
                 </div>
-              )}
+              </div>
+              <div className="pb-3 text-center text-muted-foreground text-xs font-mono">
+                ×{rate ? rate.cny_per_usd.toFixed(4) : "…"}
+              </div>
+              <div>
+                <label className="eyebrow text-[10px] opacity-70">CNY (paid)</label>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="font-mono text-xl">¥</span>
+                  <Input
+                    type="number"
+                    inputMode="decimal"
+                    min="1"
+                    step="0.01"
+                    value={cnyInput}
+                    onInput={(e) => {
+                      setCnyInput((e.target as HTMLInputElement).value);
+                      setLastEdited("cny");
+                    }}
+                    className="font-mono text-2xl tabular flex-1"
+                  />
+                </div>
+              </div>
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            {rate && (
+              <div className="text-[11px] text-muted-foreground font-mono">
+                Pay any amount in CNY — your wallet is credited with the USD on
+                the left. Rate frozen by the server at order creation.
+              </div>
+            )}
+            <div className="grid grid-cols-4 gap-2">
               {[5, 10, 20, 50].map((v) => (
                 <button
                   key={v}
                   type="button"
-                  onClick={() => setUsd(String(v))}
+                  onClick={() => {
+                    setUsd(String(v));
+                    setLastEdited("usd");
+                  }}
                   className={cn(
                     "rounded-md border px-3 py-1.5 text-sm font-mono",
                     String(v) === usd
@@ -769,3 +835,456 @@ function TopupModal({
 // Silence unused-export warning for fmtInt — keep the import surface
 // available for future extensions of the panel.
 export const __keep = { fmtInt };
+
+// ---- Invoicing --------------------------------------------------------
+
+function InvoiceSection({ token }: { token: string }) {
+  const [summary, setSummary] = useState<InvoiceSummary | null>(null);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [showDialog, setShowDialog] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const [s, l] = await Promise.all([
+        loadInvoiceSummary(token),
+        loadInvoices(token),
+      ]);
+      setSummary(s);
+      setInvoices(l.invoices || []);
+    } catch (e: any) {
+      // Surface only as a quiet console log — failure shouldn't blow up
+      // the rest of the wallet page.
+      console.warn("invoice refresh failed:", e);
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const noQuota = !summary || summary.available_cny <= 0;
+
+  return (
+    <section className="rounded-xl border border-border-strong bg-card/60 p-5 space-y-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <FileText className="h-5 w-5 text-primary" />
+          <h3 className="font-display text-xl tracking-tight">发票申请 / Fapiao</h3>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={refresh}
+            disabled={loading}
+            className="gap-1.5"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+            刷新
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => setShowDialog(true)}
+            disabled={noQuota}
+            className="gap-1.5"
+          >
+            <Plus className="h-3.5 w-3.5" /> 开发票
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <SummaryCell label="累计实付 CNY" value={summary?.paid_cny} highlight />
+        <SummaryCell label="已开票 CNY" value={summary?.issued_cny} />
+        <SummaryCell label="待处理 CNY" value={summary?.locked_cny} muted />
+        <SummaryCell label="可开票 CNY" value={summary?.available_cny} highlight />
+      </div>
+
+      {summary && (
+        <p className="text-[11px] text-muted-foreground font-mono">
+          按已支付 Alipay 订单累计的实际 CNY 计算 (不随汇率波动)。pending 与 issued 的发票都会占用可开票额度;rejected 后额度自动归还。
+        </p>
+      )}
+
+      {invoices.length === 0 ? (
+        <div className="text-sm text-muted-foreground py-4 text-center">
+          暂无发票记录
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {invoices.map((v) => (
+            <InvoiceRow key={v.id} v={v} token={token} />
+          ))}
+        </div>
+      )}
+
+      <InvoiceDialog
+        open={showDialog}
+        onClose={() => setShowDialog(false)}
+        token={token}
+        summary={summary}
+        onCreated={refresh}
+      />
+    </section>
+  );
+}
+
+function SummaryCell({
+  label,
+  value,
+  highlight,
+  muted,
+}: {
+  label: string;
+  value: number | undefined;
+  highlight?: boolean;
+  muted?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-md border px-3 py-2",
+        highlight
+          ? "border-primary/40 bg-primary/5"
+          : muted
+            ? "border-border/60 bg-muted/30"
+            : "border-border",
+      )}
+    >
+      <div className="text-[10px] eyebrow opacity-70">{label}</div>
+      <div className="mt-0.5 font-mono text-lg tabular">
+        {value === undefined ? "···" : `¥${value.toFixed(2)}`}
+      </div>
+    </div>
+  );
+}
+
+function InvoiceRow({ v, token }: { v: Invoice; token: string }) {
+  const [busy, setBusy] = useState(false);
+
+  const download = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const blob = await downloadInvoicePDF(token, v.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `invoice-${v.id}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      toast.error("下载失败", { description: e.message || String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-border/60 bg-background/40 px-3 py-2">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-mono text-sm">#{v.id}</span>
+          <span className="font-mono text-sm">¥{v.cny_amount.toFixed(2)}</span>
+          <span className="text-sm truncate">{v.title_name}</span>
+          {invoiceStatusBadge(v.status)}
+        </div>
+        <div className="mt-0.5 text-[11px] text-muted-foreground font-mono">
+          {fmtTime(v.created_at)} · {v.contact_email}
+          {v.note && <span className="opacity-70"> · {v.note}</span>}
+        </div>
+      </div>
+      {v.status === "issued" && v.downloadable && (
+        <Button variant="outline" size="sm" disabled={busy} onClick={download} className="gap-1.5">
+          {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          下载
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function invoiceStatusBadge(s: Invoice["status"]) {
+  switch (s) {
+    case "issued":
+      return (
+        <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 text-[11px] font-mono">
+          <CheckCircle2 className="h-3 w-3" /> issued
+        </span>
+      );
+    case "pending":
+      return (
+        <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400 text-[11px] font-mono">
+          <Clock3 className="h-3 w-3" /> pending
+        </span>
+      );
+    case "rejected":
+      return (
+        <span className="inline-flex items-center gap-1 text-destructive text-[11px] font-mono">
+          <XCircle className="h-3 w-3" /> rejected
+        </span>
+      );
+  }
+}
+
+function InvoiceDialog({
+  open,
+  onClose,
+  token,
+  summary,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  token: string;
+  summary: InvoiceSummary | null;
+  onCreated: () => void;
+}) {
+  const [amount, setAmount] = useState("");
+  const [contactEmail, setContactEmail] = useState(() => localStorage.getItem("cpa.invoice.email") || "");
+  const [search, setSearch] = useState("");
+  const [picks, setPicks] = useState<InvoiceTitle[]>([]);
+  const [selected, setSelected] = useState<InvoiceTitle>({
+    name: "",
+    tax_no: "",
+    address: "",
+    phone: "",
+    bank: "",
+    bank_account: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const debRef = useRef<number | null>(null);
+
+  // Reset when reopened.
+  useEffect(() => {
+    if (open) {
+      setAmount(summary ? Math.max(0, summary.available_cny).toFixed(2) : "");
+      setSearch("");
+      setPicks([]);
+      setSelected({ name: "", tax_no: "", address: "", phone: "", bank: "", bank_account: "" });
+      setBusy(false);
+    }
+  }, [open, summary]);
+
+  // Debounced title suggestion — kicks 350ms after the user stops typing.
+  useEffect(() => {
+    if (!open) return;
+    if (debRef.current) window.clearTimeout(debRef.current);
+    debRef.current = window.setTimeout(async () => {
+      try {
+        const r = await suggestInvoiceTitles(token, search);
+        setPicks(r.titles || []);
+      } catch {
+        // tolerated — local fallback already returned within the same call
+      }
+    }, 350);
+    return () => {
+      if (debRef.current) window.clearTimeout(debRef.current);
+    };
+  }, [search, token, open]);
+
+  const apply = (t: InvoiceTitle) => {
+    setSelected((prev) => ({
+      ...prev,
+      name: t.name,
+      tax_no: t.tax_no ?? prev.tax_no,
+      address: t.address ?? prev.address,
+      phone: t.phone ?? prev.phone,
+      bank: t.bank ?? prev.bank,
+      bank_account: t.bank_account ?? prev.bank_account,
+    }));
+    setSearch(t.name);
+  };
+
+  const amountNum = Number(amount) || 0;
+  const available = summary?.available_cny ?? 0;
+  const tooHigh = amountNum > available + 0.005;
+
+  const submit = async () => {
+    if (busy) return;
+    if (!selected.name.trim()) {
+      toast.error("请填写抬头名称");
+      return;
+    }
+    if (!contactEmail.includes("@")) {
+      toast.error("请填写有效的联系邮箱");
+      return;
+    }
+    if (amountNum <= 0) {
+      toast.error("开票金额必须大于 0");
+      return;
+    }
+    if (tooHigh) {
+      toast.error(`金额超过可开票额度 ¥${available.toFixed(2)}`);
+      return;
+    }
+    setBusy(true);
+    try {
+      await createInvoice(token, {
+        cny_amount: amountNum,
+        title: selected,
+        contact_email: contactEmail.trim(),
+      });
+      localStorage.setItem("cpa.invoice.email", contactEmail.trim());
+      toast.success("发票申请已提交");
+      onCreated();
+      onClose();
+    } catch (e: any) {
+      toast.error("提交失败", { description: e.message || String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>申请发票</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div>
+            <label className="eyebrow text-[10px] opacity-70">开票金额 (CNY)</label>
+            <div className="mt-1 flex items-baseline gap-2">
+              <span className="font-mono text-xl">¥</span>
+              <Input
+                type="number"
+                inputMode="decimal"
+                min="0.01"
+                step="0.01"
+                value={amount}
+                onInput={(e) => setAmount((e.target as HTMLInputElement).value)}
+                className={cn("font-mono text-2xl tabular flex-1", tooHigh && "border-destructive")}
+              />
+            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground font-mono flex items-center justify-between gap-2">
+              <span>可开票额度 ¥{available.toFixed(2)}</span>
+              <button
+                type="button"
+                className="text-primary hover:underline"
+                onClick={() => setAmount(available.toFixed(2))}
+              >
+                全部
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="eyebrow text-[10px] opacity-70">抬头名称 (公司全称)</label>
+            <div className="relative mt-1">
+              <Input
+                placeholder="搜索或输入抬头…"
+                value={search}
+                onInput={(e) => {
+                  const v = (e.target as HTMLInputElement).value;
+                  setSearch(v);
+                  setSelected((prev) => ({ ...prev, name: v }));
+                }}
+                className="font-mono pr-8"
+              />
+              <Search className="h-4 w-4 absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            </div>
+            {picks.length > 0 && (
+              <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-border/60 bg-background divide-y divide-border/40">
+                {picks.map((p, i) => (
+                  <button
+                    type="button"
+                    key={`${p.name}-${i}`}
+                    onClick={() => apply(p)}
+                    className="w-full text-left px-3 py-1.5 hover:bg-muted/40 flex items-center justify-between gap-2"
+                  >
+                    <span className="truncate text-sm">{p.name}</span>
+                    <span className="text-[10px] font-mono opacity-60">
+                      {p.source === "local" ? "已存" : "在线"}
+                      {p.tax_no ? ` · ${p.tax_no.slice(0, 6)}…` : ""}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <LabeledInput
+              label="税号"
+              value={selected.tax_no || ""}
+              onChange={(v) => setSelected((p) => ({ ...p, tax_no: v }))}
+            />
+            <LabeledInput
+              label="电话"
+              value={selected.phone || ""}
+              onChange={(v) => setSelected((p) => ({ ...p, phone: v }))}
+            />
+          </div>
+          <LabeledInput
+            label="注册地址"
+            value={selected.address || ""}
+            onChange={(v) => setSelected((p) => ({ ...p, address: v }))}
+          />
+          <div className="grid grid-cols-2 gap-3">
+            <LabeledInput
+              label="开户行"
+              value={selected.bank || ""}
+              onChange={(v) => setSelected((p) => ({ ...p, bank: v }))}
+            />
+            <LabeledInput
+              label="账号"
+              value={selected.bank_account || ""}
+              onChange={(v) => setSelected((p) => ({ ...p, bank_account: v }))}
+            />
+          </div>
+          <LabeledInput
+            label="接收发票邮箱"
+            value={contactEmail}
+            onChange={setContactEmail}
+            placeholder="invoice@example.com"
+            type="email"
+          />
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={onClose}>
+              取消
+            </Button>
+            <Button onClick={submit} disabled={busy || tooHigh || amountNum <= 0} className="gap-1.5">
+              {busy && <RefreshCw className="h-4 w-4 animate-spin" />}
+              提交申请
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function LabeledInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+  type,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
+}) {
+  return (
+    <div>
+      <label className="eyebrow text-[10px] opacity-70">{label}</label>
+      <Input
+        type={type || "text"}
+        value={value}
+        placeholder={placeholder}
+        onInput={(e) => onChange((e.target as HTMLInputElement).value)}
+        className="mt-1 font-mono text-sm"
+      />
+    </div>
+  );
+}
+

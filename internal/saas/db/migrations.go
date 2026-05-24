@@ -70,6 +70,50 @@ CREATE TABLE alipay_orders (
 );
 CREATE INDEX idx_alipay_orders_token ON alipay_orders(token, created_at);
 `,
+	// 2: invoicing. Users with paid Alipay orders accumulate "invoiceable
+	// CNY" — they can request a fapiao up to that running total minus what
+	// they've already invoiced. Admin reviews requests and uploads a PDF,
+	// at which point we email the user the PDF as an attachment via Resend
+	// and they can download it again from the status page (token-gated).
+	//
+	// invoice_titles persists per-token rolling shortlist of company
+	// headers + tax info so the user doesn't retype on every request. The
+	// (token, name) compound key lets the same operator reuse the same
+	// company across rotating tokens and lets unrelated tokens use the
+	// same company name independently.
+	`
+CREATE TABLE invoice_titles (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    token        TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    tax_no       TEXT NOT NULL DEFAULT '',
+    address      TEXT NOT NULL DEFAULT '',
+    phone        TEXT NOT NULL DEFAULT '',
+    bank         TEXT NOT NULL DEFAULT '',
+    bank_account TEXT NOT NULL DEFAULT '',
+    last_used_at INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    UNIQUE(token, name)
+);
+CREATE INDEX idx_invoice_titles_token ON invoice_titles(token, last_used_at DESC);
+
+CREATE TABLE invoices (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    token          TEXT NOT NULL,
+    cny_amount     REAL NOT NULL,
+    title_name     TEXT NOT NULL,
+    title_snapshot TEXT NOT NULL,                    -- frozen JSON copy of the title row at request time
+    contact_email  TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending | issued | rejected
+    pdf_path       TEXT NOT NULL DEFAULT '',
+    note           TEXT NOT NULL DEFAULT '',         -- admin-supplied reason on reject / free-form on issue
+    created_at     INTEGER NOT NULL,
+    issued_at      INTEGER NOT NULL DEFAULT 0,
+    rejected_at    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_invoices_token ON invoices(token, created_at DESC);
+CREATE INDEX idx_invoices_status ON invoices(status, created_at DESC);
+`,
 }
 
 func (db *DB) migrate() error {

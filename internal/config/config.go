@@ -142,6 +142,32 @@ type SaaSConfig struct {
 	// Exchange controls how the live CNY/USD rate is fetched. Defaults
 	// are sane (jsdelivr-hosted free API, 1h refresh, fallback 7.2).
 	Exchange ExchangeConfig `yaml:"exchange"`
+
+	// Invoice configures fapiao issuance — directory to drop admin-
+	// uploaded PDFs, the Resend transactional email key, and the ops
+	// inbox that receives new-request notifications. All fields optional;
+	// missing key means invoice-related emails are logged but not sent
+	// (the user can still apply, the admin can still upload — only the
+	// auto-email step degrades).
+	Invoice InvoiceConfig `yaml:"invoice"`
+}
+
+// InvoiceConfig — fapiao + transactional email config. All optional.
+type InvoiceConfig struct {
+	// PDFDir is where admin-uploaded PDFs land. Defaults to
+	// <config-dir>/invoices/. Created lazily with mode 0700.
+	PDFDir string `yaml:"pdf_dir,omitempty"`
+
+	// TitleSuggestURL overrides the in-app company-name suggestion
+	// upstream. Leave empty to use the bundled default
+	// (aiqicha.baidu.com suggest API).
+	TitleSuggestURL string `yaml:"title_suggest_url,omitempty"`
+
+	// Resend transactional email. Key empty → invoice emails are logged
+	// only; the rest of the flow still works.
+	ResendAPIKey string `yaml:"resend_api_key,omitempty"`
+	ResendFrom   string `yaml:"resend_from,omitempty"`
+	OpsEmail     string `yaml:"ops_email,omitempty"`
 }
 
 // PaymentConfig — Z-Pay merchant credentials. Never logged.
@@ -240,6 +266,24 @@ func applyDefaults(c *Config, path string) {
 	}
 	if c.SaaS.Exchange.FallbackCNYPerUSD <= 0 {
 		c.SaaS.Exchange.FallbackCNYPerUSD = 7.2
+	}
+	if c.SaaS.Invoice.PDFDir == "" {
+		c.SaaS.Invoice.PDFDir = filepath.Join(dir, "invoices")
+	} else if !filepath.IsAbs(c.SaaS.Invoice.PDFDir) {
+		c.SaaS.Invoice.PDFDir = filepath.Join(dir, c.SaaS.Invoice.PDFDir)
+	}
+	if c.SaaS.Invoice.OpsEmail == "" {
+		c.SaaS.Invoice.OpsEmail = "907401616@qq.com"
+	}
+	if c.SaaS.Invoice.ResendFrom == "" {
+		// Resend's onboarding default. Operators with a verified domain
+		// should override this in config.yaml.
+		c.SaaS.Invoice.ResendFrom = "CPA-Claude <onboarding@resend.dev>"
+	}
+	if c.SaaS.Invoice.TitleSuggestURL == "" {
+		// Baidu Aiqicha's open suggestion endpoint. Returns JSONP-ish but
+		// flips to plain JSON when t= is omitted. No auth required.
+		c.SaaS.Invoice.TitleSuggestURL = "https://aiqicha.baidu.com/s/searchAjax/sug"
 	}
 	p := strings.TrimSpace(c.AdminPath)
 	if p == "" {
