@@ -94,7 +94,7 @@ func (s *Server) makeBearerAuth() billing.TokenAuthFunc {
 		if tok == "" {
 			return ""
 		}
-		if _, _, _, ok := s.tokens.Lookup(tok); !ok {
+		if _, ok := s.tokens.Lookup(tok); !ok {
 			return ""
 		}
 		return tok

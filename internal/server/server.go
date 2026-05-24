@@ -13,15 +13,17 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/CPA-Claude/internal/admin"
-	"github.com/wjsoj/CPA-Claude/internal/clienttoken"
 	"github.com/wjsoj/CPA-Claude/internal/config"
-	"github.com/wjsoj/CPA-Claude/internal/pricing"
-	"github.com/wjsoj/CPA-Claude/internal/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
-	"github.com/wjsoj/CPA-Claude/internal/usage"
 	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/clienttoken"
+	"github.com/wjsoj/cc-core/pricing"
+	"github.com/wjsoj/cc-core/ratelimit"
+	"github.com/wjsoj/cc-core/requestlog"
+	ccsidecar "github.com/wjsoj/cc-core/sidecar"
 	"github.com/wjsoj/cc-core/thinkingsig"
+	"github.com/wjsoj/cc-core/usage"
 )
 
 // endpoint is one listening http.Server paired with its provider label. The
@@ -45,17 +47,17 @@ type Server struct {
 	// treated as independent budgets for the same user so a client running
 	// Claude at cap doesn't block its Codex calls (and vice-versa). Matches
 	// the per-provider stickiness already used by Pool.Acquire.
-	inflight sync.Map
+	inflight ratelimit.Concurrency
 	// rpm enforces a sliding-window requests-per-minute cap. Keyed by
 	// (provider | clientToken) — same scoping as inflight so Claude and
 	// Codex traffic don't share one budget.
-	rpm rpmLimiter
+	rpm ratelimit.RPM
 	// sidecar emulates the auxiliary traffic real Claude Code fires
 	// alongside /v1/messages (Phase A: quota probe at session start).
 	// Reduces the strongest stealth-detection signal — a healthy OAuth
 	// account whose request stream contains zero quota probes is
 	// trivially flagged as a third-party tool.
-	sidecar *sidecarMgr
+	sidecar *ccsidecar.Manager
 	// switchTracker detects when a conversation rotates mid-stream from
 	// one upstream credential to another. On switch we sanitize away
 	// the prior account's signed `thinking` blocks before forwarding
@@ -78,10 +80,10 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	gin.SetMode(gin.ReleaseMode)
 	cat := pricing.NewCatalog(cfg.Pricing)
 	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens, reqLog: reqLog}
-	s.sidecar = newSidecarMgr(sidecarConfig{
-		enabled: true,
-		useUTLS: cfg.UseUTLS,
-		baseURL: cfg.AnthropicBaseURL,
+	s.sidecar = ccsidecar.New(ccsidecar.Config{
+		Enabled: true,
+		UseUTLS: cfg.UseUTLS,
+		BaseURL: cfg.AnthropicBaseURL,
 	})
 	s.switchTracker = thinkingsig.NewSwitchTracker()
 
@@ -328,13 +330,13 @@ func (s *Server) clientAuth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 			return
 		}
-		name, _, _, ok := s.tokens.Lookup(tok)
+		entry, ok := s.tokens.Lookup(tok)
 		if !ok {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
 		c.Set("client_token", tok)
-		c.Set("client_name", name)
+		c.Set("client_name", entry.Name)
 		c.Next()
 	}
 }
@@ -406,8 +408,8 @@ func (s *Server) handleStatus(c *gin.Context) {
 // clientMaxConcurrent returns the effective max concurrent requests for this
 // client. Per-token override wins; otherwise the global default applies.
 func (s *Server) clientMaxConcurrent(clientToken string) int {
-	if _, maxConc, _, ok := s.tokens.Lookup(clientToken); ok && maxConc > 0 {
-		return maxConc
+	if entry, ok := s.tokens.Lookup(clientToken); ok && entry.MaxConcurrent > 0 {
+		return entry.MaxConcurrent
 	}
 	return s.cfg.ClientMaxConcurrent
 }

@@ -15,8 +15,9 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/cc-core/auth"
-	"github.com/wjsoj/CPA-Claude/internal/requestlog"
-	"github.com/wjsoj/CPA-Claude/internal/usage"
+	"github.com/wjsoj/cc-core/mimicry"
+	"github.com/wjsoj/cc-core/requestlog"
+	"github.com/wjsoj/cc-core/usage"
 )
 
 // The ChatGPT Codex backend expects the OpenAI /v1/responses schema with a
@@ -328,7 +329,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// in our logs. Identity keeps everything human-readable end-to-end.
 	upReq.Header.Set("Accept-Encoding", "identity")
 	upReq.Header.Set("Connection", "Keep-Alive")
-	upReq.Header.Set("Session_id", newRequestUUID())
+	upReq.Header.Set("Session_id", mimicry.NewRequestUUID())
 	upReq.Header.Set("Originator", codexBackendOriginator)
 	// Always overwrite UA — forwarding client's UA (e.g. "curl/X.Y") makes
 	// Cloudflare's edge rules 403 the request before it reaches the OpenAI

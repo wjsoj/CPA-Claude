@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/wjsoj/CPA-Claude/internal/pricing"
+	"github.com/wjsoj/cc-core/pricing"
 	"gopkg.in/yaml.v3"
 )
 
