@@ -284,7 +284,9 @@ func applyDefaults(c *Config, path string) {
 		// 天眼查 web-app's autocomplete endpoint. POST JSON {"keyword": q},
 		// returns data[]{comName, taxCode}. Unauthenticated but IP-rate-
 		// limited; exceeding it falls back to local-history matches only.
-		c.SaaS.Invoice.TitleSuggestURL = "https://capi.tianyancha.com/cloud-tempest/search/suggest/v3"
+		// v2 (not v3) — v3 locks unauthenticated callers after a handful of
+		// queries per IP with errorCode 302004; v2 stays open. Same shape.
+		c.SaaS.Invoice.TitleSuggestURL = "https://capi.tianyancha.com/cloud-tempest/search/suggest/v2"
 	}
 	p := strings.TrimSpace(c.AdminPath)
 	if p == "" {
