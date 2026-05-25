@@ -1253,28 +1253,31 @@ function InvoiceDialog({
               invalid={Boolean((selected.tax_no || "").trim()) && !taxNoValid}
             />
             <LabeledInput
-              label="联系电话"
+              label="联系电话 (可选)"
               value={selected.phone || ""}
               onChange={(v) => setSelected((p) => ({ ...p, phone: v }))}
             />
           </div>
           <LabeledInput
-            label="注册地址"
+            label="注册地址 (可选)"
             value={selected.address || ""}
             onChange={(v) => setSelected((p) => ({ ...p, address: v }))}
           />
           <div className="grid grid-cols-2 gap-3">
             <LabeledInput
-              label="开户银行"
+              label="开户银行 (可选)"
               value={selected.bank || ""}
               onChange={(v) => setSelected((p) => ({ ...p, bank: v }))}
             />
             <LabeledInput
-              label="银行账户"
+              label="银行账户 (可选)"
               value={selected.bank_account || ""}
               onChange={(v) => setSelected((p) => ({ ...p, bank_account: v }))}
             />
           </div>
+          <p className="text-[11px] text-muted-foreground -mt-1">
+            开具增值税普通发票只需公司名称 + 统一社会信用代码;专用发票请补全其余字段(以贵司财务提供的开票信息为准)。
+          </p>
           <LabeledInput
             label="接收发票邮箱"
             required
