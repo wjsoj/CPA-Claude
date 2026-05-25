@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -247,28 +247,23 @@ type remoteSuggestRow struct {
 	TaxNo string
 }
 
-// fetchRemoteSuggest hits Baidu Aiqicha's open suggestion endpoint. The
-// response shape is documented inline because nobody else does.
+// fetchRemoteSuggest queries the configured company-name suggest endpoint.
+// Defaults to 天眼查 (capi.tianyancha.com/cloud-tempest/search/suggest/v3),
+// which is unauthenticated but IP-rate-limited: about a few hundred queries
+// per day per source IP before {errorCode:302004,"请登录"}. We cache positive
+// results for an hour to stretch that budget and silently fall back to
+// local-history matches when the remote refuses.
 func (h *InvoiceHandler) fetchRemoteSuggest(ctx context.Context, q string) ([]remoteSuggestRow, error) {
-	u, err := url.Parse(h.TitleSuggestURL)
-	if err != nil {
-		return nil, err
+	if rows, ok := suggestCacheGet(q); ok {
+		return rows, nil
 	}
-	qs := u.Query()
-	qs.Set("q", q)
-	qs.Set("t", strconv.FormatInt(time.Now().UnixMilli(), 10))
-	u.RawQuery = qs.Encode()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	// Real-browser headers — these endpoints frequently 403 on a bare
-	// Go-http client.
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
-	req.Header.Set("Referer", "https://aiqicha.baidu.com/")
+	bodyBytes, _ := json.Marshal(map[string]string{"keyword": q})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, h.TitleSuggestURL, strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	// Bare UA on purpose — tianyancha's bot detector flags Chrome-shaped
+	// header combos on this endpoint; a generic UA passes more often.
+	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 
 	httpClient := h.HTTP
 	if httpClient == nil {
@@ -286,32 +281,83 @@ func (h *InvoiceHandler) fetchRemoteSuggest(ctx context.Context, q string) ([]re
 	if err != nil {
 		return nil, err
 	}
-	// Aiqicha returns {status, msg, data: {queryList: [{resultStr, ...}]}}
-	// We treat the parse loosely — any "name"/"company"/"entName" field
-	// that surfaces is fine.
+	// tianyancha: {state:"ok", errorCode:0, data:[{comName, taxCode, ...}]}
+	// On rate-limit: {state:"error", errorCode:302004, data:{token:""}}
 	var parsed struct {
-		Data struct {
-			QueryList []map[string]any `json:"queryList"`
-			Resultlst []map[string]any `json:"resultlst"`
-		} `json:"data"`
+		State     string          `json:"state"`
+		ErrorCode int             `json:"errorCode"`
+		Message   string          `json:"message"`
+		Data      json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, err
 	}
-	rows := append([]map[string]any{}, parsed.Data.QueryList...)
-	rows = append(rows, parsed.Data.Resultlst...)
-	var out []remoteSuggestRow
+	if parsed.ErrorCode != 0 || parsed.State != "ok" {
+		return nil, fmt.Errorf("remote: %s (code %d)", parsed.Message, parsed.ErrorCode)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(parsed.Data, &rows); err != nil {
+		// data may also be {queryList:[…]} on alternative providers
+		var alt struct {
+			QueryList []map[string]any `json:"queryList"`
+			Resultlst []map[string]any `json:"resultlst"`
+		}
+		if jerr := json.Unmarshal(parsed.Data, &alt); jerr != nil {
+			return nil, err
+		}
+		rows = append(rows, alt.QueryList...)
+		rows = append(rows, alt.Resultlst...)
+	}
+	out := make([]remoteSuggestRow, 0, len(rows))
 	for _, r := range rows {
-		name := pickStr(r, "resultStr", "entName", "name", "company")
+		name := pickStr(r, "comName", "resultStr", "entName", "name", "company")
 		if name == "" {
 			continue
 		}
 		out = append(out, remoteSuggestRow{
 			Name:  stripHTML(name),
-			TaxNo: pickStr(r, "regNo", "creditNo", "taxNo"),
+			TaxNo: pickStr(r, "taxCode", "creditCode", "regNo", "creditNo", "taxNo"),
 		})
 	}
+	suggestCachePut(q, out)
 	return out, nil
+}
+
+// suggestCache is a tiny in-process LRU-ish cache: positive results live
+// for an hour, capped at 512 distinct keywords. Keeps tianyancha hits down
+// when the same operator queries "北京大" three times in a row.
+var (
+	suggestCacheMu  sync.Mutex
+	suggestCacheMap = map[string]suggestCacheEntry{}
+)
+
+type suggestCacheEntry struct {
+	rows    []remoteSuggestRow
+	expires time.Time
+}
+
+func suggestCacheGet(q string) ([]remoteSuggestRow, bool) {
+	suggestCacheMu.Lock()
+	defer suggestCacheMu.Unlock()
+	e, ok := suggestCacheMap[q]
+	if !ok || time.Now().After(e.expires) {
+		return nil, false
+	}
+	return e.rows, true
+}
+
+func suggestCachePut(q string, rows []remoteSuggestRow) {
+	suggestCacheMu.Lock()
+	defer suggestCacheMu.Unlock()
+	if len(suggestCacheMap) >= 512 {
+		// Crude eviction: drop one arbitrary entry per overflow. The
+		// hourly TTL bounds long-term growth anyway.
+		for k := range suggestCacheMap {
+			delete(suggestCacheMap, k)
+			break
+		}
+	}
+	suggestCacheMap[q] = suggestCacheEntry{rows: rows, expires: time.Now().Add(time.Hour)}
 }
 
 func pickStr(m map[string]any, keys ...string) string {

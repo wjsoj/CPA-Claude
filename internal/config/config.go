@@ -281,9 +281,10 @@ func applyDefaults(c *Config, path string) {
 		c.SaaS.Invoice.ResendFrom = "CPA-Claude <onboarding@resend.dev>"
 	}
 	if c.SaaS.Invoice.TitleSuggestURL == "" {
-		// Baidu Aiqicha's open suggestion endpoint. Returns JSONP-ish but
-		// flips to plain JSON when t= is omitted. No auth required.
-		c.SaaS.Invoice.TitleSuggestURL = "https://aiqicha.baidu.com/s/searchAjax/sug"
+		// 天眼查 web-app's autocomplete endpoint. POST JSON {"keyword": q},
+		// returns data[]{comName, taxCode}. Unauthenticated but IP-rate-
+		// limited; exceeding it falls back to local-history matches only.
+		c.SaaS.Invoice.TitleSuggestURL = "https://capi.tianyancha.com/cloud-tempest/search/suggest/v3"
 	}
 	p := strings.TrimSpace(c.AdminPath)
 	if p == "" {

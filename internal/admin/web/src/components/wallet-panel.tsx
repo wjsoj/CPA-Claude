@@ -1253,7 +1253,7 @@ function InvoiceDialog({
               invalid={Boolean((selected.tax_no || "").trim()) && !taxNoValid}
             />
             <LabeledInput
-              label="电话"
+              label="联系电话"
               value={selected.phone || ""}
               onChange={(v) => setSelected((p) => ({ ...p, phone: v }))}
             />
@@ -1265,12 +1265,12 @@ function InvoiceDialog({
           />
           <div className="grid grid-cols-2 gap-3">
             <LabeledInput
-              label="开户行"
+              label="开户银行"
               value={selected.bank || ""}
               onChange={(v) => setSelected((p) => ({ ...p, bank: v }))}
             />
             <LabeledInput
-              label="账号"
+              label="银行账户"
               value={selected.bank_account || ""}
               onChange={(v) => setSelected((p) => ({ ...p, bank_account: v }))}
             />
