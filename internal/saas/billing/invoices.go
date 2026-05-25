@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+	ccauth "github.com/wjsoj/cc-core/auth"
 
 	"github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/CPA-Claude/internal/saas/resend"
@@ -56,7 +57,9 @@ func NewInvoiceHandler(store *db.DB, auth TokenAuthFunc, rc *resend.Client, pdfD
 		PDFDir:          pdfDir,
 		OpsEmail:        opsEmail,
 		TitleSuggestURL: suggestURL,
-		HTTP:            &http.Client{Timeout: 5 * time.Second},
+		// uTLS Chrome fingerprint — aiqicha.baidu.com is Cloudflare-fronted
+		// and returns 200/empty-body to crypto/tls default ClientHello.
+		HTTP: &http.Client{Transport: ccauth.NewPlainHTTPClient("", true).Transport, Timeout: 8 * time.Second},
 	}
 }
 
@@ -258,9 +261,14 @@ func (h *InvoiceHandler) fetchRemoteSuggest(ctx context.Context, q string) ([]re
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	// Real-browser headers — these endpoints frequently 403 on a bare
 	// Go-http client.
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
 	req.Header.Set("Referer", "https://aiqicha.baidu.com/")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 
 	httpClient := h.HTTP
 	if httpClient == nil {
@@ -368,6 +376,11 @@ func (h *InvoiceHandler) create(c *gin.Context) {
 	}
 	if strings.TrimSpace(b.Title.Name) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title.name required"})
+		return
+	}
+	b.Title.TaxNo = strings.ToUpper(strings.TrimSpace(b.Title.TaxNo))
+	if !isLikelyTaxNo(b.Title.TaxNo) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title.tax_no required (统一社会信用代码, 15-20 位字母数字)"})
 		return
 	}
 	cny := round2(b.CNYAmount)
@@ -500,6 +513,22 @@ func prettyJSON(s string) string {
 		return s
 	}
 	return string(b)
+}
+
+// isLikelyTaxNo validates 统一社会信用代码: 15-20 chars, uppercase letters + digits.
+// 18 is the post-2015 standard length; 15 covers legacy 税务登记号. Loose range so
+// HK/foreign-invested-entity edge cases still pass.
+func isLikelyTaxNo(s string) bool {
+	if len(s) < 15 || len(s) > 20 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+	}
+	return true
 }
 
 func isLikelyEmail(s string) bool {

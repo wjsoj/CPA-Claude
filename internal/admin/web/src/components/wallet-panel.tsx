@@ -1058,6 +1058,8 @@ function InvoiceDialog({
     bank_account: "",
   });
   const [busy, setBusy] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [searched, setSearched] = useState(false);
   const debRef = useRef<number | null>(null);
 
   // Reset when reopened.
@@ -1075,12 +1077,22 @@ function InvoiceDialog({
   useEffect(() => {
     if (!open) return;
     if (debRef.current) window.clearTimeout(debRef.current);
+    if (!search.trim()) {
+      setPicks([]);
+      setSearched(false);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
     debRef.current = window.setTimeout(async () => {
       try {
         const r = await suggestInvoiceTitles(token, search);
         setPicks(r.titles || []);
       } catch {
-        // tolerated — local fallback already returned within the same call
+        setPicks([]);
+      } finally {
+        setSearching(false);
+        setSearched(true);
       }
     }, 350);
     return () => {
@@ -1105,10 +1117,19 @@ function InvoiceDialog({
   const available = summary?.available_cny ?? 0;
   const tooHigh = amountNum > available + 0.005;
 
+  const taxNoTrim = (selected.tax_no || "").trim().toUpperCase();
+  const taxNoValid = /^[0-9A-Z]{15,20}$/.test(taxNoTrim);
+
   const submit = async () => {
     if (busy) return;
     if (!selected.name.trim()) {
-      toast.error("请填写抬头名称");
+      toast.error("请填写公司名称 (抬头)");
+      return;
+    }
+    if (!taxNoValid) {
+      toast.error("请填写有效的统一社会信用代码", {
+        description: "18 位字母 / 数字 (大写)",
+      });
       return;
     }
     if (!contactEmail.includes("@")) {
@@ -1175,10 +1196,12 @@ function InvoiceDialog({
           </div>
 
           <div>
-            <label className="eyebrow text-[10px] opacity-70">抬头名称 (公司全称)</label>
+            <label className="eyebrow text-[10px] opacity-70">
+              抬头名称 (公司全称) <span className="text-destructive">*</span>
+            </label>
             <div className="relative mt-1">
               <Input
-                placeholder="搜索或输入抬头…"
+                placeholder="搜索或手动输入抬头…"
                 value={search}
                 onInput={(e) => {
                   const v = (e.target as HTMLInputElement).value;
@@ -1207,13 +1230,27 @@ function InvoiceDialog({
                 ))}
               </div>
             )}
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              {searching
+                ? "正在搜索…"
+                : searched && picks.length === 0
+                  ? "未匹配到企业,可手动输入公司全称与统一社会信用代码"
+                  : !search.trim()
+                    ? "输入公司名称关键词以从企业库匹配,或直接手动填写下方字段"
+                    : null}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <LabeledInput
-              label="税号"
+              label="统一社会信用代码"
+              required
               value={selected.tax_no || ""}
-              onChange={(v) => setSelected((p) => ({ ...p, tax_no: v }))}
+              onChange={(v) =>
+                setSelected((p) => ({ ...p, tax_no: v.toUpperCase().replace(/\s+/g, "") }))
+              }
+              placeholder="18 位字母 / 数字"
+              invalid={Boolean((selected.tax_no || "").trim()) && !taxNoValid}
             />
             <LabeledInput
               label="电话"
@@ -1240,6 +1277,7 @@ function InvoiceDialog({
           </div>
           <LabeledInput
             label="接收发票邮箱"
+            required
             value={contactEmail}
             onChange={setContactEmail}
             placeholder="invoice@example.com"
@@ -1267,22 +1305,29 @@ function LabeledInput({
   onChange,
   placeholder,
   type,
+  required,
+  invalid,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
+  required?: boolean;
+  invalid?: boolean;
 }) {
   return (
     <div>
-      <label className="eyebrow text-[10px] opacity-70">{label}</label>
+      <label className="eyebrow text-[10px] opacity-70">
+        {label}
+        {required && <span className="text-destructive"> *</span>}
+      </label>
       <Input
         type={type || "text"}
         value={value}
         placeholder={placeholder}
         onInput={(e) => onChange((e.target as HTMLInputElement).value)}
-        className="mt-1 font-mono text-sm"
+        className={cn("mt-1 font-mono text-sm", invalid && "border-destructive")}
       />
     </div>
   );
