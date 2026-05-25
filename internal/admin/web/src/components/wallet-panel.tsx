@@ -1060,6 +1060,10 @@ function InvoiceDialog({
   const [busy, setBusy] = useState(false);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
+  // Suppresses the dropdown after the user picks a candidate — the picked
+  // name flows back into `search`, which would otherwise re-fire the
+  // debounced fetch and re-open the list. Cleared once the user types again.
+  const [pickedLock, setPickedLock] = useState(false);
   const debRef = useRef<number | null>(null);
 
   // Reset when reopened.
@@ -1070,6 +1074,9 @@ function InvoiceDialog({
       setPicks([]);
       setSelected({ name: "", tax_no: "", address: "", phone: "", bank: "", bank_account: "" });
       setBusy(false);
+      setSearched(false);
+      setSearching(false);
+      setPickedLock(false);
     }
   }, [open, summary]);
 
@@ -1083,6 +1090,7 @@ function InvoiceDialog({
       setSearching(false);
       return;
     }
+    if (pickedLock) return; // hold the dropdown closed until the user edits again
     setSearching(true);
     debRef.current = window.setTimeout(async () => {
       try {
@@ -1111,6 +1119,10 @@ function InvoiceDialog({
       bank_account: t.bank_account ?? prev.bank_account,
     }));
     setSearch(t.name);
+    setPicks([]);
+    setSearching(false);
+    setSearched(false);
+    setPickedLock(true);
   };
 
   const amountNum = Number(amount) || 0;
@@ -1207,6 +1219,7 @@ function InvoiceDialog({
                   const v = (e.target as HTMLInputElement).value;
                   setSearch(v);
                   setSelected((prev) => ({ ...prev, name: v }));
+                  setPickedLock(false);
                 }}
                 className="font-mono pr-8"
               />
