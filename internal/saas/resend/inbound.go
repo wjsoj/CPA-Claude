@@ -122,7 +122,7 @@ func (c *Client) GetReceivedEmail(ctx context.Context, emailID string) (*Receive
 	if c == nil || c.APIKey == "" {
 		return nil, ErrDisabled
 	}
-	url := "https://api.resend.com/emails/received/" + emailID
+	url := "https://api.resend.com/emails/receiving/" + emailID
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -155,7 +155,7 @@ func (c *Client) GetReceivedAttachment(ctx context.Context, emailID, attID strin
 	if c == nil || c.APIKey == "" {
 		return "", nil, ErrDisabled
 	}
-	url := fmt.Sprintf("https://api.resend.com/emails/received/%s/attachments/%s", emailID, attID)
+	url := fmt.Sprintf("https://api.resend.com/emails/receiving/%s/attachments/%s", emailID, attID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", nil, err
