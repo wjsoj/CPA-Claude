@@ -457,6 +457,12 @@ func (h *InvoiceHandler) notifyOps(inv *db.Invoice) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// Pull tax_no out of the frozen title snapshot so the operator can see
+	// the 统一社会信用代码 without expanding the JSON block below.
+	var snap struct {
+		TaxNo string `json:"tax_no"`
+	}
+	_ = json.Unmarshal([]byte(inv.TitleSnapshot), &snap)
 	subj := fmt.Sprintf("[CPA-Claude] 新发票申请 ¥%.2f — %s", inv.CNYAmount, inv.TitleName)
 	body := fmt.Sprintf(
 		"<p>用户申请了新的发票:</p>"+
@@ -464,13 +470,14 @@ func (h *InvoiceHandler) notifyOps(inv *db.Invoice) {
 			"<li>发票编号: <b>#%d</b></li>"+
 			"<li>金额: <b>¥%.2f</b></li>"+
 			"<li>抬头: %s</li>"+
+			"<li>统一社会信用代码: <code>%s</code></li>"+
 			"<li>联系邮箱: %s</li>"+
 			"<li>申请时间: %s</li>"+
 			"<li>Token: <code>%s</code></li>"+
 			"</ul>"+
 			"<p>抬头快照:<br><pre>%s</pre></p>"+
 			"<p>请到管理员面板 → Invoices 处理。</p>",
-		inv.ID, inv.CNYAmount, inv.TitleName, inv.ContactEmail,
+		inv.ID, inv.CNYAmount, inv.TitleName, snap.TaxNo, inv.ContactEmail,
 		inv.CreatedAt.Format("2006-01-02 15:04:05"),
 		maskToken(inv.Token), prettyJSON(inv.TitleSnapshot))
 	_ = h.Resend.Send(ctx, resend.Email{
