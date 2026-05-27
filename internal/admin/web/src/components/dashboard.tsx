@@ -10,6 +10,7 @@ import {
   Receipt,
   Wallet,
   FileText,
+  Inbox,
 } from "lucide-react";
 import { api, setToken, ApiError } from "@/lib/api";
 import type { AuthRow, ClientRow, Provider, Summary } from "@/lib/types";
@@ -20,6 +21,7 @@ import { RequestsExplorer } from "./requests-explorer";
 import { PricingStats } from "./pricing-stats";
 import { PaymentsPanel } from "./payments-panel";
 import { InvoicesPanel } from "./invoices-panel";
+import { InboxPanel } from "./inbox-panel";
 import { EditAuthModal } from "./modals/edit-auth";
 import { UploadModal } from "./modals/upload";
 import { APIKeyModal } from "./modals/apikey";
@@ -33,7 +35,7 @@ import { confirmDialog } from "@/hooks/use-confirm";
 import { cn, fmtDate, fmtInt } from "@/lib/utils";
 
 type Action = "toggle" | "refresh" | "clear-quota" | "clear-failure" | "delete";
-type Tab = "overview" | "credentials" | "tokens" | "requests" | "pricing" | "payments" | "invoices";
+type Tab = "overview" | "credentials" | "tokens" | "requests" | "pricing" | "payments" | "invoices" | "inbox";
 
 const TABS: { key: Tab; label: string; hint: string; icon: typeof Activity }[] = [
   { key: "overview", label: "Overview", hint: "charts · fleet health", icon: Activity },
@@ -43,6 +45,7 @@ const TABS: { key: Tab; label: string; hint: string; icon: typeof Activity }[] =
   { key: "pricing", label: "Pricing", hint: "models · savings", icon: Receipt },
   { key: "payments", label: "Payments", hint: "top-ups · Z-Pay", icon: Wallet },
   { key: "invoices", label: "Invoices", hint: "fapiao · PDFs", icon: FileText },
+  { key: "inbox", label: "Inbox", hint: "inbound mail", icon: Inbox },
 ];
 
 function MetricCell({
@@ -395,6 +398,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
           )}
           {tab === "payments" && <PaymentsPanel refreshTick={refreshTick} />}
           {tab === "invoices" && <InvoicesPanel refreshTick={refreshTick} />}
+          {tab === "inbox" && <InboxPanel refreshTick={refreshTick} />}
           {tab === "pricing" && (
             <section className="space-y-8">
               <div className="flex items-end justify-between gap-4 flex-wrap">

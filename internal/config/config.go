@@ -168,6 +168,12 @@ type InvoiceConfig struct {
 	ResendAPIKey string `yaml:"resend_api_key,omitempty"`
 	ResendFrom   string `yaml:"resend_from,omitempty"`
 	OpsEmail     string `yaml:"ops_email,omitempty"`
+
+	// ResendWebhookSecret is the "whsec_..." string from Resend's webhook
+	// detail page. Used to verify inbound-email webhook signatures.
+	// Empty → POST /api/webhooks/resend-inbound returns 503 (the route
+	// must be configured before inbound mail will land in the admin inbox).
+	ResendWebhookSecret string `yaml:"resend_webhook_secret,omitempty"`
 }
 
 // PaymentConfig — Z-Pay merchant credentials. Never logged.

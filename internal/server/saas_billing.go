@@ -62,6 +62,12 @@ func (s *Server) mountBillingRoutes(engine *gin.Engine) {
 	if s.invoice != nil {
 		s.invoice.UserRoutes(g)
 	}
+	if s.inbox != nil {
+		// Webhook lives under /api/webhooks/* (not /api/wallet/*) — it's
+		// Resend-facing, not user-facing. Mounted on the same engine so
+		// the operator has a single public URL to configure on Resend.
+		s.inbox.PublicRoutes(engine.Group("/api"))
+	}
 	// Pricing-group catalog. Exposed for the status SPA so a user can see
 	// which group their token belongs to without admin access.
 	g.GET("/groups", func(c *gin.Context) {
@@ -137,6 +143,17 @@ func buildInvoiceHandler(s *Server, cfg *config.Config) *billing.InvoiceHandler 
 		cfg.SaaS.Invoice.OpsEmail,
 		cfg.SaaS.Invoice.TitleSuggestURL,
 	)
+}
+
+// buildInboxHandler returns the Resend-inbound webhook handler. Returns nil
+// when SaaS is disabled. The Resend client is reused from invoice setup;
+// if no API key is configured the body-fetch step degrades to a warn log.
+func buildInboxHandler(s *Server, cfg *config.Config) *billing.InboxHandler {
+	if s.saasDB == nil {
+		return nil
+	}
+	rc := resend.New(cfg.SaaS.Invoice.ResendAPIKey, cfg.SaaS.Invoice.ResendFrom)
+	return billing.NewInboxHandler(s.saasDB, rc, cfg.SaaS.Invoice.ResendWebhookSecret)
 }
 
 // PrecheckBalance returns the current wallet balance for token, creating

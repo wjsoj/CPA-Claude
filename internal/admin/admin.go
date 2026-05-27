@@ -214,6 +214,11 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/invoices/:id/issue", h.handleIssueInvoice)
 		api.POST("/invoices/:id/reject", h.handleRejectInvoice)
 		api.GET("/invoices/:id/download", h.handleAdminInvoiceDownload)
+		// Inbox: Resend-inbound emails (admin-only read).
+		api.GET("/inbox", h.handleInboxList)
+		api.GET("/inbox/:id", h.handleInboxGet)
+		api.DELETE("/inbox/:id", h.handleInboxDelete)
+		api.GET("/inbox/:id/attachments/:aid", h.handleInboxAttachment)
 	}
 
 	// Static SPA. Vite emits a single entry HTML plus hashed chunks under

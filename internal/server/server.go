@@ -70,6 +70,7 @@ type Server struct {
 	saas    *saasBilling
 	billing *billing.Handler
 	invoice *billing.InvoiceHandler
+	inbox   *billing.InboxHandler
 	saasDB  *saasdb.DB
 }
 
@@ -108,6 +109,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 			bh := billing.NewHandler(ddb, rate, gw, cfg.SaaS.Site, authFn)
 			s.billing = bh
 			s.invoice = buildInvoiceHandler(s, cfg)
+			s.inbox = buildInboxHandler(s, cfg)
 			go rate.RunRefresher(context.Background(),
 				time.Duration(cfg.SaaS.Exchange.RefreshIntervalMin)*time.Minute)
 			go bh.RunExpirySweeper(context.Background())

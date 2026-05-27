@@ -114,6 +114,33 @@ CREATE TABLE invoices (
 CREATE INDEX idx_invoices_token ON invoices(token, created_at DESC);
 CREATE INDEX idx_invoices_status ON invoices(status, created_at DESC);
 `,
+	// 3: inbound email inbox. Resend pushes one webhook per incoming mail
+	// to the receiving domain. We persist enough metadata to render an
+	// admin inbox view without re-hitting Resend's API on every list load.
+	// body_html / body_text / attachments are fetched lazily (after the
+	// webhook returns) via Resend's Received Emails API and patched in;
+	// fetched_at=0 means "metadata only, body not yet pulled".
+	`
+CREATE TABLE inbound_emails (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    resend_email_id   TEXT NOT NULL UNIQUE,         -- data.email_id from the webhook
+    message_id        TEXT NOT NULL DEFAULT '',      -- RFC Message-ID
+    from_addr         TEXT NOT NULL DEFAULT '',
+    to_addrs          TEXT NOT NULL DEFAULT '[]',    -- JSON array
+    cc_addrs          TEXT NOT NULL DEFAULT '[]',    -- JSON array
+    subject           TEXT NOT NULL DEFAULT '',
+    received_at       INTEGER NOT NULL,              -- unix seconds
+    body_html         TEXT NOT NULL DEFAULT '',
+    body_text         TEXT NOT NULL DEFAULT '',
+    attachments       TEXT NOT NULL DEFAULT '[]',    -- JSON array of {id,filename,content_type,content_disposition,content_id}
+    raw_event         TEXT NOT NULL DEFAULT '',      -- full webhook event JSON for forensics
+    fetched_at        INTEGER NOT NULL DEFAULT 0,    -- 0 = body not fetched yet
+    read_at           INTEGER NOT NULL DEFAULT 0,    -- 0 = unread
+    created_at        INTEGER NOT NULL
+);
+CREATE INDEX idx_inbound_emails_received ON inbound_emails(received_at DESC);
+CREATE INDEX idx_inbound_emails_read ON inbound_emails(read_at, received_at DESC);
+`,
 }
 
 func (db *DB) migrate() error {
