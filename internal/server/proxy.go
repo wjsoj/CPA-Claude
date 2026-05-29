@@ -679,15 +679,17 @@ recoveredFromSignature:
 // per-credential model rewrite (and the matching response-side rewrite) so
 // model_map'd relay vendors keep working.
 //
-// Health tracking: success → MarkSuccess; 401/402/403 → immediate
-// MarkHardFailure (token revoked, balance depleted, or forbidden — all
-// terminal signals that won't self-heal); other upstream errors
-// (4xx/5xx/429) and transport errors → MarkFailure, which counts toward
-// the consecutive-failure threshold and auto-promotes to a sticky
-// hard-failure once the upstream proves persistently broken. A background
-// midnight job (Pool.RunDailyAnthropicAPIKeyReset) wipes the hard-failure
-// flag once a day so transient overnight outages don't pin a credential
-// offline forever.
+// Health tracking: success → MarkSuccess; every error (401/402/403,
+// 4xx/5xx/429, transport) → MarkFailure, which records the failure for
+// admin visibility but — for API-key credentials — never auto-promotes to
+// a sticky hard-failure. API keys are operator-managed BYOK / relay
+// channels: a flaky relay backend, a missing model, or a stretch of 500s
+// must not pull the whole channel out of rotation until someone clears it
+// by hand. Auto-retirement on repeated failure is reserved for OAuth
+// subscription accounts (enforced in cc-core auth.MarkFailure /
+// MarkHardFailure, which exempt KindAPIKey). Operators still disable a key
+// manually from the admin panel (the Disabled flag) when they truly want it
+// offline.
 func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry bool, done bool) {
 	baseURL := s.cfg.AnthropicBaseURL
 	if ab := strings.TrimRight(a.Snapshot().BaseURL, "/"); ab != "" {
@@ -833,7 +835,10 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	case resp.StatusCode == http.StatusUnauthorized ||
 		resp.StatusCode == http.StatusPaymentRequired ||
 		resp.StatusCode == http.StatusForbidden:
-		a.MarkHardFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
+		// Record for visibility. cc-core's MarkFailure exempts KindAPIKey
+		// from the consecutive-failure auto-disable, so this never retires
+		// the channel — only a manual admin disable does.
+		a.MarkFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
 	case resp.StatusCode == http.StatusTooManyRequests,
 		resp.StatusCode == http.StatusServiceUnavailable,
 		resp.StatusCode == http.StatusNotFound:
