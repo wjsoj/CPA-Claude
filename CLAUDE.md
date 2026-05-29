@@ -47,11 +47,11 @@ Health states are kept on `auth.Auth` itself: `MarkSuccess` / `MarkFailure` / `M
 
 `forward()` is the per-request loop: budget pre-check → RPM gate → concurrency gate → up to 4 retries on different credentials. Per attempt, `doForward` (OAuth) or `doForwardAnthropicAPIKey` (API key) actually talks to upstream.
 
-The OAuth path applies **two layers of mimicry** to look like a real Claude Code 2.1.126 client:
+The OAuth path applies **two layers of mimicry** to look like a real Claude Code 2.1.156 client. Both layers now live in the **cc-core** module (`github.com/wjsoj/cc-core/mimicry`); `proxy.go` only adapts CPA-Claude's `*auth.Auth` to cc-core's API:
 
-- **Header layer** — `applyAnthropicHeaders` in `proxy.go` sets pinned `User-Agent`, `X-Stainless-*`, `Anthropic-Beta`, `X-App`, `X-Claude-Code-Session-Id`, `X-Client-Request-Id`. Constants live in `internal/server/fingerprint.go` (`CLICurrentVersion`, `claudeCLIUserAgent`, `claudeAnthropicBetaFull`, etc.). Whenever you bump the CC version target, **all of these need to move together** or the version in the User-Agent will disagree with the `cc_version=` baked into the body's billing block, which is itself a fingerprint signal.
+- **Header layer** — `applyAnthropicHeaders` in `proxy.go` is a thin adapter to `mimicry.ApplyClaudeCodeHeaders`, which sets pinned `User-Agent`, `X-Stainless-*`, `Anthropic-Beta`, `X-App`, `X-Claude-Code-Session-Id`, `X-Client-Request-Id`. Constants live in `cc-core/mimicry/fingerprint.go` (`CLICurrentVersion`, `ClaudeCLIUserAgent`, `ClaudeAnthropicBetaFull`, and the telemetry-only `ClaudeReportedBetas`). Whenever you bump the CC version target, **all of these need to move together** or the version in the User-Agent will disagree with the `cc_version=` baked into the body's billing block, which is itself a fingerprint signal.
 
-- **Body layer** — `applyClaudeCodeBodyMimicry` in `mimicry.go` rewrites system into the canonical 4-block CC layout `[billing, "You are Claude Code...", ...originalSystem-with-cache_control]`, sets `metadata.user_id` to the JSON `{device_id, account_uuid, session_id}` shape, signs `cch=<xxhash5>` of the final body. The client's original prompt is preserved verbatim — only the surrounding wrapper is normalized. **Skipped entirely for Haiku models** (Anthropic doesn't third-party-check Haiku) and for requests whose system already starts with the CC prompt prefix (real CLI passing through).
+- **Body layer** — `mimicry.ApplyClaudeCodeBodyMimicry` rewrites system into the canonical 4-block CC layout `[billing, "You are Claude Code...", ...originalSystem-with-cache_control]` (real CC 2.1.156 puts `scope:global` on the second-to-last system block and a plain ephemeral 1h breakpoint on the last), sets `metadata.user_id` to the JSON `{device_id, account_uuid, session_id}` shape, signs `cch=<xxhash5>` of the final body. The client's original prompt is preserved verbatim — only the surrounding wrapper is normalized. **Skipped entirely for Haiku models** (Anthropic doesn't third-party-check Haiku) and for requests whose system already starts with the CC prompt prefix (real CLI passing through).
 
 `maybeDecompressResponse` in `proxy.go` transparently un-gzips/un-brs upstream responses because we advertise `Accept-Encoding: gzip, br` to match real CC, but every internal path (usage parsing, SSE streamer, model rewrite) wants plain bytes.
 
@@ -102,8 +102,9 @@ Both paths produce the same `auth.Auth` and go through `Pool.AddOAuth`. If you c
 
 ### Capture archive — `crack/`
 
-Contains complete recorded sessions of real Claude Code 2.1.126 traffic, used as ground truth for every fingerprint constant in the codebase.
+Contains complete recorded sessions of real Claude Code traffic, used as ground truth for every fingerprint constant in the codebase. The current target is **2.1.156** — see `crack/cc2156/SPEC.md` for the authoritative constant list and the 2.1.146→2.1.156 diff.
 
+- `crack/cc2156/` — latest live-session capture (2.1.156). `SPEC.md` is the source of truth; `rows/` holds structurally-redacted representative requests produced by `crack/scripts/extract_live.py` (this mode keeps only fingerprint structure, not conversation prose — see `crack/cc2156/README.md`).
 - `crack/raw/<mode>-session-full.json` and `crack/login/raw/login-session-full.json` — original Whistle dumps.
 - `crack/oauth/`, `crack/apikey/`, `crack/login/` — three parallel modes; each has `rows/` (per-request decoded JSON) and `docs/` (per-request markdown write-ups). `crack/login/` covers the OAuth PKCE login flow specifically (12 requests).
 - `crack/COMPARE.md` — OAuth-vs-APIkey diff. `crack/login/README.md` — PKCE flow + CPA alignment table.

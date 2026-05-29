@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/gin-gonic/gin v1.10.1
 	github.com/sirupsen/logrus v1.9.4
-	github.com/wjsoj/cc-core v0.8.4
+	github.com/wjsoj/cc-core v0.8.5
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.1
 )

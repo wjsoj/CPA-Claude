@@ -15,6 +15,7 @@ import {
 import { api, setToken, ApiError } from "@/lib/api";
 import type { AuthRow, ClientRow, Provider, Summary } from "@/lib/types";
 import { OverviewPanel } from "./overview-panel";
+import { StatusMonitorPanel } from "./status-monitor-panel";
 import { CredentialsPanel } from "./credentials-panel";
 import { TokensPanel } from "./tokens-panel";
 import { RequestsExplorer } from "./requests-explorer";
@@ -373,7 +374,12 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
         {/* TAB PANELS */}
         <div className="stagger pt-2 md:pt-4">
-          {tab === "overview" && <OverviewPanel summary={data} pricing={data?.pricing} refreshTick={refreshTick} />}
+          {tab === "overview" && (
+            <div className="space-y-6">
+              <StatusMonitorPanel refreshTick={refreshTick} />
+              <OverviewPanel summary={data} pricing={data?.pricing} refreshTick={refreshTick} />
+            </div>
+          )}
           {tab === "credentials" && (
             <CredentialsPanel
               summary={data}
