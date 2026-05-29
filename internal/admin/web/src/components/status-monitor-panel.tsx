@@ -51,7 +51,7 @@ export function StatusMonitorPanel({ refreshTick }: Props) {
       </div>
       <div className="grid gap-3 md:grid-cols-2">
         {data.providers.map((p) => (
-          <ProviderCard key={p.provider} p={p} />
+          <ProviderCard key={p.provider} p={p} generatedAt={data.generated_at} />
         ))}
       </div>
     </section>
@@ -68,9 +68,21 @@ const STATUS_META: Record<
   unknown: { label: "Unknown", dot: "bg-muted-foreground", text: "text-muted-foreground", Icon: HelpCircle },
 };
 
-function ProviderCard({ p }: { p: MonitorProvider }) {
+const SLOTS_24H = 48;
+const WINDOW_24H_MS = 24 * 60 * 60 * 1000;
+
+interface Slot {
+  total: number;
+  ok: number;
+  from: number;
+}
+
+function ProviderCard({ p, generatedAt }: { p: MonitorProvider; generatedAt: string }) {
   const meta = STATUS_META[p.operational] ?? STATUS_META.unknown;
   const Icon = meta.Icon;
+  const slots = bucket24h(p.timeline_24h, generatedAt);
+  const has24h = p.timeline_24h.length > 0;
+  const uptime24h = uptimePctSamples(p.timeline_24h);
   return (
     <Card className="p-4 md:p-5 space-y-4">
       {/* header */}
@@ -103,45 +115,44 @@ function ProviderCard({ p }: { p: MonitorProvider }) {
             <div
               key={d.date}
               title={dayTip(d)}
-              className={cn("flex-1 min-w-[2px] h-full rounded-[1px]", dayColor(d))}
+              className={cn("flex-1 min-w-[2px] h-full rounded-[1px]", barColor(d.total, d.ok))}
             />
           ))}
         </div>
       </div>
 
-      {/* 24h timeline */}
+      {/* 24h strip — same statuspage format as the 90-day strip, bucketed into
+          fixed 30-min slots so it reads identically (empty slots show muted). */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>Last 24h</span>
-          <span>{lastProbeLabel(p)}</span>
+          <span>24h ago</span>
+          <span className="font-medium text-foreground">
+            {has24h
+              ? `${uptime24h.toFixed(2)}% uptime`
+              : p.probe_enabled
+                ? "awaiting first probe"
+                : "active probing disabled"}
+          </span>
+          <span>now</span>
         </div>
-        {p.timeline_24h.length > 0 ? (
-          <div className="flex items-end gap-[2px] h-5">
-            {p.timeline_24h.map((s, i) => (
-              <div
-                key={`${s.ts}-${i}`}
-                title={sampleTip(s)}
-                className={cn(
-                  "flex-1 min-w-[3px] h-full rounded-[1px]",
-                  s.ok ? "bg-emerald-500" : "bg-rose-500",
-                )}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="text-xs text-muted-foreground italic">
-            {p.probe_enabled ? "awaiting first probe…" : "active probing disabled"}
-          </div>
-        )}
+        <div className="flex items-end gap-[1.5px] h-8">
+          {slots.map((s, i) => (
+            <div
+              key={i}
+              title={slotTip(s)}
+              className={cn("flex-1 min-w-[2px] h-full rounded-[1px]", barColor(s.total, s.ok))}
+            />
+          ))}
+        </div>
       </div>
     </Card>
   );
 }
 
-function dayColor(d: MonitorDay): string {
-  if (d.total === 0) return "bg-muted";
-  if (d.ok >= d.total) return "bg-emerald-500";
-  if (d.ok === 0) return "bg-rose-500";
+function barColor(total: number, ok: number): string {
+  if (total === 0) return "bg-muted";
+  if (ok >= total) return "bg-emerald-500";
+  if (ok === 0) return "bg-rose-500";
   return "bg-amber-500";
 }
 
@@ -151,16 +162,40 @@ function dayTip(d: MonitorDay): string {
   return `${d.date} · ${pct}% (${d.ok}/${d.total})`;
 }
 
-function sampleTip(s: MonitorSample): string {
-  const t = new Date(s.ts).toLocaleTimeString();
-  if (s.ok) return `${t} · ok · ${s.latency_ms}ms`;
-  return `${t} · failed${s.err ? ` · ${s.err}` : ""}`;
+// bucket24h spreads raw probe samples across SLOTS_24H fixed time slots ending
+// at `generatedAt` (server clock), so the 24h strip renders as a dense
+// fixed-width grid exactly like the 90-day day-buckets.
+function bucket24h(samples: MonitorSample[], generatedAt: string): Slot[] {
+  const now = generatedAt ? new Date(generatedAt).getTime() : Date.now();
+  const start = now - WINDOW_24H_MS;
+  const slotMs = WINDOW_24H_MS / SLOTS_24H;
+  const slots: Slot[] = Array.from({ length: SLOTS_24H }, (_, i) => ({
+    total: 0,
+    ok: 0,
+    from: start + i * slotMs,
+  }));
+  for (const s of samples) {
+    const t = new Date(s.ts).getTime();
+    if (Number.isNaN(t) || t < start || t > now) continue;
+    let idx = Math.floor((t - start) / slotMs);
+    if (idx < 0) idx = 0;
+    if (idx >= SLOTS_24H) idx = SLOTS_24H - 1;
+    slots[idx].total++;
+    if (s.ok) slots[idx].ok++;
+  }
+  return slots;
 }
 
-function lastProbeLabel(p: MonitorProvider): string {
-  if (!p.last_probe) return "";
-  const s = p.last_probe;
-  const t = new Date(s.ts).toLocaleTimeString();
-  if (s.ok) return `${s.latency_ms}ms · ${t}`;
-  return `failed · ${t}`;
+function uptimePctSamples(samples: MonitorSample[]): number {
+  if (samples.length === 0) return 0;
+  const ok = samples.filter((s) => s.ok).length;
+  return (ok / samples.length) * 100;
+}
+
+function slotTip(s: Slot): string {
+  const f = new Date(s.from);
+  const hhmm = `${String(f.getHours()).padStart(2, "0")}:${String(f.getMinutes()).padStart(2, "0")}`;
+  if (s.total === 0) return `${hhmm} · no data`;
+  const pct = ((s.ok / s.total) * 100).toFixed(0);
+  return `${hhmm} · ${pct}% (${s.ok}/${s.total})`;
 }
