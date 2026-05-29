@@ -432,53 +432,78 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 
-		// Reactive signature-error recovery. An "Invalid signature in
-		// thinking block" rejection means the past assistant turns
-		// echoed in messages[] carry signatures bound to a different
-		// account than this credential. Causes include: switch detector
-		// miss (first-touch on a continuing conversation, server restart,
-		// 2h GC eviction), or signatures generated outside this proxy.
-		// One stateless rescue: drop the signed thinking blocks from
-		// the request and replay on the same credential — equivalent to
-		// continuing the conversation as a fresh, signature-free session.
-		// If it still fails, fall through to normal error handling.
+		// Reactive thinking-block recovery, two tiers. A thinking-block
+		// rejection means the assistant turns echoed in messages[] carry
+		// thinking signatures bound to a different account than the one now
+		// validating them. Causes: switch-detector miss (first-touch on a
+		// continuing conversation, server restart, 2h GC eviction), relays
+		// rotating backend accounts per request, or signatures minted
+		// outside this proxy. Two flavors with OPPOSITE remedies:
 		//
-		// Gated on the body matcher, NOT the status code: Anthropic
-		// returns this as 400, but relays/mid-stream vendors re-wrap it
-		// as 500/529. IsSignatureError requires the literal
-		// "signature"+"thinking" wording, so an unrelated 5xx won't trip
-		// it — the worst case is one wasted replay on a body we already
-		// know is hopeless.
+		//   - "Invalid signature in thinking block" → strip the signed
+		//     thinking from PAST turns (tier 1, SanitizeForSwitch) and
+		//     replay, continuing as a fresh signature-free session.
+		//   - "thinking blocks in the latest assistant message cannot be
+		//     modified" → stripping the latest turn is itself rejected, so
+		//     tier 1 can't help; tier 2 replays with thinking disabled
+		//     entirely (DisableThinking) so there's nothing left to validate.
+		//
+		// Gated on the body matcher, NOT the status code: Anthropic returns
+		// these as 400, but relays re-wrap them as 500/529. IsThinkingError
+		// requires the literal thinking-block wording, so an unrelated 5xx
+		// won't trip it. If both tiers fail, fall through to normal handling.
+		// replay re-sends a thinking-sanitized body on the SAME credential,
+		// reapplying the per-credential model rewrite and CC body mimicry.
+		// Returns true (and swaps in the new resp) when the upstream accepts
+		// it. Shared by the tier-1 (strip stale thinking) and tier-2 (disable
+		// thinking entirely) recovery steps below.
+		replay := func(candidate []byte, label string) bool {
+			if bytes.Equal(candidate, body) {
+				return false
+			}
+			retryUpstream := candidate
+			if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
+				if rewritten, err := rewriteModelField(retryUpstream, upstreamModel); err == nil {
+					retryUpstream = rewritten
+				}
+			}
+			retryUpstream = mimicry.ApplyClaudeCodeBodyMimicry(retryUpstream, model, id)
+			log.Warnf("proxy: %s returned %d thinking-block error — %s and retrying once on same credential", a.ID, resp.StatusCode, label)
+			retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(retryUpstream))
+			if rerr != nil {
+				return false
+			}
+			copyForwardableHeaders(c.Request.Header, retryReq.Header)
+			stripIngressHeaders(retryReq.Header)
+			applyAnthropicHeaders(retryReq, a, stream, isAnthropicBase, id, retryUpstream)
+			retryResp, rderr := client.Do(retryReq)
+			if rderr != nil {
+				log.Warnf("proxy: %s %s retry transport error: %v", a.ID, label, rderr)
+				return false
+			}
+			ccstream.Decompress(retryResp)
+			if retryResp.StatusCode < 400 {
+				log.Infof("proxy: %s %s retry succeeded", a.ID, label)
+				resp = retryResp
+				return true
+			}
+			_ = retryResp.Body.Close()
+			log.Warnf("proxy: %s %s retry still %d", a.ID, label, retryResp.StatusCode)
+			return false
+		}
+
 		recovered := false
-		if path == "/v1/messages" && thinkingsig.IsSignatureError(errBody) {
-			sanitized := thinkingsig.SanitizeForSwitch(body)
-			if !bytes.Equal(sanitized, body) {
-				retryUpstream := sanitized
-				if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
-					if rewritten, err := rewriteModelField(retryUpstream, upstreamModel); err == nil {
-						retryUpstream = rewritten
-					}
-				}
-				retryUpstream = mimicry.ApplyClaudeCodeBodyMimicry(retryUpstream, model, id)
-				log.Warnf("proxy: %s returned %d signature-in-thinking — sanitizing and retrying once on same credential", a.ID, resp.StatusCode)
-				if retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(retryUpstream)); rerr == nil {
-					copyForwardableHeaders(c.Request.Header, retryReq.Header)
-					stripIngressHeaders(retryReq.Header)
-					applyAnthropicHeaders(retryReq, a, stream, isAnthropicBase, id, retryUpstream)
-					if retryResp, rderr := client.Do(retryReq); rderr == nil {
-						ccstream.Decompress(retryResp)
-						if retryResp.StatusCode < 400 {
-							log.Infof("proxy: %s signature retry succeeded", a.ID)
-							resp = retryResp
-							recovered = true
-						} else {
-							_ = retryResp.Body.Close()
-							log.Warnf("proxy: %s signature retry still %d — surfacing original error", a.ID, retryResp.StatusCode)
-						}
-					} else {
-						log.Warnf("proxy: %s signature retry transport error: %v", a.ID, rderr)
-					}
-				}
+		if path == "/v1/messages" && thinkingsig.IsThinkingError(errBody) {
+			// Tier 1 — signature flavor: strip stale thinking from PAST turns
+			// (SanitizeForSwitch keeps the conversation in thinking mode).
+			if thinkingsig.IsSignatureError(errBody) {
+				recovered = replay(thinkingsig.SanitizeForSwitch(body), "sanitizing")
+			}
+			// Tier 2 — when stripping can't help ("latest assistant message
+			// cannot be modified") or tier 1 still failed: replay with thinking
+			// disabled entirely so there's nothing left to validate.
+			if !recovered {
+				recovered = replay(thinkingsig.DisableThinking(body), "disabling-thinking")
 			}
 		}
 		if recovered {
@@ -765,33 +790,49 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		recovered := false
-		if thinkingsig.IsSignatureError(errBody) {
-			if sanitized := thinkingsig.SanitizeForSwitch(body); !bytes.Equal(sanitized, body) {
-				retryUpstream := sanitized
+		if thinkingsig.IsThinkingError(errBody) {
+			// replay re-sends a thinking-sanitized body on the same relay key.
+			replay := func(candidate []byte, label string) bool {
+				if bytes.Equal(candidate, body) {
+					return false
+				}
+				retryUpstream := candidate
 				if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
 					if rewritten, rerr := rewriteModelField(retryUpstream, upstreamModel); rerr == nil {
 						retryUpstream = rewritten
 					}
 				}
-				log.Warnf("proxy(apikey): %s returned %d signature-in-thinking — sanitizing and retrying once on same credential", a.ID, resp.StatusCode)
-				if retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(retryUpstream)); rerr == nil {
-					copyForwardableHeaders(c.Request.Header, retryReq.Header)
-					stripIngressHeaders(retryReq.Header)
-					retryReq.Header.Set("x-api-key", token)
-					if retryResp, derr := client.Do(retryReq); derr == nil {
-						ccstream.Decompress(retryResp)
-						if retryResp.StatusCode < 400 {
-							log.Infof("proxy(apikey): %s signature retry succeeded", a.ID)
-							resp = retryResp
-							recovered = true
-						} else {
-							_ = retryResp.Body.Close()
-							log.Warnf("proxy(apikey): %s signature retry still %d — surfacing original error", a.ID, retryResp.StatusCode)
-						}
-					} else {
-						log.Warnf("proxy(apikey): %s signature retry transport error: %v", a.ID, derr)
-					}
+				log.Warnf("proxy(apikey): %s returned %d thinking-block error — %s and retrying once on same credential", a.ID, resp.StatusCode, label)
+				retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(retryUpstream))
+				if rerr != nil {
+					return false
 				}
+				copyForwardableHeaders(c.Request.Header, retryReq.Header)
+				stripIngressHeaders(retryReq.Header)
+				retryReq.Header.Set("x-api-key", token)
+				retryResp, derr := client.Do(retryReq)
+				if derr != nil {
+					log.Warnf("proxy(apikey): %s %s retry transport error: %v", a.ID, label, derr)
+					return false
+				}
+				ccstream.Decompress(retryResp)
+				if retryResp.StatusCode < 400 {
+					log.Infof("proxy(apikey): %s %s retry succeeded", a.ID, label)
+					resp = retryResp
+					return true
+				}
+				_ = retryResp.Body.Close()
+				log.Warnf("proxy(apikey): %s %s retry still %d", a.ID, label, retryResp.StatusCode)
+				return false
+			}
+			// Tier 1 — strip stale thinking from past turns (signature flavor).
+			if thinkingsig.IsSignatureError(errBody) {
+				recovered = replay(thinkingsig.SanitizeForSwitch(body), "sanitizing")
+			}
+			// Tier 2 — disable thinking entirely ("latest assistant message
+			// cannot be modified", or tier 1 still failed).
+			if !recovered {
+				recovered = replay(thinkingsig.DisableThinking(body), "disabling-thinking")
 			}
 		}
 		if !recovered {
