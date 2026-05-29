@@ -283,6 +283,21 @@ func maskClientToken(t string) string {
 	return t[:6] + "…" + t[len(t)-4:]
 }
 
+// flagStripThinking persists the strip-thinking decision on a credential after
+// a thinking-signature recovery succeeds, so future requests on it sanitize
+// prior thinking signatures proactively (ahead of the forward) instead of
+// failing once per request and replaying. Idempotent + best-effort.
+func flagStripThinking(a *auth.Auth) {
+	if a.StripThinkingEnabled() {
+		return
+	}
+	if err := a.MarkStripThinking(); err != nil {
+		log.Warnf("proxy: %s strip-thinking persist failed: %v", a.ID, err)
+		return
+	}
+	log.Infof("proxy: %s flagged strip-thinking (persisted) — prior thinking signatures will be sanitized proactively on future requests", a.ID)
+}
+
 // doForward sends the request with one credential. Returns (retry, done):
 //
 //	retry=true  → caller should try another credential
@@ -297,10 +312,19 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	// below handles the "treat as new session" telemetry: if the new
 	// account has no live sidecar session, it fires the standard 9-step
 	// bootstrap; if it does, the existing heartbeat covers continuity.
-	if path == "/v1/messages" && s.switchTracker.Check(clientToken, body, a.ID) {
-		log.Infof("auth switch detected: clientToken=%s now on auth=%s — sanitizing prior thinking signatures",
-			maskClientToken(clientToken), a.ID)
-		body = thinkingsig.SanitizeForSwitch(body)
+	if path == "/v1/messages" {
+		switched := s.switchTracker.Check(clientToken, body, a.ID)
+		// StripThinkingEnabled credentials (relays that rotate backend accounts
+		// per request, e.g. aws2) reject every echoed thinking signature, so we
+		// sanitize ahead of the forward instead of failing once and replaying.
+		// The flag is set + persisted automatically on first signature recovery.
+		if switched || a.StripThinkingEnabled() {
+			if switched {
+				log.Infof("auth switch detected: clientToken=%s now on auth=%s — sanitizing prior thinking signatures",
+					maskClientToken(clientToken), a.ID)
+			}
+			body = thinkingsig.SanitizeForSwitch(body)
+		}
 	}
 
 	if a.Kind == auth.KindAPIKey {
@@ -498,6 +522,9 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 			// (SanitizeForSwitch keeps the conversation in thinking mode).
 			if thinkingsig.IsSignatureError(errBody) {
 				recovered = replay(thinkingsig.SanitizeForSwitch(body), "sanitizing")
+				if recovered {
+					flagStripThinking(a)
+				}
 			}
 			// Tier 2 — when stripping can't help ("latest assistant message
 			// cannot be modified") or tier 1 still failed: replay with thinking
@@ -828,6 +855,9 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 			// Tier 1 — strip stale thinking from past turns (signature flavor).
 			if thinkingsig.IsSignatureError(errBody) {
 				recovered = replay(thinkingsig.SanitizeForSwitch(body), "sanitizing")
+				if recovered {
+					flagStripThinking(a)
+				}
 			}
 			// Tier 2 — disable thinking entirely ("latest assistant message
 			// cannot be modified", or tier 1 still failed).

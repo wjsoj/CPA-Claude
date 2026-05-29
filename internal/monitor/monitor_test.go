@@ -90,7 +90,8 @@ func TestDeriveStatus(t *testing.T) {
 		{"no creds", ProviderSnapshot{TotalCreds: 0}, "down"},
 		{"all unhealthy", ProviderSnapshot{TotalCreds: 3, HealthyCreds: 0}, "down"},
 		{"healthy + slot + probe ok", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: true}}, "operational"},
-		{"healthy + slot + probe fail", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false}}, "degraded"},
+		{"healthy + slot + probe fail (real http error)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 500}}, "degraded"},
+		{"healthy + slot + probe nodata (transport err)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 0}}, "operational"},
 		{"healthy but saturated", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: false}, "degraded"},
 		{"passive only, slot free", ProviderSnapshot{TotalCreds: 1, HealthyCreds: 1, SlotAvailable: true}, "operational"},
 	}

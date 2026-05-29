@@ -69,6 +69,13 @@ type Sample struct {
 	Err       string    `json:"err,omitempty"`
 }
 
+// noData reports a probe that produced no HTTP response at all — a transport
+// error or timeout (Status == 0). These are treated as "no signal", NOT a
+// failure: the active probe couldn't measure, so the passive pool-capacity
+// signal stays authoritative (healthy). A real HTTP error response (Status > 0,
+// non-2xx) is a genuine failure and is counted as such.
+func (s Sample) noData() bool { return !s.OK && s.Status == 0 }
+
 // DayStat is a per-local-day rollup of probe outcomes.
 type DayStat struct {
 	Date  string `json:"date"`
@@ -273,9 +280,12 @@ func (m *Monitor) record(provider string, s Sample) {
 		d = &DayStat{Date: key}
 		st.Days[key] = d
 	}
-	d.Total++
-	if s.OK {
-		d.OK++
+	// nodata probes don't move uptime — only real HTTP outcomes count.
+	if !s.noData() {
+		d.Total++
+		if s.OK {
+			d.OK++
+		}
 	}
 	m.pruneDaysLocked(st)
 
@@ -420,7 +430,10 @@ func deriveStatus(ps ProviderSnapshot) string {
 	if ps.TotalCreds == 0 || ps.HealthyCreds == 0 {
 		return "down"
 	}
-	probeBad := ps.ProbeEnabled && ps.LastProbe != nil && !ps.LastProbe.OK
+	// Only a real HTTP failure (Status > 0, non-2xx) degrades the badge. A
+	// nodata probe (transport error / timeout, Status == 0) is "no signal" —
+	// defer to the passive pool capacity, which is the source of truth.
+	probeBad := ps.ProbeEnabled && ps.LastProbe != nil && !ps.LastProbe.OK && ps.LastProbe.Status != 0
 	if ps.SlotAvailable && !probeBad {
 		return "operational"
 	}
