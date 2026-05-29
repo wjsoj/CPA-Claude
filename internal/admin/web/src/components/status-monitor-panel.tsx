@@ -68,8 +68,12 @@ const STATUS_META: Record<
   unknown: { label: "Unknown", dot: "bg-muted-foreground", text: "text-muted-foreground", Icon: HelpCircle },
 };
 
-const SLOTS_24H = 48;
-const WINDOW_24H_MS = 24 * 60 * 60 * 1000;
+// The recent strip mirrors the 90-day strip bar-for-bar: 90 slots of 10 minutes
+// each (a 900-minute / 15-hour window) — one slot per probe interval — so the two
+// strips line up and fill the same width.
+const RECENT_SLOTS = 90;
+const RECENT_SLOT_MS = 10 * 60 * 1000;
+const RECENT_WINDOW_MS = RECENT_SLOTS * RECENT_SLOT_MS;
 
 interface Slot {
   total: number;
@@ -80,9 +84,10 @@ interface Slot {
 function ProviderCard({ p, generatedAt }: { p: MonitorProvider; generatedAt: string }) {
   const meta = STATUS_META[p.operational] ?? STATUS_META.unknown;
   const Icon = meta.Icon;
-  const slots = bucket24h(p.timeline_24h, generatedAt);
-  const has24h = p.timeline_24h.length > 0;
-  const uptime24h = uptimePctSamples(p.timeline_24h);
+  const slots = bucketRecent(p.timeline_24h, generatedAt);
+  const recentTotal = slots.reduce((n, s) => n + s.total, 0);
+  const recentOk = slots.reduce((n, s) => n + s.ok, 0);
+  const recentUptime = recentTotal === 0 ? 0 : (recentOk / recentTotal) * 100;
   return (
     <Card className="p-4 md:p-5 space-y-4">
       {/* header */}
@@ -121,14 +126,14 @@ function ProviderCard({ p, generatedAt }: { p: MonitorProvider; generatedAt: str
         </div>
       </div>
 
-      {/* 24h strip — same statuspage format as the 90-day strip, bucketed into
-          fixed 30-min slots so it reads identically (empty slots show muted). */}
+      {/* recent strip — 90 × 10-min slots (900-min window), aligned bar-for-bar
+          with the 90-day strip above. */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>24h ago</span>
+          <span>15h ago</span>
           <span className="font-medium text-foreground">
-            {has24h
-              ? `${uptime24h.toFixed(2)}% uptime`
+            {recentTotal > 0
+              ? `${recentUptime.toFixed(2)}% uptime`
               : p.probe_enabled
                 ? "awaiting first probe"
                 : "active probing disabled"}
@@ -162,34 +167,27 @@ function dayTip(d: MonitorDay): string {
   return `${d.date} · ${pct}% (${d.ok}/${d.total})`;
 }
 
-// bucket24h spreads raw probe samples across SLOTS_24H fixed time slots ending
-// at `generatedAt` (server clock), so the 24h strip renders as a dense
-// fixed-width grid exactly like the 90-day day-buckets.
-function bucket24h(samples: MonitorSample[], generatedAt: string): Slot[] {
+// bucketRecent spreads raw probe samples across RECENT_SLOTS fixed 10-min slots
+// ending at `generatedAt` (server clock) — 90 slots × 10 min = a 900-min window,
+// so the strip lines up bar-for-bar with the 90-day day-buckets.
+function bucketRecent(samples: MonitorSample[], generatedAt: string): Slot[] {
   const now = generatedAt ? new Date(generatedAt).getTime() : Date.now();
-  const start = now - WINDOW_24H_MS;
-  const slotMs = WINDOW_24H_MS / SLOTS_24H;
-  const slots: Slot[] = Array.from({ length: SLOTS_24H }, (_, i) => ({
+  const start = now - RECENT_WINDOW_MS;
+  const slots: Slot[] = Array.from({ length: RECENT_SLOTS }, (_, i) => ({
     total: 0,
     ok: 0,
-    from: start + i * slotMs,
+    from: start + i * RECENT_SLOT_MS,
   }));
   for (const s of samples) {
     const t = new Date(s.ts).getTime();
     if (Number.isNaN(t) || t < start || t > now) continue;
-    let idx = Math.floor((t - start) / slotMs);
+    let idx = Math.floor((t - start) / RECENT_SLOT_MS);
     if (idx < 0) idx = 0;
-    if (idx >= SLOTS_24H) idx = SLOTS_24H - 1;
+    if (idx >= RECENT_SLOTS) idx = RECENT_SLOTS - 1;
     slots[idx].total++;
     if (s.ok) slots[idx].ok++;
   }
   return slots;
-}
-
-function uptimePctSamples(samples: MonitorSample[]): number {
-  if (samples.length === 0) return 0;
-  const ok = samples.filter((s) => s.ok).length;
-  return (ok / samples.length) * 100;
 }
 
 function slotTip(s: Slot): string {
