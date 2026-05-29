@@ -127,7 +127,7 @@ api_keys:
   #   proxy_url: ""
   #   base_url: ""          # override upstream host (third-party relays)
   #   group: ""             # public; or e.g. "premium" to scope this key
-  #   model_map: {}         # non-empty turns this key model-restricted
+  #   model_map: {}         # rewrite-only table; unlisted models pass through
   #
   # — OpenAI BYOK key used by the Codex endpoint. Routed to
   #   {base_url}/v1/chat/completions or /v1/responses.
@@ -138,18 +138,20 @@ api_keys:
   #   base_url: ""
   #
   # — Third-party Claude relay with a custom base URL + model name rewrite.
-  #   model_map both routes (key only accepts listed client-facing model
-  #   names) and rewrites the request body's `model` field before
-  #   forwarding. Empty value = accept the model name without rewriting.
+  #   model_map is a pure REWRITE table — it does NOT filter. Listed models
+  #   with a non-empty value get their request-body `model` field rewritten
+  #   before forwarding; any model not listed (or mapped to "") passes
+  #   through unchanged, so you only list the names you actually need to fix.
+  #   Example: a relay that registered haiku under the undated name but
+  #   receives Claude Code's dated name — map just that one entry.
   # - key: "sk-relayvendor-xxx"
   #   provider: anthropic
   #   label: "relay-A"
-  #   base_url: "https://az.zlapi.pro"
+  #   base_url: "https://ai.vllmproxy.com"
   #   group: ""
   #   model_map:
-  #     claude-opus-4-6:    "[0.16]稳定喵/claude-opus-4-6"
-  #     claude-sonnet-4-6:  "[0.1]高质量喵/claude-sonnet-4-6"
-  #     claude-haiku-4-5:   "[aws按量]cf逆/claude-haiku-4-5-20251001"
+  #     claude-haiku-4-5-20251001: "claude-haiku-4-5"   # only this is rewritten
+  #     # opus/sonnet not listed → forwarded as-is
 
 
 # ---- SaaS billing (per-token wallet + Z-Pay top-ups) -----------------------
