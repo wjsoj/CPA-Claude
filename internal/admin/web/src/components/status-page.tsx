@@ -17,6 +17,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { StatusDashboardPanel } from "./status-dashboard-panel";
+import { StatusMonitorPanel } from "./status-monitor-panel";
 import { WalletPanel } from "./wallet-panel";
 import {
   loadStatusDashboard,
@@ -346,7 +347,8 @@ export function StatusPage() {
         </nav>
 
         {tab === "dashboard" && (
-          <div className="stagger pt-2 md:pt-4">
+          <div className="stagger pt-2 md:pt-4 space-y-6">
+            <StatusMonitorPanel refreshTick={refreshTick} />
             <StatusDashboardPanel refreshTick={refreshTick} />
           </div>
         )}

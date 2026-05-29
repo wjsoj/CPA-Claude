@@ -182,3 +182,29 @@ saas:
   exchange:
     refresh_interval_min: 60
     fallback_cny_per_usd: 7.2
+
+
+# ---- Public uptime monitor (shown on /status/ dashboard) -------------------
+#
+# Drives the "Service status" widget at the top of the public dashboard. Keeps
+# ONE logical health record per provider (Claude, OpenAI) — it does not split
+# OAuth vs API-key. Two signals are combined:
+#
+#   * Passive (always on, zero cost): reads the live credential pool to report
+#     whether each provider has a free slot right now and how many credentials
+#     are healthy. This drives the status badge even with probing off.
+#   * Active (every interval_minutes): sends ONE minimal request (max_tokens=1)
+#     through this server's own local endpoint using client_token, confirming a
+#     real slot can serve a real model end-to-end. Recorded as the uptime
+#     timeseries (90-day daily rollup + 24h timeline), persisted to monitor.json.
+#
+# Active probing needs a valid client_token. Use a dedicated, low/zero-cost
+# token. Leave client_token empty (or enabled:false) to run passive-only — the
+# badge still reflects pool capacity, but the uptime history shows "no data".
+monitor:
+  enabled: false
+  interval_minutes: 10
+  client_token: ""              # a real client token; required for active probing
+  claude_model: claude-haiku-4-5   # cheapest model that real traffic uses
+  openai_model: gpt-5.3-codex      # must match a model your Codex creds serve
+  # state_file: monitor.json    # probe history (default: <config-dir>/monitor.json)

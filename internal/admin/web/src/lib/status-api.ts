@@ -158,6 +158,48 @@ export function loadStatusDashboard(): Promise<StatusDashboardResp> {
   return fetchJSON<StatusDashboardResp>("/status/api/dashboard");
 }
 
+// ---- uptime monitor (shape matches internal/monitor.Snapshot) ----
+
+export interface MonitorSample {
+  ts: string;
+  ok: boolean;
+  status: number;
+  latency_ms: number;
+  err?: string;
+}
+
+export interface MonitorDay {
+  date: string;
+  total: number;
+  ok: number;
+}
+
+export type MonitorStatus = "operational" | "degraded" | "down" | "unknown";
+
+export interface MonitorProvider {
+  name: string; // "Claude" | "OpenAI"
+  provider: string; // "anthropic" | "openai"
+  operational: MonitorStatus;
+  slot_available: boolean;
+  healthy_creds: number;
+  total_creds: number;
+  probe_enabled: boolean;
+  last_probe?: MonitorSample;
+  uptime_90d: MonitorDay[];
+  uptime_90d_pct: number;
+  timeline_24h: MonitorSample[];
+}
+
+export interface MonitorResp {
+  generated_at: string;
+  interval_minutes: number;
+  providers: MonitorProvider[];
+}
+
+export function loadStatusMonitor(): Promise<MonitorResp> {
+  return fetchJSON<MonitorResp>("/status/api/monitor");
+}
+
 export function queryStatusTokens(
   tokens: string[],
 ): Promise<{ results: StatusTokenResult[] }> {

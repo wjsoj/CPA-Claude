@@ -14,6 +14,7 @@ import (
 
 	"github.com/wjsoj/CPA-Claude/internal/admin"
 	"github.com/wjsoj/CPA-Claude/internal/config"
+	"github.com/wjsoj/CPA-Claude/internal/monitor"
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/cc-core/auth"
@@ -72,6 +73,11 @@ type Server struct {
 	invoice *billing.InvoiceHandler
 	inbox   *billing.InboxHandler
 	saasDB  *saasdb.DB
+	// monitor powers the public /status/ uptime widget: passive pool-capacity
+	// signal + low-frequency end-to-end self-probe per provider. monitorCancel
+	// stops its probe loop on Shutdown.
+	monitor       *monitor.Monitor
+	monitorCancel context.CancelFunc
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -131,6 +137,37 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	if reqLog != nil {
 		adminH.WithRequestLog(reqLog)
 	}
+
+	// Public uptime monitor. One probe target per enabled provider endpoint —
+	// no OAuth/API-key split. Built before the engines so the admin handler
+	// has the reference when it registers /status routes, started here so the
+	// probe loop survives until Shutdown cancels it.
+	var monTargets []monitor.EndpointTarget
+	if cfg.Endpoints.Claude.IsEnabled() {
+		monTargets = append(monTargets, monitor.EndpointTarget{
+			Provider: auth.ProviderAnthropic,
+			Port:     cfg.Endpoints.Claude.Port,
+			Model:    cfg.Monitor.ClaudeModel,
+		})
+	}
+	if cfg.Endpoints.Codex.IsEnabled() {
+		monTargets = append(monTargets, monitor.EndpointTarget{
+			Provider: auth.ProviderOpenAI,
+			Port:     cfg.Endpoints.Codex.Port,
+			Model:    cfg.Monitor.OpenAIModel,
+		})
+	}
+	s.monitor = monitor.New(monitor.Config{
+		Enabled:     cfg.Monitor.Enabled,
+		Interval:    time.Duration(cfg.Monitor.IntervalMinutes) * time.Minute,
+		ClientToken: cfg.Monitor.ClientToken,
+		StateFile:   cfg.Monitor.StateFile,
+		Targets:     monTargets,
+	}, pool)
+	adminH.WithMonitor(s.monitor)
+	monCtx, monCancel := context.WithCancel(context.Background())
+	s.monitorCancel = monCancel
+	s.monitor.Start(monCtx)
 
 	if cfg.Endpoints.Claude.IsEnabled() {
 		eng := s.buildClaudeEngine(adminH, primary == "claude")
@@ -228,6 +265,9 @@ func (s *Server) Start() error {
 // Shutdown gracefully stops every endpoint in parallel.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.sidecar.Stop()
+	if s.monitorCancel != nil {
+		s.monitorCancel()
+	}
 	var wg sync.WaitGroup
 	errs := make([]error, len(s.endpoints))
 	for i, ep := range s.endpoints {

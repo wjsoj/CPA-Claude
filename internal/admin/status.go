@@ -39,10 +39,23 @@ func (h *Handler) RegisterStatus(r *gin.Engine) {
 		serveAsset(c, sub, "assets/"+p)
 	})
 	r.GET("/status/api/overview", h.handleStatusOverview)
+	r.GET("/status/api/monitor", h.handleStatusMonitor)
 	r.GET("/status/api/dashboard", h.handleStatusDashboard)
 	r.POST("/status/api/query", h.handleStatusQuery)
 	r.POST("/status/api/history", h.handleStatusHistory)
 	log.Info("admin: public /status/ page enabled")
+}
+
+// handleStatusMonitor serves the public uptime widget: per-provider live
+// capacity (free slot? healthy creds?) merged with the persisted end-to-end
+// probe history (90-day daily rollups + 24h timeline). No secrets are exposed
+// — only provider name, aggregate health counts, and probe latency/status.
+func (h *Handler) handleStatusMonitor(c *gin.Context) {
+	if h.mon == nil {
+		c.JSON(http.StatusOK, gin.H{"providers": []any{}})
+		return
+	}
+	c.JSON(http.StatusOK, h.mon.GetSnapshot())
 }
 
 // Pseudonyms used to anonymize client-token identities on the public

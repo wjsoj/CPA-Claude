@@ -116,6 +116,47 @@ type Config struct {
 	// SaaS.Enabled is false the proxy runs in legacy "no billing" mode:
 	// requests bypass the balance check and no wallet rows are touched.
 	SaaS SaaSConfig `yaml:"saas"`
+
+	// Monitor — public uptime/availability monitoring shown on /status/.
+	Monitor MonitorConfig `yaml:"monitor"`
+}
+
+// MonitorConfig configures the public status-page uptime monitor. The monitor
+// keeps one logical probe per provider (Claude, OpenAI) — it does not split
+// OAuth vs API-key. Two signals are combined:
+//
+//   - Passive (always on, zero cost): reads the live credential pool to report
+//     whether the provider currently has a free slot and how many credentials
+//     are healthy.
+//   - Active (every IntervalMinutes): sends one minimal request through this
+//     server's own local endpoint using ClientToken, confirming a real slot
+//     can serve a real model. Recorded as the uptime timeseries.
+//
+// Active probing is skipped for a provider when its model is empty or no
+// ClientToken is configured; the passive signal still drives the status badge.
+type MonitorConfig struct {
+	// Enabled toggles the whole subsystem. When false, /status/api/monitor
+	// still responds but reports passive pool state only with no history.
+	Enabled bool `yaml:"enabled"`
+
+	// IntervalMinutes is the active-probe cadence. Default 10.
+	IntervalMinutes int `yaml:"interval_minutes,omitempty"`
+
+	// ClientToken is a valid client token used to authenticate the self-probe
+	// against the local proxy. Required for active probing. Use a dedicated,
+	// low/zero-cost token. When empty, active probing is disabled.
+	ClientToken string `yaml:"client_token,omitempty"`
+
+	// ClaudeModel / OpenAIModel are the models the active probe requests on
+	// each endpoint. Pick the cheapest model that real traffic uses. Empty
+	// disables active probing for that provider. Defaults: claude-haiku-4-5
+	// and gpt-5.3-codex.
+	ClaudeModel string `yaml:"claude_model,omitempty"`
+	OpenAIModel string `yaml:"openai_model,omitempty"`
+
+	// StateFile is where probe history is persisted (90-day daily rollups +
+	// recent 24h samples). Defaults to <config-dir>/monitor.json.
+	StateFile string `yaml:"state_file,omitempty"`
 }
 
 // SaaSConfig configures the per-token wallet + Z-Pay top-up subsystem.
@@ -293,6 +334,20 @@ func applyDefaults(c *Config, path string) {
 		// v2 (not v3) — v3 locks unauthenticated callers after a handful of
 		// queries per IP with errorCode 302004; v2 stays open. Same shape.
 		c.SaaS.Invoice.TitleSuggestURL = "https://capi.tianyancha.com/cloud-tempest/search/suggest/v2"
+	}
+	if c.Monitor.IntervalMinutes == 0 {
+		c.Monitor.IntervalMinutes = 10
+	}
+	if c.Monitor.ClaudeModel == "" {
+		c.Monitor.ClaudeModel = "claude-haiku-4-5"
+	}
+	if c.Monitor.OpenAIModel == "" {
+		c.Monitor.OpenAIModel = "gpt-5.3-codex"
+	}
+	if c.Monitor.StateFile == "" {
+		c.Monitor.StateFile = filepath.Join(dir, "monitor.json")
+	} else if !filepath.IsAbs(c.Monitor.StateFile) {
+		c.Monitor.StateFile = filepath.Join(dir, c.Monitor.StateFile)
 	}
 	p := strings.TrimSpace(c.AdminPath)
 	if p == "" {

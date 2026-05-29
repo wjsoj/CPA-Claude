@@ -26,6 +26,7 @@ import (
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/clienttoken"
 	"github.com/wjsoj/CPA-Claude/internal/config"
+	"github.com/wjsoj/CPA-Claude/internal/monitor"
 	"github.com/wjsoj/cc-core/pricing"
 	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
@@ -64,6 +65,10 @@ type Handler struct {
 	// reset can quiesce + rewrite the masked client_token in rotated files.
 	// nil when request logging is disabled.
 	reqLog *requestlog.Writer
+
+	// mon is the public uptime monitor. nil-safe: the /status/api/monitor
+	// handler returns an empty payload when unset.
+	mon *monitor.Monitor
 
 	// Cache for the full-history log scan backing lifetime totals.
 	// Scanning every rotated file on each summary refresh would be
@@ -119,6 +124,13 @@ func (h *Handler) WithInvoice(ia *InvoiceAdmin) *Handler {
 // historical client_token masks won't run.
 func (h *Handler) WithRequestLog(w *requestlog.Writer) *Handler {
 	h.reqLog = w
+	return h
+}
+
+// WithMonitor attaches the public uptime monitor. Optional; when nil the
+// /status/api/monitor endpoint reports an empty provider list.
+func (h *Handler) WithMonitor(m *monitor.Monitor) *Handler {
+	h.mon = m
 	return h
 }
 
