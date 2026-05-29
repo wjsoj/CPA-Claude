@@ -432,17 +432,25 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 
-		// Reactive signature-error recovery. A 400 "Invalid signature
-		// in thinking block" means the past assistant turns echoed in
-		// messages[] carry signatures bound to a different account
-		// than this credential. Causes include: switch detector miss
-		// (first-touch on a continuing conversation, server restart,
+		// Reactive signature-error recovery. An "Invalid signature in
+		// thinking block" rejection means the past assistant turns
+		// echoed in messages[] carry signatures bound to a different
+		// account than this credential. Causes include: switch detector
+		// miss (first-touch on a continuing conversation, server restart,
 		// 2h GC eviction), or signatures generated outside this proxy.
 		// One stateless rescue: drop the signed thinking blocks from
-		// the request and replay on the same credential. If it still
-		// fails, fall through to normal error handling.
+		// the request and replay on the same credential — equivalent to
+		// continuing the conversation as a fresh, signature-free session.
+		// If it still fails, fall through to normal error handling.
+		//
+		// Gated on the body matcher, NOT the status code: Anthropic
+		// returns this as 400, but relays/mid-stream vendors re-wrap it
+		// as 500/529. IsSignatureError requires the literal
+		// "signature"+"thinking" wording, so an unrelated 5xx won't trip
+		// it — the worst case is one wasted replay on a body we already
+		// know is hopeless.
 		recovered := false
-		if resp.StatusCode == 400 && path == "/v1/messages" && thinkingsig.IsSignatureError(errBody) {
+		if path == "/v1/messages" && thinkingsig.IsSignatureError(errBody) {
 			sanitized := thinkingsig.SanitizeForSwitch(body)
 			if !bytes.Equal(sanitized, body) {
 				retryUpstream := sanitized
@@ -452,7 +460,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 					}
 				}
 				retryUpstream = mimicry.ApplyClaudeCodeBodyMimicry(retryUpstream, model, id)
-				log.Warnf("proxy: %s returned 400 signature-in-thinking — sanitizing and retrying once on same credential", a.ID)
+				log.Warnf("proxy: %s returned %d signature-in-thinking — sanitizing and retrying once on same credential", a.ID, resp.StatusCode)
 				if retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(retryUpstream)); rerr == nil {
 					copyForwardableHeaders(c.Request.Header, retryReq.Header)
 					stripIngressHeaders(retryReq.Header)
@@ -747,8 +755,11 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	// sees OUR credential (always the same relay key), so the proactive
 	// sanitize in doForward never fires for relay-internal rotation; this
 	// reactive replay is the only rescue on this path. Done before
-	// writeResponseHeaders so the client never sees the transient 400.
-	if resp.StatusCode == 400 && path == "/v1/messages" {
+	// writeResponseHeaders so the client never sees the transient error.
+	// Gated on >=400 (not just 400) because relays re-wrap Anthropic's
+	// signature 400 as 500/529; the IsSignatureError body match below is
+	// the real guard.
+	if resp.StatusCode >= 400 && path == "/v1/messages" {
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		recovered := false
@@ -760,7 +771,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 						retryUpstream = rewritten
 					}
 				}
-				log.Warnf("proxy(apikey): %s returned 400 signature-in-thinking — sanitizing and retrying once on same credential", a.ID)
+				log.Warnf("proxy(apikey): %s returned %d signature-in-thinking — sanitizing and retrying once on same credential", a.ID, resp.StatusCode)
 				if retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(retryUpstream)); rerr == nil {
 					copyForwardableHeaders(c.Request.Header, retryReq.Header)
 					stripIngressHeaders(retryReq.Header)
