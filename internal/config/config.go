@@ -109,7 +109,7 @@ type Config struct {
 	LogRetentionDays int `yaml:"log_retention_days,omitempty"`
 
 	// Pricing overrides (optional). Built-in defaults cover claude-haiku-4-5,
-	// claude-opus-4-6, and claude-sonnet-4-6.
+	// claude-opus-4-6, claude-opus-4-7, claude-opus-4-8, and claude-sonnet-4-6.
 	Pricing pricing.Config `yaml:"pricing"`
 
 	// SaaS billing — per-token wallet, pricing groups, Z-Pay top-ups. When
