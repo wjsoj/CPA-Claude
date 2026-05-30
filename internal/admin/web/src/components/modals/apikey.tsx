@@ -149,9 +149,10 @@ export function APIKeyModal({ provider, onClose, onSaved }: Props) {
             onChange={(e) => setModelMapText(e.currentTarget.value)}
           />
           <p className="text-xs text-muted-foreground">
-            One <span className="mono">client_model = upstream_model</span> per line. When
-            non-empty, this key only serves listed client models, and the request body's{" "}
-            <span className="mono">model</span> is rewritten before forwarding.
+            One <span className="mono">client_model = upstream_model</span> per line. Rewrite-only:
+            a listed model has its request body <span className="mono">model</span> rewritten to the
+            upstream name before forwarding; models not listed (or with the right side blank) pass
+            through to the provider unchanged — it does not restrict which models the key serves.
           </p>
         </div>
         {err && <div className="text-sm text-destructive">{err}</div>}

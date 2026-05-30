@@ -107,10 +107,11 @@ export function EditAuthModal({ auth, onClose, onSaved }: Props) {
                   onChange={(e) => setModelMapText(e.currentTarget.value)}
                 />
                 <p className="text-xs text-muted-foreground">
-                  One <span className="mono">client_model = upstream_model</span> per line. When non-empty,
-                  this key only serves listed client models, and the request body's{" "}
-                  <span className="mono">model</span> is rewritten before forwarding. Leave the right side
-                  blank to accept the model without rewriting.
+                  One <span className="mono">client_model = upstream_model</span> per line. Rewrite-only:
+                  a listed model has its request body{" "}
+                  <span className="mono">model</span> rewritten to the upstream name before forwarding.
+                  Models not listed (or with the right side blank) pass through to the provider
+                  unchanged — this does not restrict which models the key serves.
                 </p>
               </div>
             </>
