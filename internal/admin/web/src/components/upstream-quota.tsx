@@ -276,7 +276,11 @@ function codexCountdown(ts?: number): string {
 }
 
 function pctTone(raw: number | undefined): { pct: number | null; color: string } {
-  const pct = typeof raw === "number" ? Math.round(raw <= 1 ? raw * 100 : raw) : null;
+  // wham/usage `used_percent` is ALREADY a 0–100 percentage (e.g. 1 = 1%),
+  // unlike Anthropic's 0–1 `utilization`. Do NOT apply the "<=1 ? *100"
+  // fraction heuristic here — it turned a real 1% into 100% and made the
+  // 5h window read as fully exhausted when it wasn't.
+  const pct = typeof raw === "number" ? Math.round(Math.max(0, Math.min(100, raw))) : null;
   const color =
     pct == null
       ? "bg-slate-400"
