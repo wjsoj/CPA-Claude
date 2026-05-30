@@ -14,7 +14,7 @@ from collections import OrderedDict
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRACK_ROOT = os.path.dirname(HERE)
 
-MODE = sys.argv[1] if len(sys.argv) > 1 else 'oauth'
+MODE = sys.argv[1] if len(sys.argv) > 1 else 'kiro'
 # 多数 mode 都是 crack/<mode>/{rows,docs}，但 kiro-login 是 kiro 的子流程，落在 crack/kiro/login/{rows,docs}
 if MODE == 'kiro-login':
     ROWS_DIR = os.path.join(CRACK_ROOT, 'kiro', 'login', 'rows')

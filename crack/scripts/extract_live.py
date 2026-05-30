@@ -11,7 +11,7 @@ descriptions, and identity values with `<redacted …>` placeholders.
 Usage:
     python3 crack/scripts/extract_live.py /path/to/whistle-dump.json [outdir]
 
-Default outdir = crack/cc2156/rows/. The source dump is NOT copied or committed.
+Default outdir = crack/claude/rows/. The source dump is NOT copied or committed.
 """
 import json, base64, gzip, subprocess, sys, os, collections
 
@@ -133,7 +133,7 @@ def main():
     if len(sys.argv) < 2:
         sys.exit("usage: extract_live.py <whistle-dump.json> [outdir]")
     src = json.load(open(sys.argv[1]))
-    out_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(CRACK_ROOT, "cc2156", "rows")
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(CRACK_ROOT, "claude", "rows")
     os.makedirs(out_dir, exist_ok=True)
     sessions = src["data"]["data"]
 

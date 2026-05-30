@@ -1,137 +1,44 @@
-# CPA-Claude 抓包档案
+# crack/ — capture archive
 
-本目录收集 CPA-Claude 关注的所有第三方 CLI 客户端的网络流量抓包。**按客户端 / 鉴权姿势分目录**，互不交叉：
-
-## 顶层分支
-
-### A. Anthropic Claude Code（`oauth/` `apikey/` `login/`）
-
-`claude-cli/2.1.126` 在 Linux + bun + Node v24.3.0 下，从**进程启动**到**首条用户消息发出**的全部网络流量，对比两种鉴权姿势：
-
-- **OAuth 官方订阅**（`Bearer sk-ant-oat01-...` → `api.anthropic.com`）
-- **三方 API Key**（`Bearer sk-REDACTED...` → `www.fucheers.top` 网关）
-
-并配套捕获了完整的 **PKCE 登录链路**（`login/`，12 条请求，覆盖 `claude.com/cai/oauth/authorize` → `platform.claude.com/v1/oauth/token`）。
-
-### B. Kiro CLI / Amazon Q for CLI（`kiro/`）
-
-`kiro-cli 2.4.1`（Rust + `aws-sdk-rust/1.3.16`）一次完整会话（11 个对话 turn），上游是 AWS Cognito + CodeWhisperer + Amazon Toolkit Telemetry，协议是 **AWS Smithy + event-stream**，**与 Anthropic Claude Code 是完全不同的产品**，所以独立成目录、不放进 COMPARE.md。
-
-详见 [`kiro/README.md`](kiro/README.md)。
-
-## 目录
+Recorded real-client traffic used as ground truth for the fingerprint constants
+in the codebase. Organized by upstream client; only the **latest** capture per
+client is kept (older versions live in git history).
 
 ```
 crack/
-├── README.md          ← 本文件（顶层入口，分支 A/B）
-├── COMPARE.md         ← (A) OAuth vs ApiKey 全方位对比 ★ Anthropic 专属
-├── scripts/           ← 所有处理脚本（split / gen / sanitize），见 scripts/README.md
-├── raw/               ← Whistle 原始 dump
-│   ├── oauth-dump-full.json
-│   ├── oauth-session-full.json
-│   ├── apikey-dump-full.json
-│   ├── apikey-session-full.json
-│   └── kiro-session-full.json        ← (B) Kiro 原始 dump
-│
-├── (A) Anthropic Claude Code ─────────────────
-├── oauth/             ← OAuth 模式（32 条请求）
-│   ├── docs/          ← 32 个独立 markdown
-│   └── rows/          ← 32 个 JSON 原文（已 gunzip/brotli 解码）
-├── apikey/            ← ApiKey 模式（26 条请求）
-│   ├── docs/          ← 26 个独立 markdown
-│   └── rows/          ← 26 个 JSON 原文
-├── login/             ← OAuth PKCE 登录链路（12 条请求 + 自带 raw/）
-│   ├── README.md      ← PKCE 流程总览
-│   ├── docs/
-│   ├── rows/
-│   └── raw/
-├── advisor/           ← `advisor-tool-2026-03-01` 两段真实 sub-call wire 样本
-│
-├── (B) Kiro CLI / Amazon Q ──────────────────
-├── kiro/              ← Kiro 抓包（48 条业务请求 + 14 条登录/登出流）
-│   ├── README.md      ← 4 host / 双轨鉴权 / 时序总览 ★ 入口
-│   ├── docs/          ← 48 个独立 markdown (业务流)
-│   ├── rows/          ← 48 个 JSON 原文 (业务流)
-│   └── login/         ← Login / Logout PKCE 子档案 (14 条)
-│       ├── README.md  ← 三端点对比 + 与 Anthropic login 对比 ★
-│       ├── raw/kiro-login-session-full.json
-│       ├── rows/      ← 14 个 JSON
-│       └── docs/      ← 14 个 markdown
-│
-└── .archive/          ← 旧的单文档汇总（已废弃）
+  claude/   Claude Code (claude-cli) — current target 2.1.156. SPEC.md is the
+            source of truth; rows/ are structurally-redacted representative
+            requests (no conversation prose). Produced by scripts/extract_live.py.
+  kiro/     Kiro / Amazon-Q CLI capture — rows/ + docs/ + raw/, plus login/ for
+            the Cognito PKCE login flow. Produced by scripts/split.py + gen.py.
+  scripts/  Tooling (see scripts/README.md).
+  (codex/   ChatGPT/Codex CLI — to be added.)
 ```
 
-## 脱敏说明
+## Why claude/ has no raw dump
 
-发布到公开仓库前，下列字段已在所有 raw / rows / docs / md 文件中**统一替换为占位符**，可放心阅读和重新生成：
+`crack/claude/` keeps only redacted `rows/` because a live Claude Code session
+capture contains private conversation content. `scripts/extract_live.py` walks
+each body and keeps only the fingerprint-bearing **structure** (keys, block
+types, `cache_control`, versions, betas, env, metadata shape), replacing prose /
+code / identity values with `<redacted …>` placeholders. The raw whistle dump is
+never committed. `crack/kiro/` keeps its raw dump (no private chat content) so it
+stays re-processable.
 
-| 原始字段 | 占位符 |
-|---|---|
-| OAuth Bearer (`sk-ant-oat01-...`) | `sk-ant-oat01-REDACTED` |
-| 三方 API Key (`sk-...`) | `sk-REDACTED` |
-| 邮箱 | `redacted@example.com` |
-| account_uuid | `00000000-0000-0000-0000-000000000001` |
-| organization_uuid | `00000000-0000-0000-0000-000000000002` |
-| device_id (64-hex) | 64 个 0 |
-| 主机用户名 / 路径 | `wjs` → `user`, `/home/wjs/` → `/home/user/` |
-| LAN IP | `10.3.31.133` / `10.129.81.88` → `10.0.0.10` / `10.0.0.20` |
-| Linux 内核 | `7.0.3-arch1-1` → `6.10.0-generic` |
-| Linux 发行版 | `arch` → `generic` |
-| 终端 | `konsole` → `xterm` |
+## Refresh flows
 
-公开协议字段保留原值，包括：Datadog client token (`pubea5604...` 是全球共享的公开收件密钥，与账号无关，参见 COMPARE.md)、GrowthBook SDK key (`zAZezfDKGoZuXXKe`，同样硬编码在 CC 二进制里)、所有 Anthropic / Datadog endpoint URL。
-
-## 共用上下文（两种模式都成立）
-
-- **同一台机器、同一个 device_id**：`0000000000000000000000000000000000000000000000000000000000000000`（machine-id 的 SHA-256）
-- **OAuth Bearer**：`sk-ant-oat01-REDACTED`（仅 OAuth 模式 + apikey 模式打 anthropic.com 时复用）
-- **三方 ApiKey**：`sk-REDACTED`（仅 apikey 模式打 `www.fucheers.top`）
-- **Datadog Public Intake Key**：`pubea5604404508cdd34afb69e6f42a05bc`（公钥写死客户端，两模式共用）
-- **Anthropic 账户**：`redacted@example.com` / account `00000000-0000-0000-0000-000000000001` / org `00000000-0000-0000-0000-000000000002`（subscription `max`，rateLimit `default_claude_max_20x`）
-
-## 推荐阅读顺序
-
-1. **先看 [COMPARE.md](COMPARE.md)** —— 直接对比两种模式各维度差异。
-2. **看 OAuth 端最关键的两条**：
-   - [oauth/docs/06](oauth/docs/06-POST-api.anthropic.com_v1_messages.md) — 额度探测，理解 `/v1/messages` 最简形态 + ratelimit 响应头
-   - [oauth/docs/17](oauth/docs/17-POST-api.anthropic.com_v1_messages.md) — 首条业务消息，理解完整请求体结构
-3. **看 ApiKey 端最关键的三条**：
-   - [apikey/docs/03](apikey/docs/03-GET-www.fucheers.top_v1_models.md) — 三方独有的 `/v1/models` 模型列表端点
-   - [apikey/docs/14](apikey/docs/14-POST-www.fucheers.top_v1_messages.md) — 首条业务消息，对比 OAuth 模式的削减
-   - [apikey/docs/11](apikey/docs/11-POST-api.anthropic.com_api_event_logging_v2_batch.md) — 匿名 telemetry 与 OAuth 的差异
-4. **看分模式索引**：
-   - [oauth/](oauth/) 下的所有 docs（按 idx 顺序）
-   - [apikey/](apikey/) 下的所有 docs
-
-## 重新生成
-
-所有处理脚本都在 [`scripts/`](scripts/README.md)。脚本路径自锚定，cwd 无关：
+Claude (from a fresh whistle dump, not committed):
 
 ```bash
-python3 crack/scripts/split.py oauth      # raw/oauth-session-full.json → oauth/rows/
-python3 crack/scripts/split.py apikey     # raw/apikey-session-full.json → apikey/rows/
-python3 crack/scripts/split.py login      # login/raw/login-session-full.json → login/rows/
-python3 crack/scripts/split.py kiro       # raw/kiro-session-full.json → kiro/rows/  (Kiro/Amazon-Q 业务流)
-python3 crack/scripts/split.py kiro-login # kiro/login/raw/kiro-login-session-full.json → kiro/login/rows/  (Kiro 登录/登出 PKCE)
-python3 crack/scripts/sanitize.py         # 跨 crack/ 全量脱敏（幂等）
-python3 crack/scripts/gen.py oauth        # oauth/rows/ → oauth/docs/
-python3 crack/scripts/gen.py apikey       # apikey/rows/ → apikey/docs/
-python3 crack/scripts/gen.py login        # login/rows/ → login/docs/
-python3 crack/scripts/gen.py kiro         # kiro/rows/ → kiro/docs/  (Kiro/Amazon-Q 业务流)
-python3 crack/scripts/gen.py kiro-login   # kiro/login/rows/ → kiro/login/docs/  (Kiro 登录/登出)
+python3 crack/scripts/extract_live.py /path/to/whistle-dump.json   # → crack/claude/rows/
+# then update crack/claude/SPEC.md to match the new version
 ```
 
-修改 `scripts/gen.py` 里的 `NOTES_BY_MODE['<mode>']` / `EXTRA_BY_MODE['<mode>']` 可调整每条 markdown 的注释和"字段深挖"附录。
+Kiro:
 
-## 几个关键发现（提炼自 COMPARE.md）
-
-1. **OAuth 凭据残留泄漏**：apikey 模式下，所有走 `api.anthropic.com` 的非 telemetry 端点（bootstrap/penguin/mcp_servers/...）**仍然带本地残留的 OAuth Bearer**，CLI 没做隔离。
-2. **device_id 跨模式不变**：machine-id sha256 在两种模式下完全一致 → Anthropic 可以把"匿名 apikey 用户"和已知 OAuth 账户关联到同一设备。
-3. **业务上游切换**：OAuth → `api.anthropic.com (cloudflare)`；ApiKey → `www.fucheers.top (openresty + new-api 网关特征)`。
-4. **anthropic-beta 三个差集**：apikey 模式少 `oauth-2025-04-20` / `advanced-tool-use-2025-11-20` / `cache-diagnosis-2026-04-07`。
-5. **工具列表 8 vs 34**：OAuth 走 `ToolSearch` 延迟加载，apikey 全展开（请求体大 4 倍）。
-6. **Cache 配置降级**：OAuth 用 `ephemeral 1h scope=global` 双层缓存（首次命中 45410/47081 token）；apikey 用默认 5min 单层（首次完全 miss，全量 37438 token 计费）+ 三方网关不透传缓存元数据。
-7. **额度探测仅 OAuth 有**：apikey 模式没有 `POST /v1/messages` 的 quota probe（Haiku 单字 "quota"）。
-8. **GrowthBook + claude.ai 偏好 + grove 仅 OAuth 有**：apikey 模式跳过这 3 条 bootstrap 请求。
-9. **新增 `/v1/models?limit=1000`**：apikey 模式独有，三方网关返回 OpenAI 风格的模型清单。
-10. **Telemetry 匿名化但仍可识别**：apikey 模式 telemetry 不带 email/account/org/auth，但 device_id 仍在 → 设备级关联仍然成立。
+```bash
+# drop the dump at crack/kiro/raw/kiro-session-full.json (or kiro/login/raw/…)
+python3 crack/scripts/split.py kiro          # raw → rows
+python3 crack/scripts/sanitize.py            # in-place redact tokens / IDs
+python3 crack/scripts/gen.py kiro            # rows → docs
+```

@@ -71,7 +71,7 @@ The `advisor-tool-2026-03-01` beta lets Anthropic run a stronger model (typicall
 
 `subUsage.replaceFrom` overwrites (not appends) on every observation because SSE emits cumulative iterations. `recordSubUsage` charges the sub-model tokens to the same auth that handled the parent, looks up pricing under the sub-model's own name, and emits a separate requestlog row per sub-model so the admin panel breaks orchestrator vs advisor cost apart. Parent request count (`Requests +1`) is unchanged — one `/v1/messages` is still one request regardless of how many sub-models ran.
 
-In real captures advisor sub-calls always run cache-cold (cache_read/cache_create = 0); the four-counter parsing is kept in case Anthropic enables advisor caching later. Ground truth in `crack/advisor/`.
+In real captures advisor sub-calls always run cache-cold (cache_read/cache_create = 0); the four-counter parsing is kept in case Anthropic enables advisor caching later. (The original `advisor-tool-2026-03-01` round-trip capture lives in git history under the old `crack/advisor/`.)
 
 ### Sidecar (auxiliary traffic emulation) — `internal/server/sidecar.go`
 
@@ -102,16 +102,14 @@ Both paths produce the same `auth.Auth` and go through `Pool.AddOAuth`. If you c
 
 ### Capture archive — `crack/`
 
-Contains complete recorded sessions of real Claude Code traffic, used as ground truth for every fingerprint constant in the codebase. The current target is **2.1.156** — see `crack/cc2156/SPEC.md` for the authoritative constant list and the 2.1.146→2.1.156 diff.
+Recorded real-client traffic, ground truth for every fingerprint constant. Organized **by client**, keeping only the latest capture each (older versions are in git history). See `crack/README.md`.
 
-- `crack/cc2156/` — latest live-session capture (2.1.156). `SPEC.md` is the source of truth; `rows/` holds structurally-redacted representative requests produced by `crack/scripts/extract_live.py` (this mode keeps only fingerprint structure, not conversation prose — see `crack/cc2156/README.md`).
-- `crack/raw/<mode>-session-full.json` and `crack/login/raw/login-session-full.json` — original Whistle dumps.
-- `crack/oauth/`, `crack/apikey/`, `crack/login/` — three parallel modes; each has `rows/` (per-request decoded JSON) and `docs/` (per-request markdown write-ups). `crack/login/` covers the OAuth PKCE login flow specifically (12 requests).
-- `crack/COMPARE.md` — OAuth-vs-APIkey diff. `crack/login/README.md` — PKCE flow + CPA alignment table.
-- `crack/advisor/` — two real `advisor-tool-2026-03-01` round-trips with verbatim `iterations[]` wire shape. Ground truth for the `subUsage` parser and the `"advisor_message"` type-string literal.
-- `crack/scripts/{split,sanitize,gen}.py` — all helper scripts live here, separate from data. `split.py <mode>` decodes raw dumps into per-row JSON, `sanitize.py` does idempotent in-place redaction across the whole tree, `gen.py <mode>` re-renders markdown docs from rows. See `crack/scripts/README.md`.
+- `crack/claude/` — latest Claude Code live-session capture. Current target **2.1.156**; `SPEC.md` is the authoritative constant list + the 2.1.146→2.1.156 diff, `rows/` holds structurally-redacted representative requests (fingerprint structure only, no conversation prose) produced by `crack/scripts/extract_live.py`. No raw dump committed (live sessions carry private content).
+- `crack/kiro/` — Kiro / Amazon-Q CLI capture: `raw/` + `rows/` + `docs/`, plus `login/` for the Cognito PKCE flow. Produced by `crack/scripts/split.py` + `gen.py`.
+- `crack/codex/` — ChatGPT/Codex CLI capture, to be added.
+- `crack/scripts/` — tooling: `extract_live.py` (Claude, structural redaction), `split.py kiro|kiro-login` + `gen.py` (Kiro), `sanitize.py` (idempotent in-place token/ID redaction; literal map in gitignored `redaction_map.json`). See `crack/scripts/README.md`.
 
-**When bumping the CC version target, re-capture and update `crack/` first**, then update fingerprint constants to match. Pipeline: `split.py → sanitize.py → gen.py → sanitize.py` (the trailing sanitize is critical — `gen.py` may reproduce raw values from rows into docs).
+**When bumping the CC version target, re-capture and update `crack/claude/` first** (`extract_live.py` → update `SPEC.md`), then update the fingerprint constants in cc-core to match.
 
 ## Conventions worth knowing
 

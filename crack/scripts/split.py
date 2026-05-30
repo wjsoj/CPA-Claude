@@ -1,47 +1,23 @@
 #!/usr/bin/env python3
-"""把 crack/raw/{mode}-session-full.json 解码并拆成 crack/{mode}/rows/NN-METHOD-host_path.json
+"""把 Kiro 抓包 raw dump 解码并拆成 crack/kiro/.../rows/NN-METHOD-host_path.json
 
 用法：
-    python3 crack/scripts/split.py oauth     # → crack/oauth/rows/
-    python3 crack/scripts/split.py apikey    # → crack/apikey/rows/
-    python3 crack/scripts/split.py login     # → crack/login/rows/，仅保留登录链路相关请求
-    python3 crack/scripts/split.py kiro      # → crack/kiro/rows/  (Kiro/Amazon-Q CLI capture)
-    python3 crack/scripts/split.py kiro-login # → crack/kiro/login/rows/  (Kiro login/logout PKCE 流程)
+    python3 crack/scripts/split.py kiro        # crack/kiro/raw/kiro-session-full.json → crack/kiro/rows/
+    python3 crack/scripts/split.py kiro-login  # crack/kiro/login/raw/...            → crack/kiro/login/rows/
 
-任何一个 mode 都从同一份脚本走，只在 login 模式开启额外的链路筛选。
+Claude 抓包走另一条链路（含会话私密内容），用 crack/scripts/extract_live.py 做
+结构化脱敏，落到 crack/claude/。这里只处理 Kiro/Amazon-Q 抓包。
 """
 import json, base64, os, gzip, subprocess, sys
 
-# 脚本固定锚定到 crack/ 根目录，跟工作目录无关
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRACK_ROOT = os.path.dirname(HERE)
 
-VALID_MODES = ('oauth', 'apikey', 'login', 'kiro', 'kiro-login')
+VALID_MODES = ('kiro', 'kiro-login')
 
-# kiro-login: start key is the FIRST request after the long gap that captures the login/logout sequence.
-# Empirically the new session opens with `Cognito GetId`, so we anchor on the URL = exact cognito host AND
-# require rowId >= a configurable cutoff. The cutoff lives in this file so re-captures need updating only here.
+# kiro-login: 登录/登出 session 从这个 rowId 之后开始（按时间戳前缀过滤）。
+# 重新抓包时只需更新这个常量。
 KIRO_LOGIN_START_ROWID = '1779611075530'
-
-# login 模式下保留的 host + path 前缀（其余视作业务/噪声）
-LOGIN_HOSTS = (
-    'api.anthropic.com',
-    'platform.claude.com',
-    'http-intake.logs.us5.datadoghq.com',
-)
-LOGIN_PATHS_HEAD = (
-    '/api/hello',
-    '/api/event_logging',
-    '/api/v2/logs',
-    '/v1/oauth/token',
-    '/api/oauth/profile',
-    '/api/oauth/claude_cli/roles',
-    '/api/eval/sdk-',
-    '/api/oauth/account/settings',
-    '/api/claude_code_grove',
-    '/api/claude_cli/bootstrap',
-    '/api/claude_code_penguin_mode',
-)
 
 
 def maybe_decompress(raw: bytes, enc: str) -> bytes:
@@ -76,44 +52,19 @@ def select_keys(mode: str, rows_all: dict) -> list:
     if mode == 'kiro-login':
         # 仅保留登录/登出 session 部分（按 rowId 时间戳前缀过滤）
         return [k for k in keys if k >= KIRO_LOGIN_START_ROWID]
-    if mode != 'login':
-        return keys
-    # login: 从最早的 /api/hello 开始，到第一条业务 /v1/messages 之前；中间只保留登录链路相关 url
-    start_key = next((k for k in keys if '/api/hello' in rows_all[k].get('url', '')), None)
-    if start_key is None:
-        sys.exit("未在 raw dump 里找到 /api/hello，无法确定登录起点")
-
-    def is_login_url(url: str) -> bool:
-        if not any(h in url for h in LOGIN_HOSTS):
-            return False
-        return any(p in url for p in LOGIN_PATHS_HEAD)
-
-    out = []
-    for k in keys:
-        if k < start_key:
-            continue
-        url = rows_all[k].get('url', '')
-        if '/v1/messages' in url and 'count_tokens' not in url:
-            break
-        if is_login_url(url):
-            out.append(k)
-    return out
+    return keys
 
 
 def main(mode: str) -> None:
     if mode not in VALID_MODES:
         sys.exit(f"unknown mode {mode!r}; expected one of {VALID_MODES}")
 
-    # oauth + apikey + kiro 共用 crack/raw/，其它每模式自带 raw/
-    if mode == 'login':
-        src_path = os.path.join(CRACK_ROOT, 'login', 'raw', 'login-session-full.json')
-        out_dir  = os.path.join(CRACK_ROOT, 'login', 'rows')
-    elif mode == 'kiro-login':
+    if mode == 'kiro-login':
         src_path = os.path.join(CRACK_ROOT, 'kiro', 'login', 'raw', 'kiro-login-session-full.json')
-        out_dir  = os.path.join(CRACK_ROOT, 'kiro', 'login', 'rows')
-    else:
-        src_path = os.path.join(CRACK_ROOT, 'raw', f'{mode}-session-full.json')
-        out_dir  = os.path.join(CRACK_ROOT, mode, 'rows')
+        out_dir = os.path.join(CRACK_ROOT, 'kiro', 'login', 'rows')
+    else:  # kiro
+        src_path = os.path.join(CRACK_ROOT, 'kiro', 'raw', 'kiro-session-full.json')
+        out_dir = os.path.join(CRACK_ROOT, 'kiro', 'rows')
     os.makedirs(out_dir, exist_ok=True)
 
     src = json.load(open(src_path))
@@ -155,5 +106,5 @@ def main(mode: str) -> None:
 
 
 if __name__ == '__main__':
-    mode = sys.argv[1] if len(sys.argv) > 1 else 'oauth'
+    mode = sys.argv[1] if len(sys.argv) > 1 else 'kiro'
     main(mode)
