@@ -280,12 +280,12 @@ func (m *Monitor) record(provider string, s Sample) {
 		d = &DayStat{Date: key}
 		st.Days[key] = d
 	}
-	// nodata probes don't move uptime — only real HTTP outcomes count.
-	if !s.noData() {
-		d.Total++
-		if s.OK {
-			d.OK++
-		}
+	// nodata probes (transport error / timeout — no HTTP response) are counted
+	// as healthy: the active probe couldn't measure, so we defer to the passive
+	// pool signal rather than showing a gap or a failure.
+	d.Total++
+	if s.OK || s.noData() {
+		d.OK++
 	}
 	m.pruneDaysLocked(st)
 

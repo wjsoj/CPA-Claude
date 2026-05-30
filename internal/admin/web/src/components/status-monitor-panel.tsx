@@ -181,15 +181,14 @@ function bucketRecent(samples: MonitorSample[], generatedAt: string): Slot[] {
   for (const s of samples) {
     const t = new Date(s.ts).getTime();
     if (Number.isNaN(t) || t < start || t > now) continue;
-    // "nodata" probes (transport error / timeout — no HTTP response, status 0)
-    // are treated as healthy/no-signal: skip them so they neither show red nor
-    // drag down uptime. The passive pool capacity stays the source of truth.
-    if (!s.ok && (s.status ?? 0) === 0) continue;
     let idx = Math.floor((t - start) / RECENT_SLOT_MS);
     if (idx < 0) idx = 0;
     if (idx >= RECENT_SLOTS) idx = RECENT_SLOTS - 1;
     slots[idx].total++;
-    if (s.ok) slots[idx].ok++;
+    // "nodata" probes (transport error / timeout — no HTTP response, status 0)
+    // count as healthy (green), not a gap: the active probe couldn't measure,
+    // so we defer to the passive pool signal. Only a real HTTP error degrades.
+    if (s.ok || (s.status ?? 0) === 0) slots[idx].ok++;
   }
   return slots;
 }

@@ -40,14 +40,12 @@ export function EditAuthModal({ auth, onClose, onSaved }: Props) {
     try {
       const body: Record<string, unknown> = { disabled, proxy_url: proxy, label, group };
       if (!isApiKey) body.max_concurrent = Number(maxC);
-      if (isApiKey) {
-        body.base_url = baseURL;
-        const parsed = textToModelMap(modelMapText);
-        if (parsed.errors.length > 0) {
-          throw new Error("model map: " + parsed.errors.join("; "));
-        }
-        body.model_map = parsed.map;
+      if (isApiKey) body.base_url = baseURL;
+      const parsed = textToModelMap(modelMapText);
+      if (parsed.errors.length > 0) {
+        throw new Error("model map: " + parsed.errors.join("; "));
       }
+      body.model_map = parsed.map;
       await api(`/admin/api/auths/${encodeURIComponent(auth.id)}`, {
         method: "PATCH",
         body: JSON.stringify(body),
@@ -85,37 +83,44 @@ export function EditAuthModal({ auth, onClose, onSaved }: Props) {
             </div>
           )}
           {isApiKey && (
-            <>
-              <div className="space-y-1.5">
-                <Label>Base URL</Label>
-                <Input
-                  className="mono"
-                  placeholder="https://api.your-relay-vendor.com (default: api.anthropic.com)"
-                  value={baseURL}
-                  onChange={(e) => setBaseURL(e.currentTarget.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Per-key upstream override; leave blank for the provider default.
-                </p>
-              </div>
-              <div className="space-y-1.5">
-                <Label>Model map (optional)</Label>
-                <Textarea
-                  className="mono text-sm h-32"
-                  placeholder={"claude-opus-4-6 = [0.16]稳定喵/claude-opus-4-6\nclaude-haiku-4-5 ="}
-                  value={modelMapText}
-                  onChange={(e) => setModelMapText(e.currentTarget.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  One <span className="mono">client_model = upstream_model</span> per line. Rewrite-only:
-                  a listed model has its request body{" "}
-                  <span className="mono">model</span> rewritten to the upstream name before forwarding.
-                  Models not listed (or with the right side blank) pass through to the provider
-                  unchanged — this does not restrict which models the key serves.
-                </p>
-              </div>
-            </>
+            <div className="space-y-1.5">
+              <Label>Base URL</Label>
+              <Input
+                className="mono"
+                placeholder="https://api.your-relay-vendor.com (default: api.anthropic.com)"
+                value={baseURL}
+                onChange={(e) => setBaseURL(e.currentTarget.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Per-key upstream override; leave blank for the provider default.
+              </p>
+            </div>
           )}
+          <div className="space-y-1.5">
+            <Label>Model map (optional)</Label>
+            <Textarea
+              className="mono text-sm h-32"
+              placeholder={"claude-opus-4-7 = claude-opus-4-8\nclaude-opus-4-6 ="}
+              value={modelMapText}
+              onChange={(e) => setModelMapText(e.currentTarget.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              One <span className="mono">client_model = upstream_model</span> per line. Rewrite-only:
+              a listed model has its request body{" "}
+              <span className="mono">model</span> rewritten to the upstream name before forwarding.
+              Models not listed (or with the right side blank) pass through to the provider
+              unchanged — this does not restrict which models the key serves.
+            </p>
+            {!isApiKey && (
+              <p className="text-xs text-muted-foreground">
+                Claude OAuth credentials default to{" "}
+                <span className="mono">claude-opus-4-6</span> →{" "}
+                <span className="mono">claude-opus-4-8</span> and{" "}
+                <span className="mono">claude-opus-4-7</span> →{" "}
+                <span className="mono">claude-opus-4-8</span> (shown above). Edit to override; clear all lines to disable.
+              </p>
+            )}
+          </div>
           <div className="space-y-1.5">
             <Label>Proxy URL</Label>
             <Input
