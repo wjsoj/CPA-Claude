@@ -1,0 +1,35 @@
+{
+  "method": "GET",
+  "url": "https://chatgpt.com/backend-api/ps/plugins/installed?scope=GLOBAL&includeDownloadUrls=true",
+  "req_headers": {
+    "authorization": "Bearer <JWT_REDACTED>",
+    "chatgpt-account-id": "ACCOUNT_UUID",
+    "accept": "*/*",
+    "originator": "codex-tui",
+    "user-agent": "codex-tui/0.135.0 (Arch Linux Rolling Release; x86_64) Konsole/260401 (codex-tui; 0.135.0)",
+    "cookie": "<COOKIES_REDACTED>",
+    "host": "chatgpt.com",
+    "Connection": "close"
+  },
+  "req_body": null,
+  "status": 200,
+  "res_headers": {
+    "Date": "Sat, 30 May 2026 04:59:53 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "63",
+    "Connection": "close",
+    "Server": "cloudflare",
+    "x-oai-request-id": "7ee77117-4410-485e-915e-35f6d7960a02",
+    "x-openai-proxy-wasm": "v0.1",
+    "cf-cache-status": "DYNAMIC",
+    "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
+    "X-Content-Type-Options": "nosniff",
+    "Report-To": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=VZNA5aOIrFsNlxg1xM7agBb29ojcomsiEbFiy6tFSnGWSI9wcV7Te09XJMWfTHOzhMqRFD0Vx274bX0H9SOJFeF2m9BfUMksCGqA%2BoYxnOMfRxq6%2Btc9Usa05a%2Bn\"}]}",
+    "Nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.01,\"max_age\":604800}",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "CF-RAY": "a03b2c0a6a92f7a9-LAX",
+    "alt-svc": "h3=\":443\"; ma=86400"
+  },
+  "res_body": "{\"plugins\":[],\"pagination\":{\"limit\":50,\"next_page_token\":null}}"
+}

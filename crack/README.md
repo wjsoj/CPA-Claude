@@ -11,8 +11,9 @@ crack/
             requests (no conversation prose). Produced by scripts/extract_live.py.
   kiro/     Kiro / Amazon-Q CLI capture — rows/ + docs/ + raw/, plus login/ for
             the Cognito PKCE login flow. Produced by scripts/split.py + gen.py.
+  codex/    ChatGPT/Codex CLI (codex-tui) — current target 0.135.0. SPEC.md is the
+            source of truth; rows/ are structurally-redacted representative requests.
   scripts/  Tooling (see scripts/README.md).
-  (codex/   ChatGPT/Codex CLI — to be added.)
 ```
 
 ## Why claude/ has no raw dump

@@ -1,0 +1,34 @@
+{
+  "method": "GET",
+  "url": "https://chatgpt.com/backend-api/wham/usage",
+  "req_headers": {
+    "user-agent": "codex-tui/0.135.0 (Arch Linux Rolling Release; x86_64) Konsole/260401 (codex-tui; 0.135.0)",
+    "authorization": "Bearer <JWT_REDACTED>",
+    "chatgpt-account-id": "ACCOUNT_UUID",
+    "accept": "*/*",
+    "cookie": "<COOKIES_REDACTED>",
+    "host": "chatgpt.com",
+    "Connection": "close"
+  },
+  "req_body": null,
+  "status": 200,
+  "res_headers": {
+    "Date": "Sat, 30 May 2026 04:59:46 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "1620",
+    "Connection": "close",
+    "Server": "cloudflare",
+    "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+    "x-oai-request-id": "9a9724ec-2908-42fa-85f6-5a135d24de83",
+    "x-openai-proxy-wasm": "v0.1",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "cf-cache-status": "DYNAMIC",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
+    "X-Content-Type-Options": "nosniff",
+    "Report-To": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=PizPGcN0O1LosfrvvJJuoRfXJO%2FTcCCdPSBbU6Eilp%2FkpbDsvscHUQeCzLZPKnaMDdAXxnR3WOwghNmxTl%2FRGIPvJCltRMa5yt6WaMQ%2FHe2wKLjfxLJIw3FYETG4\"}]}",
+    "Nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.01,\"max_age\":604800}",
+    "CF-RAY": "a03b2bddeb4acb7e-LAX",
+    "alt-svc": "h3=\":443\"; ma=86400"
+  },
+  "res_body": "{\n  \"user_id\": \"USER_ID\",\n  \"account_id\": \"USER_ID\",\n  \"email\": \"EMAIL@example.com\",\n  \"plan_type\": \"pro\",\n  \"rate_limit\": {\n    \"allowed\": true,\n    \"limit_reached\": false,\n    \"primary_window\": {\n      \"used_percent\": 0,\n      \"limit_window_seconds\": 18000,\n      \"reset_after_seconds\": 18000,\n      \"reset_at\": 1780135186\n    },\n    \"secondary_window\": {\n      \"used_percent\": 0,\n      \"limit_window_seconds\": 604800,\n      \"reset_after_seconds\": 604800,\n      \"reset_at\": 1780721986\n    }\n  },\n  \"code_review_rate_limit\": null,\n  \"additional_rate_limits\": [\n    {\n      \"limit_name\": \"GPT-5.3-Codex-Spark\",\n      \"metered_feature\": \"codex_bengalfox\",\n      \"rate_limit\": {\n        \"allowed\": true,\n        \"limit_reached\": false,\n        \"primary_window\": {\n          \"used_percent\": 0,\n          \"limit_window_seconds\": 18000,\n          \"reset_after_seconds\": 18000,\n          \"reset_at\": 1780135186\n        },\n        \"secondary_window\": {\n          \"used_percent\": 0,\n          \"limit_window_seconds\": 604800,\n          \"reset_after_seconds\": 604800,\n          \"reset_at\": 1780721986\n        }\n      }\n    }\n  ],\n  \"credits\": {\n    \"has_credits\": false,\n    \"unlimited\": false,\n    \"overage_limit_reached\": false,\n    \"balance\": \"0\",\n    \"approx_local_messages\": [\n      0,\n      0\n    ],\n    \"approx_cloud_messages\": [\n      0,\n      0\n    ]\n  },\n  \"spend_control\": {\n    \"reached\": false,\n    \"individual_limit\": null\n  },\n  \"rate_limit_reached_type\": null,\n  \"promo\": null,\n  \"referral_beacon\": null,\n  \"rate_limit_reset_credits\": {\n    \"available_count\": 0\n  }\n}"
+}
