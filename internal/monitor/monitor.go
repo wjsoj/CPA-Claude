@@ -4,13 +4,13 @@
 //   - Passive (zero cost, always live): reads auth.Pool to report whether the
 //     provider currently has a free credential slot and how many credentials
 //     are healthy. This is the primary "is there capacity right now" signal.
-//   - Active (every IntervalMinutes): sends one minimal request through this
-//     server's own local endpoint, confirming that a slot can actually serve a
-//     real model end-to-end. Recorded as the uptime timeseries (24h samples +
+//   - Active (every IntervalMinutes): sends one minimal request DIRECTLY to a
+//     healthy API-key credential's upstream, confirming the model actually
+//     serves. **OAuth (subscription) credentials are never actively probed** —
+//     probing them burns quota / risks the account — so a provider served only
+//     by OAuth records a passive sample instead (healthy when the pool has
+//     healthy credentials). Recorded as the uptime timeseries (24h samples +
 //     90-day daily rollups), persisted to disk.
-//
-// The monitor deliberately does NOT distinguish OAuth vs API-key credentials —
-// each provider is a single endpoint from the public dashboard's point of view.
 package monitor
 
 import (
@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -134,10 +135,6 @@ func (m *Monitor) Start(ctx context.Context) {
 		log.Info("monitor: disabled (passive pool status only)")
 		return
 	}
-	if m.cfg.ClientToken == "" {
-		log.Warn("monitor: enabled but no client_token set — active probing disabled, passive status only")
-		return
-	}
 	interval := m.cfg.Interval
 	if interval <= 0 {
 		interval = 10 * time.Minute
@@ -169,20 +166,76 @@ func (m *Monitor) Start(ctx context.Context) {
 
 func (m *Monitor) probeAll(ctx context.Context) {
 	for _, t := range m.cfg.Targets {
-		if t.Model == "" || t.Port == 0 {
+		if t.Model == "" {
 			continue
 		}
-		m.record(t.Provider, m.probe(ctx, t))
+		provider := auth.NormalizeProvider(t.Provider)
+		// Active end-to-end probe ONLY against a healthy API-key credential.
+		// OAuth (subscription) credentials are never actively probed. For a
+		// provider with no API-key credential (OAuth-only), record a passive
+		// sample from the pool signal so the timeline stays populated (healthy
+		// when the pool has healthy credentials) instead of going blank.
+		if cred := m.pickAPIKeyCred(provider); cred != nil {
+			m.record(t.Provider, m.probe(ctx, provider, cred, t.Model))
+		} else {
+			m.record(t.Provider, m.passiveSample(provider))
+		}
 	}
 	m.save()
 }
 
-// probe sends one minimal request through the local endpoint and returns the
-// outcome. A 2xx response is success; anything else (incl. transport errors)
-// is a failure with the status/error captured for display.
-func (m *Monitor) probe(ctx context.Context, t EndpointTarget) Sample {
-	provider := auth.NormalizeProvider(t.Provider)
-	url, body, headers := m.probeRequest(provider, t)
+// pickAPIKeyCred returns a healthy API-key credential for the provider, or nil
+// when none exists. Confines active probing to API-key credentials so OAuth
+// credentials are never hit by the probe.
+func (m *Monitor) pickAPIKeyCred(provider string) *auth.Auth {
+	provider = auth.NormalizeProvider(provider)
+	for _, st := range m.pool.Status() {
+		if st.Auth.Kind != auth.KindAPIKey {
+			continue
+		}
+		if auth.NormalizeProvider(st.Auth.Provider) != provider {
+			continue
+		}
+		live := m.pool.FindByID(st.Auth.ID)
+		if live == nil {
+			continue
+		}
+		if h, _, _, _ := live.HealthSnapshot(); !h {
+			continue
+		}
+		return live
+	}
+	return nil
+}
+
+// passiveSample records the pool's passive health for a provider we don't
+// actively probe (OAuth-only). OK when at least one credential is healthy, so
+// the strip reads green; a synthetic 503 marks "no healthy credentials".
+func (m *Monitor) passiveSample(provider string) Sample {
+	healthy, _, _ := m.liveCounts(provider)
+	s := Sample{TS: time.Now()}
+	if healthy > 0 {
+		s.OK = true
+		s.Status = 200
+	} else {
+		s.Status = 503
+		s.Err = "no healthy credentials"
+	}
+	return s
+}
+
+// probe sends one minimal request DIRECTLY to the API-key credential's upstream
+// (never through the OAuth-preferring pool), and returns the outcome. A 2xx is
+// success; a transport error (no HTTP response, status 0) is "nodata" and is
+// treated as healthy by the recorder.
+func (m *Monitor) probe(ctx context.Context, provider string, cred *auth.Auth, model string) Sample {
+	token, _ := cred.Credentials()
+	info := cred.Snapshot()
+	upstreamModel := model
+	if um, ok := cred.ResolveUpstreamModel(model); ok && um != "" {
+		upstreamModel = um
+	}
+	url, body, headers := directProbeRequest(provider, info.BaseURL, token, upstreamModel)
 	start := time.Now()
 	s := Sample{TS: start}
 
@@ -194,7 +247,11 @@ func (m *Monitor) probe(ctx context.Context, t EndpointTarget) Sample {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := m.client.Do(req)
+	client := m.client
+	if info.ProxyURL != "" {
+		client = auth.ClientFor(info.ProxyURL, false)
+	}
+	resp, err := client.Do(req)
 	s.LatencyMs = time.Since(start).Milliseconds()
 	if err != nil {
 		s.Err = err.Error()
@@ -212,32 +269,37 @@ func (m *Monitor) probe(ctx context.Context, t EndpointTarget) Sample {
 	return s
 }
 
-func (m *Monitor) probeRequest(provider string, t EndpointTarget) (url string, body []byte, headers map[string]string) {
-	addr := fmt.Sprintf("http://127.0.0.1:%d", t.Port)
+// directProbeRequest builds a minimal upstream request for an API-key
+// credential (its BaseURL override, else the provider default).
+func directProbeRequest(provider, baseURL, token, model string) (url string, body []byte, headers map[string]string) {
+	ping := map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+	}
 	if provider == auth.ProviderOpenAI {
-		url = addr + "/v1/chat/completions"
-		body, _ = json.Marshal(map[string]any{
-			"model":      t.Model,
-			"max_tokens": 1,
-			"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-		})
+		base := strings.TrimRight(baseURL, "/")
+		if base == "" {
+			base = "https://api.openai.com"
+		}
+		url = base + "/v1/chat/completions"
+		body, _ = json.Marshal(ping)
 		headers = map[string]string{
 			"Content-Type":  "application/json",
-			"Authorization": "Bearer " + m.cfg.ClientToken,
+			"Authorization": "Bearer " + token,
 		}
 		return
 	}
-	// Anthropic.
-	url = addr + "/v1/messages"
-	body, _ = json.Marshal(map[string]any{
-		"model":      t.Model,
-		"max_tokens": 1,
-		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-	})
+	base := strings.TrimRight(baseURL, "/")
+	if base == "" {
+		base = "https://api.anthropic.com"
+	}
+	url = base + "/v1/messages"
+	body, _ = json.Marshal(ping)
 	headers = map[string]string{
 		"Content-Type":      "application/json",
 		"anthropic-version": "2023-06-01",
-		"x-api-key":         m.cfg.ClientToken,
+		"x-api-key":         token,
 	}
 	return
 }
@@ -401,7 +463,7 @@ func (m *Monitor) GetSnapshot() Snapshot {
 			SlotAvailable: slot,
 			HealthyCreds:  healthy,
 			TotalCreds:    total,
-			ProbeEnabled:  m.cfg.Enabled && m.cfg.ClientToken != "" && t.Model != "",
+			ProbeEnabled:  m.cfg.Enabled && t.Model != "" && m.pickAPIKeyCred(provider) != nil,
 			Uptime90d:     []DayStat{},
 			Timeline24h:   []Sample{},
 		}
