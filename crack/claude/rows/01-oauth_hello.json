@@ -1,0 +1,37 @@
+{
+  "class": "oauth_hello",
+  "url": "https://platform.claude.com/v1/oauth/hello",
+  "method": "GET",
+  "status": 200,
+  "reqSize": 0,
+  "resSize": 19,
+  "reqHeaders": {
+    "accept": "application/json, text/plain, */*",
+    "accept-encoding": "gzip, br",
+    "user-agent": "claude-cli/2.1.158 (external, cli)",
+    "host": "platform.claude.com",
+    "connection": "close"
+  },
+  "resHeaders": {
+    "date": "Sun, 31 May 2026 14:08:05 GMT",
+    "content-type": "application/json",
+    "content-length": "19",
+    "connection": "close",
+    "request-id": "<masked>",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "server": "cloudflare",
+    "server-timing": "x-originResponse;dur=6",
+    "via": "1.1 google",
+    "alt-svc": "h3=\":443\"; ma=86400",
+    "cf-cache-status": "BYPASS",
+    "set-cookie": "<masked>",
+    "x-content-type-options": "nosniff",
+    "cf-ray": "a0468c74ed102aa0-LAX"
+  },
+  "reqBody": null,
+  "resBody": {
+    "body": {
+      "message": "hello"
+    }
+  }
+}

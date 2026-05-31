@@ -1,0 +1,43 @@
+{
+  "class": "startup_grove",
+  "url": "https://api.anthropic.com/api/claude_code_grove",
+  "method": "GET",
+  "status": 200,
+  "reqSize": 0,
+  "resSize": 107,
+  "reqHeaders": {
+    "accept": "application/json, text/plain, */*",
+    "accept-encoding": "gzip, br",
+    "authorization": "<masked>",
+    "user-agent": "claude-cli/2.1.158 (external, cli)",
+    "anthropic-beta": "oauth-2025-04-20",
+    "host": "api.anthropic.com",
+    "connection": "close"
+  },
+  "resHeaders": {
+    "date": "Sun, 31 May 2026 14:08:38 GMT",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked",
+    "connection": "close",
+    "request-id": "<masked>",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "server": "cloudflare",
+    "content-encoding": "gzip",
+    "vary": "Accept-Encoding",
+    "server-timing": "x-originResponse;dur=93",
+    "set-cookie": "<masked>",
+    "x-robots-tag": "none",
+    "cf-cache-status": "DYNAMIC",
+    "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+    "cf-ray": "a0468d3cbb3cf7dd-LAX"
+  },
+  "reqBody": null,
+  "resBody": {
+    "body": {
+      "grove_enabled": true,
+      "domain_excluded": false,
+      "notice_is_grace_period": false,
+      "notice_reminder_frequency": 0
+    }
+  }
+}

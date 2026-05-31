@@ -1,48 +1,112 @@
 [
   {
     "idx": 1,
-    "class": "v1_messages",
-    "file": "01-v1_messages.json",
-    "url": "https://api.anthropic.com/v1/messages?beta=true",
+    "class": "oauth_hello",
+    "file": "01-oauth_hello.json",
+    "url": "https://platform.claude.com/v1/oauth/hello",
     "status": 200,
-    "reqSize": 481053
+    "reqSize": 0
   },
   {
     "idx": 2,
-    "class": "count_tokens",
-    "file": "02-count_tokens.json",
-    "url": "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+    "class": "oauth_token",
+    "file": "02-oauth_token.json",
+    "url": "https://platform.claude.com/v1/oauth/token",
     "status": 200,
-    "reqSize": 16097
+    "reqSize": 309
   },
   {
     "idx": 3,
-    "class": "event_logging_startup",
-    "file": "03-event_logging_startup.json",
-    "url": "https://api.anthropic.com/api/event_logging/v2/batch",
+    "class": "oauth_profile",
+    "file": "03-oauth_profile.json",
+    "url": "https://api.anthropic.com/api/oauth/profile",
     "status": 200,
-    "reqSize": 99275
+    "reqSize": 0
   },
   {
     "idx": 4,
-    "class": "event_logging_steady",
-    "file": "04-event_logging_steady.json",
-    "url": "https://api.anthropic.com/api/event_logging/v2/batch",
+    "class": "oauth_roles",
+    "file": "04-oauth_roles.json",
+    "url": "https://api.anthropic.com/api/oauth/claude_cli/roles",
     "status": 200,
-    "reqSize": 1913
+    "reqSize": 0
   },
   {
     "idx": 5,
-    "class": "datadog",
-    "file": "05-datadog.json",
-    "url": "https://http-intake.logs.us5.datadoghq.com/api/v2/logs",
-    "status": 202,
-    "reqSize": 24646
+    "class": "oauth_referral",
+    "file": "05-oauth_referral.json",
+    "url": "https://api.anthropic.com/api/oauth/organizations/<masked:uuid>/referral/eligibility?campaign=claude_code_guest_pass",
+    "status": 200,
+    "reqSize": 0
   },
   {
     "idx": 6,
+    "class": "startup_eval_sdk",
+    "file": "06-startup_eval_sdk.json",
+    "url": "https://api.anthropic.com/api/eval/sdk-zAZezfDKGoZuXXKe",
+    "status": 200,
+    "reqSize": 594
+  },
+  {
+    "idx": 7,
+    "class": "startup_grove",
+    "file": "07-startup_grove.json",
+    "url": "https://api.anthropic.com/api/claude_code_grove",
+    "status": 200,
+    "reqSize": 0
+  },
+  {
+    "idx": 8,
+    "class": "startup_bootstrap",
+    "file": "08-startup_bootstrap.json",
+    "url": "https://api.anthropic.com/api/claude_cli/bootstrap?entrypoint=cli&model=claude-opus-4-8",
+    "status": 200,
+    "reqSize": 0
+  },
+  {
+    "idx": 9,
+    "class": "startup_penguin",
+    "file": "09-startup_penguin.json",
+    "url": "https://api.anthropic.com/api/claude_code_penguin_mode",
+    "status": 200,
+    "reqSize": 0
+  },
+  {
+    "idx": 10,
+    "class": "v1_messages",
+    "file": "10-v1_messages.json",
+    "url": "https://api.anthropic.com/v1/messages?beta=true",
+    "status": 200,
+    "reqSize": 289080
+  },
+  {
+    "idx": 11,
+    "class": "event_logging_startup",
+    "file": "11-event_logging_startup.json",
+    "url": "https://api.anthropic.com/api/event_logging/v2/batch",
+    "status": 200,
+    "reqSize": 476031
+  },
+  {
+    "idx": 12,
+    "class": "event_logging_steady",
+    "file": "12-event_logging_steady.json",
+    "url": "https://api.anthropic.com/api/event_logging/v2/batch",
+    "status": 200,
+    "reqSize": 7930
+  },
+  {
+    "idx": 13,
+    "class": "datadog",
+    "file": "13-datadog.json",
+    "url": "https://http-intake.logs.us5.datadoghq.com/api/v2/logs",
+    "status": 202,
+    "reqSize": 118820
+  },
+  {
+    "idx": 14,
     "class": "releases",
-    "file": "06-releases.json",
+    "file": "14-releases.json",
     "url": "https://downloads.claude.ai/claude-code-releases/latest",
     "status": 200,
     "reqSize": 0

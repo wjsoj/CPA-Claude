@@ -3,13 +3,13 @@
   "url": "https://api.anthropic.com/v1/messages?beta=true",
   "method": "POST",
   "status": 200,
-  "reqSize": 481053,
-  "resSize": 11844,
+  "reqSize": 289080,
+  "resSize": 10800,
   "reqHeaders": {
     "accept": "application/json",
     "authorization": "<masked>",
     "content-type": "application/json",
-    "user-agent": "claude-cli/2.1.156 (external, cli)",
+    "user-agent": "claude-cli/2.1.158 (external, cli)",
     "x-claude-code-session-id": "<masked>",
     "x-stainless-arch": "x64",
     "x-stainless-lang": "js",
@@ -27,38 +27,38 @@
     "connection": "keep-alive",
     "host": "api.anthropic.com",
     "accept-encoding": "gzip, br",
-    "content-length": "481053"
+    "content-length": "289080"
   },
   "resHeaders": {
-    "date": "Fri, 29 May 2026 06:33:06 GMT",
+    "date": "Sun, 31 May 2026 14:09:12 GMT",
     "content-type": "text/event-stream; charset=utf-8",
     "transfer-encoding": "chunked",
     "connection": "keep-alive",
     "cache-control": "no-cache",
     "anthropic-ratelimit-unified-status": "allowed",
     "anthropic-ratelimit-unified-5h-status": "allowed",
-    "anthropic-ratelimit-unified-5h-reset": "1780039800",
-    "anthropic-ratelimit-unified-5h-utilization": "0.07",
+    "anthropic-ratelimit-unified-5h-reset": "1780252800",
+    "anthropic-ratelimit-unified-5h-utilization": "0.0",
     "anthropic-ratelimit-unified-7d-status": "allowed",
-    "anthropic-ratelimit-unified-7d-reset": "1780495200",
-    "anthropic-ratelimit-unified-7d-utilization": "0.01",
+    "anthropic-ratelimit-unified-7d-reset": "1780333200",
+    "anthropic-ratelimit-unified-7d-utilization": "0.0",
     "anthropic-ratelimit-unified-representative-claim": "five_hour",
     "anthropic-ratelimit-unified-fallback-percentage": "0.5",
-    "anthropic-ratelimit-unified-reset": "1780039800",
+    "anthropic-ratelimit-unified-reset": "1780252800",
     "anthropic-ratelimit-unified-overage-disabled-reason": "org_level_disabled",
     "anthropic-ratelimit-unified-overage-status": "rejected",
     "request-id": "<masked>",
     "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-    "anthropic-organization-id": "2f49bffa-5cc6-4fbb-9dee-5e81284cfb93",
-    "traceresponse": "00-f4b4d2f9e944f1e174202be2a3302721-0ef90be3b4f04009-01",
+    "anthropic-organization-id": "<masked:uuid>",
+    "traceresponse": "00-e522bbb264ca60fa694df78de6b22571-e1fca975f3cf9465-01",
     "server": "cloudflare",
     "content-encoding": "gzip",
     "vary": "Accept-Encoding",
-    "cf-cache-status": "DYNAMIC",
     "set-cookie": "<masked>",
-    "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
     "x-robots-tag": "none",
-    "cf-ray": "a033772a898b932c-EWR"
+    "cf-cache-status": "DYNAMIC",
+    "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+    "cf-ray": "a0468e063fbef7d1-LAX"
   },
   "reqBody": {
     "body": {
@@ -69,27 +69,38 @@
           "content": [
             {
               "type": "text",
-              "text": "<text:16484 chars>"
+              "text": "<text:17357 chars>"
             },
             {
               "type": "text",
-              "text": "<text:128 chars>"
+              "text": "<text:13519 chars>"
             }
           ]
         },
         {
-          "role": "system",
-          "content": "<text:2378 chars>"
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "No response requested."
+            }
+          ]
         },
-        "<… 224 more items redacted …>",
+        "<… 59 more items redacted …>",
         {
           "role": "user",
           "content": [
             {
-              "tool_use_id": "toolu_01S2WMkuHUxppXMRAJtSYrnH",
-              "type": "tool_result",
-              "content": "<text:366 chars>",
-              "is_error": false
+              "type": "text",
+              "text": "<text:246 chars>"
+            },
+            {
+              "type": "text",
+              "text": "<text:129 chars>"
+            },
+            {
+              "type": "text",
+              "text": "<local-command-stdout>See ya!</local-command-stdout>\n"
             },
             {
               "type": "text",
@@ -101,7 +112,7 @@
       "system": [
         {
           "type": "text",
-          "text": "x-anthropic-billing-header: cc_version=2.1.156.297; cc_entrypoint=cli; cch=4156c;"
+          "text": "x-anthropic-billing-header: cc_version=2.1.158.728; cc_entrypoint=cli; cch=b9ae2;"
         },
         {
           "type": "text",
@@ -118,7 +129,7 @@
         },
         {
           "type": "text",
-          "text": "<text:9797 chars>",
+          "text": "<text:5670 chars>",
           "cache_control": {
             "type": "ephemeral",
             "ttl": "1h"
@@ -290,30 +301,27 @@
           },
           "eager_input_streaming": true
         },
-        "<… 9 more items redacted …>",
+        "<… 20 more items redacted …>",
         {
-          "name": "Write",
-          "description": "<text:240 chars>",
+          "name": "mcp__chrome-devtools__take_snapshot",
+          "description": "<text:314 chars>",
           "input_schema": {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
             "properties": {
-              "file_path": {
-                "description": "The absolute path to the file to write (must be absolute, not relative)",
-                "type": "string"
+              "verbose": {
+                "type": "boolean",
+                "description": "<text:94 chars>"
               },
-              "content": {
-                "description": "The content to write to the file",
-                "type": "string"
+              "filePath": {
+                "type": "string",
+                "description": "<text:136 chars>"
               }
             },
-            "required": [
-              "file_path",
-              "content"
-            ],
-            "additionalProperties": false
+            "additionalProperties": true,
+            "$schema": "http://json-schema.org/draft-07/schema#"
           },
-          "eager_input_streaming": true
+          "eager_input_streaming": true,
+          "defer_loading": true
         }
       ],
       "metadata": {
@@ -332,16 +340,16 @@
         ]
       },
       "output_config": {
-        "effort": "high"
+        "effort": "medium"
       },
       "stream": true
     },
     "_notes": {
-      "message_count": 227,
+      "message_count": 62,
       "roles": {
-        "user": 104,
-        "system": 20,
-        "assistant": 103
+        "user": 29,
+        "assistant": 28,
+        "system": 5
       },
       "system_cache_pattern": [
         null,
@@ -360,8 +368,19 @@
         "TaskCreate",
         "TaskUpdate",
         "ToolSearch",
+        "WebFetch",
+        "WebSearch",
         "Workflow",
-        "Write"
+        "Write",
+        "mcp__chrome-devtools__evaluate_script",
+        "mcp__chrome-devtools__get_network_request",
+        "mcp__chrome-devtools__list_network_requests",
+        "mcp__chrome-devtools__list_pages",
+        "mcp__chrome-devtools__navigate_page",
+        "mcp__chrome-devtools__new_page",
+        "mcp__chrome-devtools__select_page",
+        "mcp__chrome-devtools__take_screenshot",
+        "mcp__chrome-devtools__take_snapshot"
       ]
     }
   },

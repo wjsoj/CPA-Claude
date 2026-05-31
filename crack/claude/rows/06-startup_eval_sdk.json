@@ -1,0 +1,64 @@
+{
+  "class": "startup_eval_sdk",
+  "url": "https://api.anthropic.com/api/eval/sdk-zAZezfDKGoZuXXKe",
+  "method": "POST",
+  "status": 200,
+  "reqSize": 594,
+  "resSize": 10368,
+  "reqHeaders": {
+    "authorization": "<masked>",
+    "content-type": "application/json",
+    "anthropic-beta": "oauth-2025-04-20",
+    "connection": "keep-alive",
+    "user-agent": "Bun/1.3.14",
+    "accept": "*/*",
+    "host": "api.anthropic.com",
+    "accept-encoding": "gzip, br",
+    "content-length": "594"
+  },
+  "resHeaders": {
+    "date": "Sun, 31 May 2026 14:08:34 GMT",
+    "content-type": "application/json",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "request-id": "<masked>",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "server": "cloudflare",
+    "content-encoding": "gzip",
+    "vary": "Accept-Encoding",
+    "server-timing": "x-originResponse;dur=30",
+    "set-cookie": "<masked>",
+    "x-robots-tag": "none",
+    "cf-cache-status": "DYNAMIC",
+    "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+    "cf-ray": "a0468d267a28dbbe-LAX"
+  },
+  "reqBody": {
+    "body": {
+      "attributes": {
+        "id": "<masked:id>",
+        "sessionId": "<masked:sessionId>",
+        "deviceID": "<masked:deviceID>",
+        "platform": "linux",
+        "organizationUUID": "<masked:organizationUUID>",
+        "accountUUID": "<masked:accountUUID>",
+        "userType": "external",
+        "subscriptionType": "max",
+        "rateLimitTier": "default_claude_max_20x",
+        "firstTokenTime": 1773926847998,
+        "email": "<masked:email>",
+        "appVersion": "2.1.158",
+        "entrypoint": "cli"
+      },
+      "forcedVariations": {},
+      "forcedFeatures": [],
+      "url": ""
+    }
+  },
+  "resBody": {
+    "_keys": [
+      "features"
+    ],
+    "_size": 52494
+  }
+}

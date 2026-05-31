@@ -13,7 +13,7 @@ Usage:
 
 Default outdir = crack/claude/rows/. The source dump is NOT copied or committed.
 """
-import json, base64, gzip, subprocess, sys, os, collections
+import json, base64, gzip, subprocess, sys, os, collections, re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRACK_ROOT = os.path.dirname(HERE)
@@ -21,7 +21,59 @@ CRACK_ROOT = os.path.dirname(HERE)
 MASK_KEYS = {"device_id", "account_uuid", "organization_uuid", "email",
              "session_id", "user_id", "event_id", "rh", "previous_message_id"}
 MASK_HEADERS = {"authorization", "x-api-key", "cookie", "set-cookie",
-                "x-claude-code-session-id", "x-client-request-id", "request-id"}
+                "x-claude-code-session-id", "x-client-request-id", "request-id",
+                "x-organization-uuid"}
+# Secret / identity values carried in OAuth login bodies. Masked by value (not
+# structure) so the request-param NAMES, response KEYS, and non-secret
+# fingerprint values (scope, token_type, expires_in, has_claude_max,
+# organization_type, rate_limit_tier, billing_type, …) stay verbatim. The
+# public Claude Code client_id lives under the `application` subtree and is
+# deliberately kept — it is a known constant, not a secret.
+OAUTH_MASK_KEYS = {"code", "code_verifier", "code_challenge", "state",
+                   "access_token", "refresh_token", "token_uuid",
+                   "uuid", "name", "email", "email_address",
+                   "full_name", "display_name", "created_at",
+                   "subscription_created_at",
+                   # camelCase / snake variants seen in startup bodies
+                   "organization_uuid", "organizationuuid", "account_uuid",
+                   "accountuuid", "organization_name", "device_id",
+                   "deviceid", "session_id", "sessionid", "user_id",
+                   "userid", "id"}
+
+
+def _normkey(k):
+    return k.lower().replace("_", "").replace("-", "") if isinstance(k, str) else k
+
+
+_OAUTH_MASK_NORM = {_normkey(k) for k in OAUTH_MASK_KEYS}
+
+# Universal identity scrub — applied to EVERY emitted row (headers, url, bodies)
+# as defense-in-depth, since sanitize.py's literal map does not cover generic
+# UUID / email / device-hash patterns. The public Claude Code client_id is a
+# documented constant and is deliberately preserved.
+KEEP_UUIDS = {"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}
+UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+SHA256_RE = re.compile(r"\b[0-9a-f]{64}\b", re.I)
+
+
+def _scrub_str(s):
+    s = UUID_RE.sub(lambda m: m.group(0) if m.group(0).lower() in KEEP_UUIDS
+                    else "<masked:uuid>", s)
+    s = EMAIL_RE.sub("<masked:email>", s)
+    s = SHA256_RE.sub("<masked:hash>", s)
+    return s
+
+
+def scrub_identity(o):
+    if isinstance(o, dict):
+        return {k: scrub_identity(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [scrub_identity(x) for x in o]
+    if isinstance(o, str):
+        return _scrub_str(o)
+    return o
 KEEP_TEXT_PREFIXES = ("x-anthropic-billing-header:",
                       "You are Claude Code, Anthropic's official CLI for Claude.")
 TEXT_LIMIT = 80
@@ -76,6 +128,40 @@ def redact_user_id(body_obj):
             md["user_id"] = "<masked:user_id>"
 
 
+def redact_oauth(o, parent=None):
+    """Keep OAuth body structure; mask secret/identity VALUES by key. The
+    `application` subtree (uuid/name/slug = public Claude Code app identity)
+    is kept verbatim — it is the same constant baked into our code."""
+    if isinstance(o, dict):
+        return {k: (redact_oauth(v, k) if k != "application" else v)
+                for k, v in o.items()}
+    if isinstance(o, list):
+        return [redact_oauth(x, parent) for x in o]
+    if isinstance(o, str) and _normkey(parent) in _OAUTH_MASK_NORM:
+        return f"<masked:{parent}>"
+    return o
+
+
+def summarize_oauth(text):
+    """Body summarizer for OAuth login / startup endpoints: parse JSON, mask
+    secret values, keep the rest verbatim (login bodies are small and every
+    non-secret field is fingerprint-bearing). Large startup config blobs
+    (GrowthBook / bootstrap) are collapsed to a top-level key list — their
+    fingerprint value is the call + headers, not the server config payload."""
+    if not text:
+        return None
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return {"_raw": text[:64]}
+    if len(text) > 4000:
+        if isinstance(obj, dict):
+            return {"_keys": sorted(obj.keys()), "_size": len(text)}
+        if isinstance(obj, list):
+            return {"_array_len": len(obj), "_size": len(text)}
+    return {"body": redact_oauth(obj)}
+
+
 def summarize_body(text, url):
     """Return a redacted JSON object plus light structural notes."""
     try:
@@ -120,6 +206,18 @@ def event_histogram(text):
 # Which sessions to keep: one representative per endpoint class. picker returns
 # a sort key (class order, -bytes) so we grab the largest example of each class.
 CLASSES = [
+    # OAuth login + startup flow (chronological). Bodies summarized with
+    # summarize_oauth (value-masked, structure kept).
+    ("oauth_hello",   lambda u: "/v1/oauth/hello" in u),
+    ("oauth_token",   lambda u: "/v1/oauth/token" in u),
+    ("oauth_profile", lambda u: "/api/oauth/profile" in u),
+    ("oauth_roles",   lambda u: "claude_cli/roles" in u),
+    ("oauth_referral", lambda u: "referral/eligibility" in u),
+    ("startup_eval_sdk", lambda u: "/api/eval/" in u),
+    ("startup_grove",    lambda u: "claude_code_grove" in u),
+    ("startup_bootstrap", lambda u: "claude_cli/bootstrap" in u),
+    ("startup_penguin",   lambda u: "penguin_mode" in u),
+    # Chat + telemetry (structurally redacted via summarize_body).
     ("v1_messages",   lambda u: "/v1/messages?beta" in u),
     ("count_tokens",  lambda u: "count_tokens" in u),
     ("event_logging_startup", lambda u: "event_logging" in u),  # largest = fat batch
@@ -127,6 +225,12 @@ CLASSES = [
     ("datadog",       lambda u: "datadoghq" in u),
     ("releases",      lambda u: "claude-code-releases/latest" in u),
 ]
+
+# Classes whose bodies go through summarize_oauth (verbatim-but-value-masked)
+# instead of the structural redactor.
+OAUTH_CLASSES = {"oauth_hello", "oauth_token", "oauth_profile", "oauth_roles",
+                 "oauth_referral", "startup_eval_sdk", "startup_grove",
+                 "startup_bootstrap", "startup_penguin"}
 
 
 def main():
@@ -174,13 +278,19 @@ def main():
         }
         if "event_logging" in cls:
             rec["event_histogram"] = event_histogram(cand["_reqText"])
-        rec["reqBody"] = summarize_body(cand["_reqText"], cand["url"]) if cand["_reqText"] else None
-        rec["resBody"] = summarize_body(cand["_resText"], cand["url"]) if cand["_resText"] else None
+        if cls in OAUTH_CLASSES:
+            rec["reqBody"] = summarize_oauth(cand["_reqText"])
+            rec["resBody"] = summarize_oauth(cand["_resText"])
+        else:
+            rec["reqBody"] = summarize_body(cand["_reqText"], cand["url"]) if cand["_reqText"] else None
+            rec["resBody"] = summarize_body(cand["_resText"], cand["url"]) if cand["_resText"] else None
+        # Universal identity scrub (defense-in-depth over UUID/email/hash).
+        rec = scrub_identity(rec)
         idx = len(manifest) + 1
         fn = os.path.join(out_dir, f"{idx:02d}-{cls}.json")
         json.dump(rec, open(fn, "w"), indent=2, ensure_ascii=False)
         manifest.append({"idx": idx, "class": cls, "file": os.path.basename(fn),
-                         "url": cand["url"], "status": cand["status"],
+                         "url": _scrub_str(cand["url"]), "status": cand["status"],
                          "reqSize": cand["reqSize"]})
         print(f"{idx:02d} {cls:24s} {cand['status']} req={cand['reqSize']}  {cand['url'][:60]}")
     json.dump(manifest, open(os.path.join(out_dir, "_manifest.json"), "w"),
