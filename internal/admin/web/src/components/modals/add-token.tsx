@@ -23,6 +23,7 @@ export function AddTokenModal({ onClose, onSaved }: Props) {
   const [token, setTokenValue] = useState(() => generateSkToken());
   const [initialUSD, setInitialUSD] = useState("");
   const [group, setGroup] = useState("");
+  const [providerAccess, setProviderAccess] = useState(""); // "" | "anthropic" | "openai"
   const [groupID, setGroupID] = useState("");
   const [created, setCreated] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -52,6 +53,7 @@ export function AddTokenModal({ onClose, onSaved }: Props) {
         token: token.trim(),
         name: name.trim(),
         group: group.trim(),
+        providers: providerAccess ? [providerAccess] : [],
       };
       const w = parseFloat(initialUSD);
       if (!isNaN(w) && w > 0) body.initial_usd = w;
@@ -160,6 +162,22 @@ export function AddTokenModal({ onClose, onSaved }: Props) {
               <p className="text-xs text-muted-foreground">
                 Binds this client to a named credential group. Traffic first tries that group's credentials,
                 falling back to public if they're saturated or unhealthy.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Provider access</Label>
+              <select
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                value={providerAccess}
+                onChange={(e) => setProviderAccess(e.currentTarget.value)}
+              >
+                <option value="">Both (Claude + OpenAI)</option>
+                <option value="anthropic">Claude only</option>
+                <option value="openai">OpenAI only</option>
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Restricts which endpoint this token may use. "Claude only" rejects the OpenAI/Codex endpoint
+                with 403, and vice versa. Default allows both.
               </p>
             </div>
             {err && <div className="text-sm text-destructive">{err}</div>}

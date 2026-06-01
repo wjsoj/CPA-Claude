@@ -23,14 +23,14 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/wjsoj/cc-core/auth"
-	"github.com/wjsoj/cc-core/clienttoken"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/monitor"
-	"github.com/wjsoj/cc-core/pricing"
-	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
+	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/clienttoken"
+	"github.com/wjsoj/cc-core/pricing"
+	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/cc-core/usage"
 )
 
@@ -318,27 +318,27 @@ func (h *Handler) adminAuth() gin.HandlerFunc {
 // ---- responses ----
 
 type authRow struct {
-	ID            string        `json:"id"`
-	Kind          string        `json:"kind"`
-	Provider      string        `json:"provider"` // "anthropic" | "openai"
-	PlanType      string        `json:"plan_type,omitempty"`
-	Label         string        `json:"label"`
-	Email         string        `json:"email,omitempty"`
-	ProxyURL      string        `json:"proxy_url"`
-	BaseURL       string        `json:"base_url,omitempty"`
-	Group         string        `json:"group,omitempty"`
-	MaxConcurrent int           `json:"max_concurrent"`
-	ActiveClients int           `json:"active_clients"`
-	ClientTokens  []string      `json:"client_tokens"`
-	Disabled      bool          `json:"disabled"`
-	QuotaExceeded bool          `json:"quota_exceeded"`
-	QuotaResetAt  *time.Time    `json:"quota_reset_at,omitempty"`
-	ExpiresAt     *time.Time    `json:"expires_at,omitempty"`
-	LastFailure   string        `json:"last_failure,omitempty"`
-	FileBacked    bool          `json:"file_backed"`
-	Healthy       bool          `json:"healthy"`
-	HardFailure   bool          `json:"hard_failure"`
-	FailureReason string        `json:"failure_reason,omitempty"`
+	ID            string     `json:"id"`
+	Kind          string     `json:"kind"`
+	Provider      string     `json:"provider"` // "anthropic" | "openai"
+	PlanType      string     `json:"plan_type,omitempty"`
+	Label         string     `json:"label"`
+	Email         string     `json:"email,omitempty"`
+	ProxyURL      string     `json:"proxy_url"`
+	BaseURL       string     `json:"base_url,omitempty"`
+	Group         string     `json:"group,omitempty"`
+	MaxConcurrent int        `json:"max_concurrent"`
+	ActiveClients int        `json:"active_clients"`
+	ClientTokens  []string   `json:"client_tokens"`
+	Disabled      bool       `json:"disabled"`
+	QuotaExceeded bool       `json:"quota_exceeded"`
+	QuotaResetAt  *time.Time `json:"quota_reset_at,omitempty"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	LastFailure   string     `json:"last_failure,omitempty"`
+	FileBacked    bool       `json:"file_backed"`
+	Healthy       bool       `json:"healthy"`
+	HardFailure   bool       `json:"hard_failure"`
+	FailureReason string     `json:"failure_reason,omitempty"`
 	// Most recent client-initiated cancellation. Informational only —
 	// doesn't affect Healthy or trigger any cooldown. Used by the panel to
 	// show a low-tone "client canceled" hint distinct from upstream
@@ -448,23 +448,23 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			_, planType = live.CodexIdentity()
 		}
 		rows = append(rows, authRow{
-			ID:            st.Auth.ID,
-			Kind:          kind,
-			Provider:      provider,
-			PlanType:      planType,
-			Label:         st.Auth.Label,
-			Email:         st.Auth.Email,
-			ProxyURL:      st.Auth.ProxyURL,
-			BaseURL:       st.Auth.BaseURL,
-			Group:         st.Auth.Group,
-			MaxConcurrent: st.Auth.MaxConcurrent,
-			ActiveClients: st.ActiveClients,
-			ClientTokens:  h.resolveClientTokenLabels(st.ClientTokens),
-			Disabled:      st.Auth.Disabled,
-			QuotaExceeded: !st.Auth.QuotaExceededAt.IsZero(),
-			QuotaResetAt:  quotaReset,
-			ExpiresAt:     expAt,
-			FileBacked:    strings.TrimSpace(st.Auth.FilePath) != "",
+			ID:                 st.Auth.ID,
+			Kind:               kind,
+			Provider:           provider,
+			PlanType:           planType,
+			Label:              st.Auth.Label,
+			Email:              st.Auth.Email,
+			ProxyURL:           st.Auth.ProxyURL,
+			BaseURL:            st.Auth.BaseURL,
+			Group:              st.Auth.Group,
+			MaxConcurrent:      st.Auth.MaxConcurrent,
+			ActiveClients:      st.ActiveClients,
+			ClientTokens:       h.resolveClientTokenLabels(st.ClientTokens),
+			Disabled:           st.Auth.Disabled,
+			QuotaExceeded:      !st.Auth.QuotaExceededAt.IsZero(),
+			QuotaResetAt:       quotaReset,
+			ExpiresAt:          expAt,
+			FileBacked:         strings.TrimSpace(st.Auth.FilePath) != "",
 			Healthy:            healthy,
 			HardFailure:        hardFail,
 			FailureReason:      failReason,
@@ -544,6 +544,11 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			Weekly:     weeks,
 			LastUsed:   last,
 		}
+		// Provider allow-list (claude-only / openai-only). Best-effort:
+		// open-mode IP-keyed rows have no token entry and stay unrestricted.
+		if entry, ok := h.tokens.Lookup(token); ok {
+			row.Providers = entry.Providers
+		}
 		// SaaS wallet view (balance + pricing group). Best-effort —
 		// missing wallet row just leaves the fields zero.
 		if h.wallets != nil {
@@ -599,15 +604,15 @@ type clientRow struct {
 	// Full token; only set for rows that correspond to a registered client
 	// token (not for the synthetic IP-keyed rows in open mode). The panel
 	// needs this to build PATCH/DELETE URLs — admin auth covers exposure.
-	FullToken    string            `json:"full_token,omitempty"`
-	Label        string            `json:"label,omitempty"`
+	FullToken string `json:"full_token,omitempty"`
+	Label     string `json:"label,omitempty"`
 	// WeeklyUSD is the rolling-week USD spend (informational, derived from
 	// the usage ledger). The weekly *limit* is gone — billing is now
 	// balance-based, not budget-based.
-	WeeklyUSD    float64           `json:"weekly_usd"`
+	WeeklyUSD float64 `json:"weekly_usd"`
 	// BalanceUSD is the wallet balance, from the SaaS store. Zero when
 	// SaaS is disabled or the wallet was never created.
-	BalanceUSD   float64           `json:"balance_usd"`
+	BalanceUSD float64 `json:"balance_usd"`
 	// Blocked is true when SaaS billing is enabled AND the wallet is at
 	// or below zero (= the proxy refuses new requests). Stays false when
 	// SaaS billing is disabled, even with a zero "balance".
@@ -617,6 +622,7 @@ type clientRow struct {
 	FromConfig   bool              `json:"from_config,omitempty"`
 	Managed      bool              `json:"managed,omitempty"` // true = panel can edit/delete
 	Group        string            `json:"group,omitempty"`
+	Providers    []string          `json:"providers,omitempty"` // provider allow-list; empty = both
 	RPM          int               `json:"rpm,omitempty"` // per-token RPM override (0 = global default)
 	Total        usage.ClientCost  `json:"total"`
 	Weekly       []usage.WeekEntry `json:"weekly,omitempty"`
@@ -1484,13 +1490,14 @@ type tokenView struct {
 	MaxConcurrent int        `json:"max_concurrent,omitempty"`
 	RPM           int        `json:"rpm,omitempty"`
 	Group         string     `json:"group,omitempty"`
+	Providers     []string   `json:"providers,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
 	// Wallet info (SaaS billing). Zero when SaaS is disabled or wallet has
 	// no row yet — the panel renders these as "—".
-	BalanceUSD     float64 `json:"balance_usd"`
-	GroupID        int64   `json:"group_id,omitempty"`
-	PricingGroup   string  `json:"pricing_group,omitempty"`
-	WeeklyUsedUSD  float64 `json:"weekly_used_usd"`
+	BalanceUSD    float64 `json:"balance_usd"`
+	GroupID       int64   `json:"group_id,omitempty"`
+	PricingGroup  string  `json:"pricing_group,omitempty"`
+	WeeklyUsedUSD float64 `json:"weekly_used_usd"`
 }
 
 func (h *Handler) handleListTokens(c *gin.Context) {
@@ -1504,6 +1511,7 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 			MaxConcurrent: t.MaxConcurrent,
 			RPM:           t.RPM,
 			Group:         t.Group,
+			Providers:     t.Providers,
 			WeeklyUsedUSD: h.usage.WeeklyCostUSD(t.Token),
 		}
 		if h.wallets != nil {
@@ -1528,14 +1536,15 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 }
 
 type createTokenBody struct {
-	Token         string  `json:"token"`
-	Name          string  `json:"name"`
-	MaxConcurrent int     `json:"max_concurrent,omitempty"`
-	RPM           int     `json:"rpm,omitempty"`
-	Group         string  `json:"group,omitempty"`
-	GroupID       int64   `json:"group_id,omitempty"`     // SaaS pricing group; 0 = default
-	InitialUSD    float64 `json:"initial_usd,omitempty"`  // optional starting balance credit (admin grant)
-	Generate      bool    `json:"generate"`               // if true and Token == "", mint a fresh sk-...
+	Token         string   `json:"token"`
+	Name          string   `json:"name"`
+	MaxConcurrent int      `json:"max_concurrent,omitempty"`
+	RPM           int      `json:"rpm,omitempty"`
+	Group         string   `json:"group,omitempty"`
+	Providers     []string `json:"providers,omitempty"`   // provider allow-list; empty = both
+	GroupID       int64    `json:"group_id,omitempty"`    // SaaS pricing group; 0 = default
+	InitialUSD    float64  `json:"initial_usd,omitempty"` // optional starting balance credit (admin grant)
+	Generate      bool     `json:"generate"`              // if true and Token == "", mint a fresh sk-...
 }
 
 func (h *Handler) handleCreateToken(c *gin.Context) {
@@ -1563,6 +1572,7 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 		MaxConcurrent: body.MaxConcurrent,
 		RPM:           body.RPM,
 		Group:         body.Group,
+		Providers:     body.Providers,
 	}
 	if err := h.tokens.Add(entry); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1589,13 +1599,14 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 }
 
 type patchTokenBody struct {
-	Name          *string  `json:"name"`
-	MaxConcurrent *int     `json:"max_concurrent"`
-	RPM           *int     `json:"rpm"`
-	Group         *string  `json:"group"`
-	GroupID       *int64   `json:"group_id"`        // SaaS pricing-group reassignment
-	BalanceDelta  *float64 `json:"balance_delta"`   // signed admin adjustment in USD
-	BalanceNote   string   `json:"balance_note"`    // free-text note attached to the wallet_tx row
+	Name          *string   `json:"name"`
+	MaxConcurrent *int      `json:"max_concurrent"`
+	RPM           *int      `json:"rpm"`
+	Group         *string   `json:"group"`
+	Providers     *[]string `json:"providers"`     // provider allow-list; [] clears (both), nil = no change
+	GroupID       *int64    `json:"group_id"`      // SaaS pricing-group reassignment
+	BalanceDelta  *float64  `json:"balance_delta"` // signed admin adjustment in USD
+	BalanceNote   string    `json:"balance_note"`  // free-text note attached to the wallet_tx row
 }
 
 func (h *Handler) handlePatchToken(c *gin.Context) {
@@ -1605,7 +1616,7 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.tokens.Update(tok, body.Name, nil /*weekly*/, body.MaxConcurrent, body.RPM, body.Group, nil /*groups — CPA-Claude is single-channel; nil keeps cc-core v0.8.0 Update sig happy*/); err != nil {
+	if err := h.tokens.Update(tok, body.Name, nil /*weekly*/, body.MaxConcurrent, body.RPM, body.Group, nil /*groups — CPA-Claude is single-channel*/, body.Providers); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

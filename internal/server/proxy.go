@@ -94,6 +94,25 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 	// check is a no-op.
 	clientEntry, _ := s.tokens.Lookup(clientToken)
 	clientGroup := clientEntry.Group
+
+	// Per-token provider gate. A token may be restricted to a single provider
+	// (claude-only / openai-only); reject mismatched endpoints before doing any
+	// routing work. Open mode / IP-fallback tokens get the zero-value Token
+	// whose empty Providers list allows everything.
+	if !clientEntry.AllowsProvider(provider) {
+		c.Header("X-Provider-Restricted", provider)
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error": "this token is not permitted to use the " + provider + " endpoint",
+		})
+		s.emitLog(requestlog.Record{
+			Client: clientName, ClientToken: maskClientToken(clientToken),
+			Provider: provider, Model: model, Stream: peek.Stream, Path: path,
+			Status: http.StatusForbidden, DurationMs: time.Since(start).Milliseconds(),
+			Error: "provider not allowed for token",
+		})
+		return
+	}
+
 	if s.saas != nil && clientToken != "" {
 		bal, err := s.saas.PrecheckBalance(c.Request.Context(), clientToken)
 		if err != nil {
@@ -181,9 +200,9 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 		if cur > int32(maxConc) {
 			c.Header("Retry-After", "5")
 			c.AbortWithStatusJSON(429, gin.H{
-				"error":         "too many concurrent requests",
+				"error":          "too many concurrent requests",
 				"max_concurrent": maxConc,
-				"in_flight":     int(cur),
+				"in_flight":      int(cur),
 			})
 			s.emitLog(requestlog.Record{
 				Client:      clientName,
@@ -1077,11 +1096,11 @@ func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, sub *a
 
 // usageJSON is the wire shape of `usage` (and `message.usage`) on /v1/messages.
 type usageJSON struct {
-	InputTokens              int64                     `json:"input_tokens"`
-	OutputTokens             int64                     `json:"output_tokens"`
-	CacheCreationInputTokens int64                     `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64                     `json:"cache_read_input_tokens"`
-	Iterations               []advisor.IterationUsage  `json:"iterations,omitempty"`
+	InputTokens              int64                    `json:"input_tokens"`
+	OutputTokens             int64                    `json:"output_tokens"`
+	CacheCreationInputTokens int64                    `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64                    `json:"cache_read_input_tokens"`
+	Iterations               []advisor.IterationUsage `json:"iterations,omitempty"`
 }
 
 func (u usageJSON) toCounts() usage.Counts {

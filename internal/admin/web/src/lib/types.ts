@@ -104,6 +104,10 @@ export interface ClientRow {
   full_token?: string;
   label?: string;
   group?: string;
+  // Provider allow-list: which upstream providers this token may use.
+  // Empty / absent = both (unrestricted). Values are canonical provider
+  // ids ("anthropic" | "openai").
+  providers?: string[];
   // Current rolling-week spend (informational; no quota any more).
   weekly_usd: number;
   // SaaS wallet — balance + pricing-group assignment. Zero when SaaS

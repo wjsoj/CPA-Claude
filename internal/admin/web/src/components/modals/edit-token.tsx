@@ -27,6 +27,7 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
   const [name, setName] = useState(row.label || "");
   const [rpm, setRpm] = useState(row.rpm && row.rpm > 0 ? String(row.rpm) : "");
   const [group, setGroup] = useState(row.group || "");
+  const [providerAccess, setProviderAccess] = useState(row.providers?.[0] || ""); // "" | "anthropic" | "openai"
   // SaaS — admin balance adjustment + pricing-group reassignment.
   const [balanceDelta, setBalanceDelta] = useState("");
   const [balanceNote, setBalanceNote] = useState("");
@@ -61,7 +62,11 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
     setBusy(true);
     setErr("");
     try {
-      const body: Record<string, unknown> = { name, group };
+      const body: Record<string, unknown> = {
+        name,
+        group,
+        providers: providerAccess ? [providerAccess] : [],
+      };
       const r = parseInt(rpm, 10);
       body.rpm = !isNaN(r) && r > 0 ? r : 0;
       const gid = parseInt(groupID, 10);
@@ -231,6 +236,21 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
                 value={group}
                 onChange={(e) => setGroup(e.currentTarget.value)}
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Provider access</Label>
+              <select
+                className="w-full h-9 border border-input rounded-md bg-transparent px-3 text-sm"
+                value={providerAccess}
+                onChange={(e) => setProviderAccess(e.currentTarget.value)}
+              >
+                <option value="">Both (Claude + OpenAI)</option>
+                <option value="anthropic">Claude only</option>
+                <option value="openai">OpenAI only</option>
+              </select>
+              <p className="text-xs text-muted-foreground">
+                "Claude only" rejects the OpenAI/Codex endpoint with 403, and vice versa.
+              </p>
             </div>
             {err && <div className="text-sm text-destructive">{err}</div>}
 

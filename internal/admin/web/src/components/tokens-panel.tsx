@@ -228,7 +228,17 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
                       </td>
                       <td className="py-3 px-4 mono text-xs text-muted-foreground">{cl.token}</td>
                       <td className="py-3 px-4">
-                        <GroupBadge group={cl.group} />
+                        <div className="flex flex-col items-start gap-1">
+                          <GroupBadge group={cl.group} />
+                          {cl.providers && cl.providers.length > 0 && (
+                            <Badge
+                              variant={cl.providers.includes("openai") ? "emerald" : "blue"}
+                              title="This token is restricted to a single provider endpoint"
+                            >
+                              {cl.providers.includes("openai") ? "OpenAI only" : "Claude only"}
+                            </Badge>
+                          )}
+                        </div>
                       </td>
                       <td className="py-3 px-4 mono text-sm">
                         <div className="font-medium">${cl.weekly_usd.toFixed(4)}</div>
