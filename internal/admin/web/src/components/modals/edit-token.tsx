@@ -13,6 +13,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { confirmDialog } from "@/hooks/use-confirm";
 import { copyToClipboard, fmtDate, fmtInt } from "@/lib/utils";
@@ -27,7 +34,7 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
   const [name, setName] = useState(row.label || "");
   const [rpm, setRpm] = useState(row.rpm && row.rpm > 0 ? String(row.rpm) : "");
   const [group, setGroup] = useState(row.group || "");
-  const [providerAccess, setProviderAccess] = useState(row.providers?.[0] || ""); // "" | "anthropic" | "openai"
+  const [providerAccess, setProviderAccess] = useState(row.providers?.[0] || "both"); // "both" | "anthropic" | "openai"
   // SaaS — admin balance adjustment + pricing-group reassignment.
   const [balanceDelta, setBalanceDelta] = useState("");
   const [balanceNote, setBalanceNote] = useState("");
@@ -65,7 +72,7 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
       const body: Record<string, unknown> = {
         name,
         group,
-        providers: providerAccess ? [providerAccess] : [],
+        providers: providerAccess === "both" ? [] : [providerAccess],
       };
       const r = parseInt(rpm, 10);
       body.rpm = !isNaN(r) && r > 0 ? r : 0;
@@ -239,15 +246,16 @@ export function EditTokenModal({ row, onClose, onSaved }: Props) {
             </div>
             <div className="space-y-1.5">
               <Label>Provider access</Label>
-              <select
-                className="w-full h-9 border border-input rounded-md bg-transparent px-3 text-sm"
-                value={providerAccess}
-                onChange={(e) => setProviderAccess(e.currentTarget.value)}
-              >
-                <option value="">Both (Claude + OpenAI)</option>
-                <option value="anthropic">Claude only</option>
-                <option value="openai">OpenAI only</option>
-              </select>
+              <Select value={providerAccess} onValueChange={setProviderAccess}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="both">Both (Claude + OpenAI)</SelectItem>
+                  <SelectItem value="anthropic">Claude only</SelectItem>
+                  <SelectItem value="openai">OpenAI only</SelectItem>
+                </SelectContent>
+              </Select>
               <p className="text-xs text-muted-foreground">
                 "Claude only" rejects the OpenAI/Codex endpoint with 403, and vice versa.
               </p>

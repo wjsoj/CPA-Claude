@@ -11,6 +11,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { copyToClipboard, generateSkToken } from "@/lib/utils";
 
 interface Props {
@@ -23,7 +30,7 @@ export function AddTokenModal({ onClose, onSaved }: Props) {
   const [token, setTokenValue] = useState(() => generateSkToken());
   const [initialUSD, setInitialUSD] = useState("");
   const [group, setGroup] = useState("");
-  const [providerAccess, setProviderAccess] = useState(""); // "" | "anthropic" | "openai"
+  const [providerAccess, setProviderAccess] = useState("both"); // "both" | "anthropic" | "openai"
   const [groupID, setGroupID] = useState("");
   const [created, setCreated] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -53,7 +60,7 @@ export function AddTokenModal({ onClose, onSaved }: Props) {
         token: token.trim(),
         name: name.trim(),
         group: group.trim(),
-        providers: providerAccess ? [providerAccess] : [],
+        providers: providerAccess === "both" ? [] : [providerAccess],
       };
       const w = parseFloat(initialUSD);
       if (!isNaN(w) && w > 0) body.initial_usd = w;
@@ -166,15 +173,16 @@ export function AddTokenModal({ onClose, onSaved }: Props) {
             </div>
             <div className="space-y-1.5">
               <Label>Provider access</Label>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                value={providerAccess}
-                onChange={(e) => setProviderAccess(e.currentTarget.value)}
-              >
-                <option value="">Both (Claude + OpenAI)</option>
-                <option value="anthropic">Claude only</option>
-                <option value="openai">OpenAI only</option>
-              </select>
+              <Select value={providerAccess} onValueChange={setProviderAccess}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="both">Both (Claude + OpenAI)</SelectItem>
+                  <SelectItem value="anthropic">Claude only</SelectItem>
+                  <SelectItem value="openai">OpenAI only</SelectItem>
+                </SelectContent>
+              </Select>
               <p className="text-xs text-muted-foreground">
                 Restricts which endpoint this token may use. "Claude only" rejects the OpenAI/Codex endpoint
                 with 403, and vice versa. Default allows both.
