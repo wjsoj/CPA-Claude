@@ -119,6 +119,29 @@ type Config struct {
 
 	// Monitor — public uptime/availability monitoring shown on /status/.
 	Monitor MonitorConfig `yaml:"monitor"`
+
+	// ClientGuard — ingress filter that blocks non-interactive SDK / scripting
+	// clients (raw SDKs, LiteLLM, python-requests, curl, …) from the Claude
+	// endpoint while letting the interactive client family (Claude Code, Claude
+	// Desktop, Cursor) through. Blocklist-based (see cc-core/clientguard). Only
+	// applies to the Anthropic (Claude) endpoint; disabled by default.
+	ClientGuard ClientGuardConfig `yaml:"client_guard"`
+}
+
+// ClientGuardConfig configures the Claude-endpoint ingress client filter.
+type ClientGuardConfig struct {
+	// Enabled turns the filter on. Off by default (backwards compatible).
+	Enabled bool `yaml:"enabled"`
+
+	// ExtraBlockedUserAgents are additional case-insensitive User-Agent
+	// substrings to block on top of cc-core's defaults — e.g. add "axios/"
+	// or "node-fetch" here if you observe such abuse and accept the risk of
+	// catching Electron-based clients.
+	ExtraBlockedUserAgents []string `yaml:"extra_blocked_user_agents,omitempty"`
+
+	// AllowEmptyUserAgent, when true, permits requests with no User-Agent.
+	// By default an empty UA is blocked — no interactive client omits it.
+	AllowEmptyUserAgent bool `yaml:"allow_empty_user_agent,omitempty"`
 }
 
 // MonitorConfig configures the public status-page uptime monitor. The monitor

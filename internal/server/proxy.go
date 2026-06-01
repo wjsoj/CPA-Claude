@@ -87,6 +87,34 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 		model = "unknown"
 	}
 
+	// Ingress client filter (Claude endpoint only). Blocks non-interactive
+	// SDK / scripting clients (raw SDKs, LiteLLM, python-requests, curl, …)
+	// by User-Agent so they can't ride the OAuth mimicry layer. Blocklist-
+	// based: the interactive client family (Claude Code, Claude Desktop,
+	// Cursor) and any UA we don't recognize as abuse pass through. nil guard
+	// = disabled. Codex endpoint is exempt (different client population).
+	if s.guard != nil && auth.NormalizeProvider(provider) == auth.ProviderAnthropic {
+		if d := s.guard.Inspect(c.Request.Header); d.Blocked {
+			log.Warnf("client-guard: rejecting %s — %s", path, d.Reason)
+			c.Header("X-Client-Blocked", "1")
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"type": "error",
+				"error": gin.H{
+					"type":    "forbidden",
+					"message": "client not allowed: this endpoint only accepts interactive Claude clients (Claude Code, Claude Desktop, Cursor). Raw SDKs, LiteLLM, and scripting clients are blocked.",
+					"reason":  d.Reason,
+				},
+			})
+			s.emitLog(requestlog.Record{
+				Client: clientName, ClientToken: maskClientToken(clientToken),
+				Provider: provider, Model: model, Stream: peek.Stream, Path: path,
+				Status: http.StatusForbidden, DurationMs: time.Since(start).Milliseconds(),
+				Error: "client blocked: " + d.Reason,
+			})
+			return
+		}
+	}
+
 	// Balance pre-check (SaaS billing). The pricing-group multiplier the
 	// charge is computed from also lives on the wallet row, so this same
 	// call also primes the group lookup we'll need at settle time. When

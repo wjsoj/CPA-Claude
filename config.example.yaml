@@ -58,6 +58,24 @@ client_max_concurrent: 15
 # Max 20× use (parallel subagents + tool loops fit comfortably).
 client_rpm: 60
 
+# Ingress client filter for the Claude endpoint. Blocks non-interactive
+# SDK / scripting clients (raw Anthropic/OpenAI SDKs, LiteLLM,
+# python-requests, curl, Postman, …) by User-Agent, while letting the
+# interactive client family through (Claude Code CLI + IDE/Web, Claude
+# Desktop, Cursor, and any client whose UA isn't a known abuse pattern).
+# Blocklist-based — permissive by default, so it stops low-effort abuse
+# rather than acting as a hard security boundary. Only applies to the
+# Claude endpoint; the Codex endpoint is exempt.
+client_guard:
+  enabled: false
+  # Extra case-insensitive User-Agent substrings to block on top of the
+  # built-in defaults. Add "axios/" / "node-fetch" here only if you observe
+  # such abuse and accept the risk of catching Electron-based clients.
+  extra_blocked_user_agents: []
+  # By default a missing User-Agent is blocked (no interactive client omits
+  # it). Set true to allow empty-UA requests.
+  allow_empty_user_agent: false
+
 # Use uTLS (Chrome fingerprint) for all upstream calls. Recommended —
 # Anthropic edge fingerprint-checks non-browser clients.
 use_utls: true

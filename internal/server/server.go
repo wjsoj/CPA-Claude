@@ -18,6 +18,7 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/clientguard"
 	"github.com/wjsoj/cc-core/clienttoken"
 	"github.com/wjsoj/cc-core/pricing"
 	"github.com/wjsoj/cc-core/ratelimit"
@@ -78,6 +79,10 @@ type Server struct {
 	// stops its probe loop on Shutdown.
 	monitor       *monitor.Monitor
 	monitorCancel context.CancelFunc
+	// guard is the ingress client filter for the Claude endpoint. nil when
+	// cfg.ClientGuard.Enabled is false — in that mode forward() skips the
+	// check and any client is accepted.
+	guard *clientguard.Guard
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -88,6 +93,11 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	gin.SetMode(gin.ReleaseMode)
 	cat := pricing.NewCatalog(cfg.Pricing)
 	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens, reqLog: reqLog}
+	if cfg.ClientGuard.Enabled {
+		s.guard = clientguard.New(cfg.ClientGuard.ExtraBlockedUserAgents, !cfg.ClientGuard.AllowEmptyUserAgent)
+		log.Infof("client-guard: enabled on Claude endpoint (blocklist=%d defaults + %d extra, block-empty-ua=%v)",
+			len(clientguard.DefaultBlockedUASubstrings), len(cfg.ClientGuard.ExtraBlockedUserAgents), !cfg.ClientGuard.AllowEmptyUserAgent)
+	}
 	s.sidecar = ccsidecar.New(ccsidecar.Config{
 		Enabled: true,
 		UseUTLS: cfg.UseUTLS,
