@@ -70,12 +70,24 @@ type Sample struct {
 	Err       string    `json:"err,omitempty"`
 }
 
-// noData reports a probe that produced no HTTP response at all — a transport
-// error or timeout (Status == 0). These are treated as "no signal", NOT a
-// failure: the active probe couldn't measure, so the passive pool-capacity
-// signal stays authoritative (healthy). A real HTTP error response (Status > 0,
-// non-2xx) is a genuine failure and is counted as such.
-func (s Sample) noData() bool { return !s.OK && s.Status == 0 }
+// realFailure reports whether a probe sample reflects a genuine provider-side
+// outage, as opposed to a probe artifact that says nothing about whether we can
+// actually serve traffic.
+//
+// The active probe is a DIRECT API-key call and never goes through OAuth — the
+// path real (subscription) traffic takes. So a request- or auth-shaped rejection
+// (any 4xx: a probe body the upstream/relay won't accept, a revoked or
+// rate-limited key, a model the relay doesn't expose) tells us about our probe
+// or that one API key, NOT whether the provider is serving OAuth traffic. A
+// transport error / timeout (Status == 0) is likewise "no signal". Only a 5xx —
+// the upstream server itself erroring — is treated as a real provider-health
+// failure. Everything else defers to the passive pool-capacity signal (healthy
+// credentials / free slot), which is the source of truth for "can we serve".
+func (s Sample) realFailure() bool { return s.Status >= 500 }
+
+// healthySignal reports whether the sample should count as healthy (green) in
+// the uptime timeline and toward the uptime percentage.
+func (s Sample) healthySignal() bool { return s.OK || !s.realFailure() }
 
 // DayStat is a per-local-day rollup of probe outcomes.
 type DayStat struct {
@@ -342,19 +354,26 @@ func (m *Monitor) record(provider string, s Sample) {
 		d = &DayStat{Date: key}
 		st.Days[key] = d
 	}
-	// nodata probes (transport error / timeout — no HTTP response) are counted
-	// as healthy: the active probe couldn't measure, so we defer to the passive
-	// pool signal rather than showing a gap or a failure.
+	// Only a genuine provider-side failure (5xx) counts against the day. A
+	// transport error/timeout (no HTTP response) or a probe-side rejection (4xx
+	// — bad probe body, revoked/rate-limited key, unknown model) is "no signal":
+	// the probe never went through OAuth, so it can't tell us the provider is
+	// down. Defer to the passive pool signal instead of painting the bar red.
 	d.Total++
-	if s.OK || s.noData() {
+	if s.healthySignal() {
 		d.OK++
 	}
 	m.pruneDaysLocked(st)
 
-	if s.OK {
+	switch {
+	case s.OK:
 		log.Debugf("monitor: %s probe ok (%dms)", provider, s.LatencyMs)
-	} else {
+	case s.realFailure():
 		log.Infof("monitor: %s probe FAILED status=%d err=%q", provider, s.Status, s.Err)
+	default:
+		// Probe-side rejection (4xx) or transport error — no provider-health
+		// signal, doesn't dock uptime. Logged quietly for diagnostics.
+		log.Debugf("monitor: %s probe no-signal status=%d err=%q", provider, s.Status, s.Err)
 	}
 }
 
@@ -492,10 +511,11 @@ func deriveStatus(ps ProviderSnapshot) string {
 	if ps.TotalCreds == 0 || ps.HealthyCreds == 0 {
 		return "down"
 	}
-	// Only a real HTTP failure (Status > 0, non-2xx) degrades the badge. A
-	// nodata probe (transport error / timeout, Status == 0) is "no signal" —
-	// defer to the passive pool capacity, which is the source of truth.
-	probeBad := ps.ProbeEnabled && ps.LastProbe != nil && !ps.LastProbe.OK && ps.LastProbe.Status != 0
+	// Only a genuine provider-side failure (5xx) degrades the badge. A nodata
+	// probe (transport error / timeout) or a probe-side 4xx rejection is "no
+	// signal" — the probe bypasses OAuth, so it can't prove the provider is
+	// down — and we defer to the passive pool capacity, the source of truth.
+	probeBad := ps.ProbeEnabled && ps.LastProbe != nil && ps.LastProbe.realFailure()
 	if ps.SlotAvailable && !probeBad {
 		return "operational"
 	}

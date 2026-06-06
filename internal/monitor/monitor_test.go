@@ -13,14 +13,17 @@ func TestRecordRollupAndPrune(t *testing.T) {
 
 	m.record(auth.ProviderAnthropic, Sample{TS: day, OK: true, LatencyMs: 100})
 	m.record(auth.ProviderAnthropic, Sample{TS: day.Add(time.Minute), OK: false, Status: 500})
-	m.record(auth.ProviderAnthropic, Sample{TS: day.Add(2 * time.Minute), OK: true})
+	// A 4xx probe rejection (probe bypasses OAuth) is "no signal", counted as
+	// healthy in the rollup — only the 5xx above should dock the day.
+	m.record(auth.ProviderAnthropic, Sample{TS: day.Add(2 * time.Minute), OK: false, Status: 400})
+	m.record(auth.ProviderAnthropic, Sample{TS: day.Add(3 * time.Minute), OK: true})
 
 	st := m.stores[auth.ProviderAnthropic]
 	if st == nil {
 		t.Fatal("provider store not created")
 	}
 	d := st.Days["2026-05-29"]
-	if d == nil || d.Total != 3 || d.OK != 2 {
+	if d == nil || d.Total != 4 || d.OK != 3 {
 		t.Fatalf("day rollup wrong: %+v", d)
 	}
 	if st.Last == nil || !st.Last.OK {
@@ -90,8 +93,13 @@ func TestDeriveStatus(t *testing.T) {
 		{"no creds", ProviderSnapshot{TotalCreds: 0}, "down"},
 		{"all unhealthy", ProviderSnapshot{TotalCreds: 3, HealthyCreds: 0}, "down"},
 		{"healthy + slot + probe ok", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: true}}, "operational"},
-		{"healthy + slot + probe fail (real http error)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 500}}, "degraded"},
+		{"healthy + slot + probe fail (5xx provider error)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 500}}, "degraded"},
 		{"healthy + slot + probe nodata (transport err)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 0}}, "operational"},
+		// A 4xx is a probe-side rejection (the probe bypasses OAuth), not a
+		// provider outage — it must NOT degrade the badge.
+		{"healthy + slot + probe 400 (bad probe body)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 400}}, "operational"},
+		{"healthy + slot + probe 403 (key rejected)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 403}}, "operational"},
+		{"healthy + slot + probe 429 (per-key rate limit)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 429}}, "operational"},
 		{"healthy but saturated", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: false}, "degraded"},
 		{"passive only, slot free", ProviderSnapshot{TotalCreds: 1, HealthyCreds: 1, SlotAvailable: true}, "operational"},
 	}
