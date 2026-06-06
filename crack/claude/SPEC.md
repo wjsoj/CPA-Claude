@@ -188,6 +188,17 @@ linux_kernel=7.0.11-arch1-1   <- host kernel (cosmetic profile value)
 
 Only `build_time` (and the capture-host `linux_kernel`) changed vs 2.1.158.
 
+> **Implementation note — per-account host differentiation.** The values above
+> are one real client = one machine (ground truth). Our sidecar does NOT pin this
+> single profile for every credential: `linux_distro_id`, `linux_kernel`,
+> `terminal`, and `shell` are chosen **per OAuth account** from a weighted pool of
+> plausible Linux hosts (cc-core `auth/hostprofile.go`), and process metrics get a
+> per-account baseline + jitter — otherwise N distinct accounts would all report
+> this one identical (and rare, Arch) machine, itself a detection signal.
+> `platform`, `arch`, `node_version`, `is_running_with_bun`, `build_time` stay
+> fixed (version-tied / one ground-truth capture; Linux-only — no mac/win
+> structure invented). The pool is synthetic, not captured.
+
 ---
 
 ## 7. OAuth login flow — NOT re-captured this round

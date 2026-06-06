@@ -83,6 +83,8 @@ In real captures advisor sub-calls always run cache-cold (cache_read/cache_creat
 
 A `bootstrapSessionID` is shared by all three streams (matches real CC, where bootstrap + quota probe + event_logging all carry the same session UUID). Distinct from the per-conversation chat session_id from `SessionIDFor`.
 
+**Per-account host differentiation** — the machine-identifying telemetry fields (`linux_distro_id`, `linux_kernel`, `terminal`, `shell` in the event_logging + datadog env blocks, plus the process-memory metrics) are NOT one pinned profile. Each OAuth account draws a stable host from a weighted pool of plausible Linux machines via `auth.HostProfile` / `ProfileFor(accountKey)` (cc-core `auth/hostprofile.go`), sha256-anchored exactly like `DeviceIDFor`, and persisted to the credential file (`host_profile`) on first sidecar touch via `EnsureHostProfile`. Without this, N distinct accounts would all advertise the single captured machine (Arch/konsole/zsh) — "many users, one identical rare box" is itself a signal. Scope is **Linux-only and sidecar-only**: `platform`/`arch`/`node_version`/`is_running_with_bun` and the chat-path `x-stainless-*` headers stay fixed (one ground-truth capture; the Bun runtime bundle moves with the CC release; no mac/win capture to model their different env structure).
+
 GC (`gcLoop`) evicts virtual sessions idle > 30 min; heartbeats also self-stop after 5 min idle. `Server.Shutdown` cancels every live session's context.
 
 API-key credentials never trigger sidecars (the third-party-detection signal we're hiding only applies to OAuth subscription accounts).
