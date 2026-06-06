@@ -6,7 +6,7 @@ client is kept (older versions live in git history).
 
 ```
 crack/
-  claude/   Claude Code (claude-cli) — current target 2.1.156. SPEC.md is the
+  claude/   Claude Code (claude-cli) — current target 2.1.167. SPEC.md is the
             source of truth; rows/ are structurally-redacted representative
             requests (no conversation prose). Produced by scripts/extract_live.py.
   kiro/     Kiro / Amazon-Q CLI capture — rows/ + docs/ + raw/, plus login/ for

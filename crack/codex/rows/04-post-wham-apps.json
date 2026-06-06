@@ -24,7 +24,7 @@
     "Nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.01,\"max_age\":604800}",
     "Report-To": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=kGriuRgtvLkL1FvfU7Yxc6t63QqvvqbliICYoV0%2FAeskn9zfA81duwAaPpYNEZeYyjjLgQqXcfn1AZexlUNo6yayG7l8ptI6TDm7CQd7TBMAxyK%2Btt3GAgsfnN0G\"}]}",
     "set-cookie": [
-      "__cf_bm=lNRgmSeVSNkJ2JBW7i4db9YIN5dVW0R41aGGSfxJhRg-1780117181.4063563-1.0.1.1-0hJmm9zU6Jg7ofNLOPM.ewJmc7XhKPS2e3jom3r6Hz2xQbfWXtlw9wHUApg0T_4jfm_tPufuGOFMCE0seW5lakNz.QCNXiDFS7f280yhEYubWZoMxkCLxFHXslYz5ZO0; HttpOnly; Secure; Path=/; Domain=chatgpt.com; Expires=Sat, 30 May 2026 05:29:41 GMT",
+      "__cf_bm=REDACTED; HttpOnly; Secure; Path=/; Domain=chatgpt.com; Expires=Sat, 30 May 2026 05:29:41 GMT",
       "__cflb=0H28vzvP5FJafnkHxisrbi4JVxtFGwcE7wmARthuAHy; HttpOnly; SameSite=None; Secure; Path=/; Expires=Sat, 30 May 2026 05:59:41 GMT"
     ],
     "Referrer-Policy": "strict-origin-when-cross-origin",

@@ -3,13 +3,13 @@
   "url": "https://api.anthropic.com/v1/messages?beta=true",
   "method": "POST",
   "status": 200,
-  "reqSize": 289080,
-  "resSize": 10800,
+  "reqSize": 154576,
+  "resSize": 4297,
   "reqHeaders": {
     "accept": "application/json",
     "authorization": "<masked>",
     "content-type": "application/json",
-    "user-agent": "claude-cli/2.1.158 (external, cli)",
+    "user-agent": "claude-cli/2.1.167 (external, cli)",
     "x-claude-code-session-id": "<masked>",
     "x-stainless-arch": "x64",
     "x-stainless-lang": "js",
@@ -27,38 +27,38 @@
     "connection": "keep-alive",
     "host": "api.anthropic.com",
     "accept-encoding": "gzip, br",
-    "content-length": "289080"
+    "content-length": "154576"
   },
   "resHeaders": {
-    "date": "Sun, 31 May 2026 14:09:12 GMT",
+    "date": "Sat, 06 Jun 2026 13:48:26 GMT",
     "content-type": "text/event-stream; charset=utf-8",
     "transfer-encoding": "chunked",
     "connection": "keep-alive",
     "cache-control": "no-cache",
     "anthropic-ratelimit-unified-status": "allowed",
     "anthropic-ratelimit-unified-5h-status": "allowed",
-    "anthropic-ratelimit-unified-5h-reset": "1780252800",
-    "anthropic-ratelimit-unified-5h-utilization": "0.0",
+    "anthropic-ratelimit-unified-5h-reset": "1780755600",
+    "anthropic-ratelimit-unified-5h-utilization": "0.02",
     "anthropic-ratelimit-unified-7d-status": "allowed",
-    "anthropic-ratelimit-unified-7d-reset": "1780333200",
-    "anthropic-ratelimit-unified-7d-utilization": "0.0",
+    "anthropic-ratelimit-unified-7d-reset": "1780938000",
+    "anthropic-ratelimit-unified-7d-utilization": "0.16",
     "anthropic-ratelimit-unified-representative-claim": "five_hour",
     "anthropic-ratelimit-unified-fallback-percentage": "0.5",
-    "anthropic-ratelimit-unified-reset": "1780252800",
+    "anthropic-ratelimit-unified-reset": "1780755600",
     "anthropic-ratelimit-unified-overage-disabled-reason": "org_level_disabled",
     "anthropic-ratelimit-unified-overage-status": "rejected",
-    "request-id": "<masked>",
+    "request-id": "req_REDACTED",
     "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
     "anthropic-organization-id": "<masked:uuid>",
-    "traceresponse": "00-e522bbb264ca60fa694df78de6b22571-e1fca975f3cf9465-01",
+    "traceresponse": "00-0b015cc6ba787ad0a79fba82d357c116-13251716892ddfb1-01",
     "server": "cloudflare",
     "content-encoding": "gzip",
     "vary": "Accept-Encoding",
-    "set-cookie": "<masked>",
-    "x-robots-tag": "none",
     "cf-cache-status": "DYNAMIC",
+    "set-cookie": "<masked>",
     "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
-    "cf-ray": "a0468e063fbef7d1-LAX"
+    "x-robots-tag": "none",
+    "cf-ray": "REDACTED-cf-ray"
   },
   "reqBody": {
     "body": {
@@ -69,42 +69,30 @@
           "content": [
             {
               "type": "text",
-              "text": "<text:17357 chars>"
+              "text": "<text:17665 chars>"
             },
             {
               "type": "text",
-              "text": "<text:13519 chars>"
+              "text": "<text:16 chars>"
             }
           ]
         },
         {
-          "role": "assistant",
-          "content": [
-            {
-              "type": "text",
-              "text": "No response requested."
-            }
-          ]
+          "role": "system",
+          "content": "<text:26185 chars>"
         },
-        "<… 59 more items redacted …>",
+        "<… 5 more items redacted …>",
         {
           "role": "user",
           "content": [
             {
-              "type": "text",
-              "text": "<text:246 chars>"
-            },
-            {
-              "type": "text",
-              "text": "<text:129 chars>"
-            },
-            {
-              "type": "text",
-              "text": "<local-command-stdout>See ya!</local-command-stdout>\n"
-            },
-            {
-              "type": "text",
-              "text": "<text:5978 chars>"
+              "tool_use_id": "toolu_0121hUC9MsjQAq2Tg1611gg2",
+              "type": "tool_result",
+              "content": "<text:29486 chars>",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
           ]
         }
@@ -112,7 +100,7 @@
       "system": [
         {
           "type": "text",
-          "text": "x-anthropic-billing-header: cc_version=2.1.158.728; cc_entrypoint=cli; cch=b9ae2;"
+          "text": "x-anthropic-billing-header: cc_version=2.1.167.ed1; cc_entrypoint=cli; cch=ccfed;"
         },
         {
           "type": "text",
@@ -129,7 +117,7 @@
         },
         {
           "type": "text",
-          "text": "<text:5670 chars>",
+          "text": "<text:7734 chars>",
           "cache_control": {
             "type": "ephemeral",
             "ttl": "1h"
@@ -301,33 +289,17 @@
           },
           "eager_input_streaming": true
         },
-        "<… 20 more items redacted …>",
+        "<… 8 more items redacted …>",
         {
-          "name": "mcp__chrome-devtools__take_snapshot",
-          "description": "<text:314 chars>",
-          "input_schema": {
-            "type": "object",
-            "properties": {
-              "verbose": {
-                "type": "boolean",
-                "description": "<text:94 chars>"
-              },
-              "filePath": {
-                "type": "string",
-                "description": "<text:136 chars>"
-              }
-            },
-            "additionalProperties": true,
-            "$schema": "http://json-schema.org/draft-07/schema#"
-          },
-          "eager_input_streaming": true,
-          "defer_loading": true
+          "type": "advisor_20260301",
+          "name": "advisor",
+          "model": "claude-opus-4-8"
         }
       ],
       "metadata": {
         "user_id": "<masked:user_id>"
       },
-      "max_tokens": 20000,
+      "max_tokens": 64000,
       "thinking": {
         "type": "adaptive"
       },
@@ -342,14 +314,17 @@
       "output_config": {
         "effort": "medium"
       },
+      "diagnostics": {
+        "previous_message_id": "<masked:previous_message_id>"
+      },
       "stream": true
     },
     "_notes": {
-      "message_count": 62,
+      "message_count": 8,
       "roles": {
-        "user": 29,
-        "assistant": 28,
-        "system": 5
+        "user": 4,
+        "system": 1,
+        "assistant": 3
       },
       "system_cache_pattern": [
         null,
@@ -365,22 +340,10 @@
         "Read",
         "ScheduleWakeup",
         "Skill",
-        "TaskCreate",
-        "TaskUpdate",
         "ToolSearch",
-        "WebFetch",
-        "WebSearch",
         "Workflow",
         "Write",
-        "mcp__chrome-devtools__evaluate_script",
-        "mcp__chrome-devtools__get_network_request",
-        "mcp__chrome-devtools__list_network_requests",
-        "mcp__chrome-devtools__list_pages",
-        "mcp__chrome-devtools__navigate_page",
-        "mcp__chrome-devtools__new_page",
-        "mcp__chrome-devtools__select_page",
-        "mcp__chrome-devtools__take_screenshot",
-        "mcp__chrome-devtools__take_snapshot"
+        "advisor"
       ]
     }
   },

@@ -1,19 +1,20 @@
-# crack/claude — Claude Code 2.1.158 live capture
+# crack/claude — Claude Code 2.1.167 live capture
 
-Captured 2026-05-31 from a real `claude-cli/2.1.158` OAuth session (whistle dump,
-58 requests) that **includes a fresh OAuth login**. Supersedes the 2.1.156 ground
-truth for the fingerprint constants.
+Captured 2026-06-06 from a real `claude-cli/2.1.167` OAuth session (whistle dump,
+steady-state working session — bootstrap burst + chat + telemetry, **no fresh
+login this round**). Supersedes the 2.1.158 ground truth for the fingerprint
+constants.
 
-- **`SPEC.md`** — the authoritative 2.1.156 → 2.1.158 diff + the new OAuth login
-  flow section (§7) + edit checklist. Read this first; it is what
-  `cc-core/{mimicry,sidecar,auth}` and hypitoken's vendored copies are pinned against.
+- **`SPEC.md`** — the authoritative 2.1.158 → 2.1.167 diff + edit checklist. Read
+  this first; it is what `cc-core/{mimicry,sidecar,auth}` and hypitoken's vendored
+  copies are pinned against. The full OAuth-login flow (unchanged this round) is
+  documented in the 2.1.158 SPEC in git history; SPEC §7 explains why it was not
+  re-captured.
 - **`rows/`** — structurally-redacted representative requests, one per endpoint
-  class. This capture's headline is the **OAuth login chain**:
-  `01-oauth_hello`, `02-oauth_token`, `03-oauth_profile`, `04-oauth_roles`,
-  `05-oauth_referral`, then startup (`06-startup_eval_sdk`, `07-startup_grove`,
-  `08-startup_bootstrap`, `09-startup_penguin`), then chat/telemetry
-  (`10-v1_messages`, `11/12-event_logging`, `13-datadog`, `14-releases`).
-  Produced by `crack/scripts/extract_live.py`.
+  class: startup (`01-startup_eval_sdk`, `02-startup_grove`, `03-startup_bootstrap`,
+  `04-startup_penguin`), then chat/telemetry (`05-v1_messages`, `06-count_tokens`,
+  `07/08-event_logging`, `09-datadog`, `10-releases`). Produced by
+  `crack/scripts/extract_live.py`.
 
 ## Privacy note
 

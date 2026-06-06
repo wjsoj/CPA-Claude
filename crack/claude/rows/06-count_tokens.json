@@ -1,0 +1,71 @@
+{
+  "class": "count_tokens",
+  "url": "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+  "method": "POST",
+  "status": 200,
+  "reqSize": 32273,
+  "resSize": 22,
+  "reqHeaders": {
+    "accept": "application/json",
+    "authorization": "<masked>",
+    "content-type": "application/json",
+    "user-agent": "claude-cli/2.1.167 (external, cli)",
+    "x-claude-code-session-id": "<masked>",
+    "x-stainless-arch": "x64",
+    "x-stainless-lang": "js",
+    "x-stainless-os": "Linux",
+    "x-stainless-package-version": "0.94.0",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v24.3.0",
+    "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-version": "2023-06-01",
+    "x-app": "cli",
+    "x-client-request-id": "<masked>",
+    "connection": "keep-alive",
+    "host": "api.anthropic.com",
+    "accept-encoding": "gzip, br",
+    "content-length": "32273"
+  },
+  "resHeaders": {
+    "date": "Sat, 06 Jun 2026 13:48:22 GMT",
+    "content-type": "application/json",
+    "content-length": "22",
+    "connection": "keep-alive",
+    "request-id": "req_REDACTED",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "anthropic-organization-id": "<masked:uuid>",
+    "server": "cloudflare",
+    "server-timing": "x-originResponse;dur=94",
+    "set-cookie": "<masked>",
+    "x-robots-tag": "none",
+    "cf-cache-status": "DYNAMIC",
+    "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+    "cf-ray": "REDACTED-cf-ray"
+  },
+  "reqBody": {
+    "body": {
+      "model": "claude-opus-4-8",
+      "messages": [
+        {
+          "role": "user",
+          "content": "<text:27350 chars>"
+        }
+      ],
+      "tools": []
+    },
+    "_notes": {
+      "message_count": 1,
+      "roles": {
+        "user": 1
+      },
+      "tool_names": []
+    }
+  },
+  "resBody": {
+    "body": {
+      "input_tokens": 14950
+    }
+  }
+}
