@@ -24,7 +24,7 @@ import (
 // handful of upstream-private fields stripped. The upstream request headers
 // (Originator / User-Agent / Version / OpenAI-Beta / Chatgpt-Account-Id) are
 // applied by mimicry.ApplyCodexCLIHeaders, pinned to codex-tui/0.135.0 — see
-// crack/codex/SPEC.md and cc-core/mimicry/codex.go.
+// cc-core/crack/codex/SPEC.md and cc-core/mimicry/codex.go.
 
 // codexOAuthPath maps a client-facing path under /v1 to the corresponding
 // suffix on the ChatGPT Codex backend (mounted under /codex). The backend
@@ -310,7 +310,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// Apply the Codex CLI fingerprint — codex-tui/0.135.0 identity (Originator /
 	// User-Agent / Version) over the legacy HTTP POST /codex/responses{,/compact}
 	// path. Centralized in cc-core (mimicry.ApplyCodexCLIHeaders) so every relay
-	// stays in lockstep when the version target is bumped. See crack/codex/SPEC.md.
+	// stays in lockstep when the version target is bumped. See cc-core/crack/codex/SPEC.md.
 	mimicry.ApplyCodexCLIHeaders(upReq, accessToken, accountID, isCompactPath)
 
 	// Shared pooled transport (per proxyURL). Reusing HTTP/2 connections is

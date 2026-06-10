@@ -102,16 +102,16 @@ OpenAI-format requests on the Codex endpoint. **API-key credentials** forward to
 
 Both paths produce the same `auth.Auth` and go through `Pool.AddOAuth`. If you change the token-exchange logic in `finishAnthropicLogin`, both flows are affected.
 
-### Capture archive — `crack/`
+### Capture archive — lives in `cc-core/crack/`
 
-Recorded real-client traffic, ground truth for every fingerprint constant. Organized **by client**, keeping only the latest capture each (older versions are in git history). See `crack/README.md`.
+Recorded real-client traffic, ground truth for every fingerprint constant. **Consolidated into `cc-core/crack/` (v0.8.19)** so the captures sit next to the constants they pin — this repo no longer carries its own `crack/`. Organized by client; only the latest capture of each is kept (older in git history). See `cc-core/crack/README.md`.
 
-- `crack/claude/` — latest Claude Code live-session capture. Current target **2.1.167**; `SPEC.md` is the authoritative constant list + the 2.1.158→2.1.167 diff, `rows/` holds structurally-redacted representative requests (fingerprint structure only, no conversation prose) produced by `crack/scripts/extract_live.py`. No raw dump committed (live sessions carry private content).
-- `crack/kiro/` — Kiro / Amazon-Q CLI capture: `raw/` + `rows/` + `docs/`, plus `login/` for the Cognito PKCE flow. Produced by `crack/scripts/split.py` + `gen.py`.
-- `crack/codex/` — ChatGPT/Codex CLI capture, to be added.
-- `crack/scripts/` — tooling: `extract_live.py` (Claude, structural redaction), `split.py kiro|kiro-login` + `gen.py` (Kiro), `sanitize.py` (idempotent in-place token/ID redaction; literal map in gitignored `redaction_map.json`). See `crack/scripts/README.md`.
+- `cc-core/crack/cc2170/` (+ `cc2167/`) — Claude Code live-session captures. The running target is **2.1.170** (`SPEC.md` = authoritative constants + diff; `rows/` = structurally-redacted requests).
+- `cc-core/crack/kiro/` — Kiro / Amazon-Q CLI capture (`rows/` + `docs/` + `login/` Cognito PKCE; `raw/` is gitignored).
+- `cc-core/crack/codex/` — ChatGPT/Codex CLI capture (`codex-tui/0.135.0`).
+- `cc-core/crack/scripts/` — `extract_live.py` (structural redaction), `split.py`/`gen.py`/`sanitize.py`.
 
-**When bumping the CC version target, re-capture and update `crack/claude/` first** (`extract_live.py` → update `SPEC.md`), then update the fingerprint constants in cc-core to match.
+**Bumping the CC version target is now a cc-core change**: re-capture → `extract_live.py` → update `cc-core/crack/cc<ver>/SPEC.md` and the constants in `cc-core/{mimicry,sidecar}` → tag a cc-core release → bump the dependency here (and in hypitoken).
 
 ## Conventions worth knowing
 
