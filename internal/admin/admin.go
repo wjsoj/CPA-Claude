@@ -22,6 +22,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/monitor"
@@ -86,6 +87,27 @@ type Handler struct {
 	// so minor staleness is acceptable.
 	reqCacheMu sync.Mutex
 	reqCache   map[string]reqCacheEntry
+	// reqSF collapses concurrent cache misses for the same filter into a
+	// single disk scan. Matters most for the anonymous /status endpoints:
+	// N visitors polling on timers must not mean N simultaneous passes
+	// over the full log archive.
+	reqSF singleflight.Group
+
+	// Cached aggregates backing the public /status endpoints (24h hourly
+	// buckets for the dashboard, 24h pool-wide window for the overview).
+	// TTL-only invalidation, same rationale as reqCache.
+	statusAggMu   sync.Mutex
+	hourlyCache   []requestlog.HourBucket
+	hourlyAt      time.Time
+	window24Cache statusWindow24
+	window24At    time.Time
+}
+
+// statusWindow24 is the pool-wide 24h rollup the public overview shows.
+type statusWindow24 struct {
+	Requests int64
+	CostUSD  float64
+	Errors   int64
 }
 
 type reqCacheEntry struct {
@@ -96,6 +118,12 @@ type reqCacheEntry struct {
 const lifetimeCacheTTL = 15 * time.Second
 const requestsCacheTTL = 15 * time.Second
 const requestsCacheMax = 16
+
+// statusCacheTTL is the freshness bound for the anonymous /status
+// endpoints. Deliberately longer than the admin panel's 15s: the page is
+// public, polls on a timer, and a minute of staleness is invisible there,
+// while every cache miss costs a multi-second scan of the log archive.
+const statusCacheTTL = 60 * time.Second
 
 func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, cat *pricing.Catalog, tokens *clienttoken.Store) *Handler {
 	return &Handler{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens}
@@ -1325,31 +1353,61 @@ func (h *Handler) handleRequestsQuery(c *gin.Context) {
 // Entries are cloned into a fresh slice so downstream remapDisplayNames
 // can mutate without data-racing concurrent readers.
 func (h *Handler) cachedQuery(f requestlog.Filter) (*requestlog.Result, error) {
-	key := reqCacheKey(f)
-	h.reqCacheMu.Lock()
-	if ent, ok := h.reqCache[key]; ok && time.Since(ent.at) < requestsCacheTTL {
-		clone := cloneResult(ent.result)
-		h.reqCacheMu.Unlock()
-		return clone, nil
-	}
-	h.reqCacheMu.Unlock()
-
-	res, err := requestlog.Query(f)
+	res, err := h.cachedQueryShared(f, requestsCacheTTL)
 	if err != nil {
 		return nil, err
 	}
+	return cloneResult(res), nil
+}
 
+// cachedQueryShared is the underlying cache lookup: it returns the cached
+// Result itself, WITHOUT cloning Entries. The value is shared across
+// goroutines — callers must treat every field as read-only. The /status
+// handlers use this directly because their full-archive scans can carry
+// hundreds of thousands of Entries; cloning per request would cost more
+// than the scan it saves. Concurrent misses on the same key collapse into
+// one disk pass via singleflight.
+func (h *Handler) cachedQueryShared(f requestlog.Filter, ttl time.Duration) (*requestlog.Result, error) {
+	key := reqCacheKey(f)
 	h.reqCacheMu.Lock()
-	if h.reqCache == nil || len(h.reqCache) >= requestsCacheMax {
-		// Coarse eviction: when the cache grows unbounded (e.g., varied
-		// user filters from the Requests tab), drop everything. The hot
-		// Overview polls refill the two common keys within 10s.
-		h.reqCache = make(map[string]reqCacheEntry, 4)
+	if ent, ok := h.reqCache[key]; ok && time.Since(ent.at) < ttl {
+		res := ent.result
+		h.reqCacheMu.Unlock()
+		return res, nil
 	}
-	h.reqCache[key] = reqCacheEntry{at: time.Now(), result: res}
-	clone := cloneResult(res)
 	h.reqCacheMu.Unlock()
-	return clone, nil
+
+	v, err, _ := h.reqSF.Do(key, func() (any, error) {
+		// Re-check under singleflight: a duplicate caller that queued
+		// behind the winning scan must not trigger a second pass.
+		h.reqCacheMu.Lock()
+		if ent, ok := h.reqCache[key]; ok && time.Since(ent.at) < ttl {
+			res := ent.result
+			h.reqCacheMu.Unlock()
+			return res, nil
+		}
+		h.reqCacheMu.Unlock()
+
+		res, err := requestlog.Query(f)
+		if err != nil {
+			return nil, err
+		}
+
+		h.reqCacheMu.Lock()
+		if h.reqCache == nil || len(h.reqCache) >= requestsCacheMax {
+			// Coarse eviction: when the cache grows unbounded (e.g., varied
+			// user filters from the Requests tab), drop everything. The hot
+			// Overview polls refill the two common keys within 10s.
+			h.reqCache = make(map[string]reqCacheEntry, 4)
+		}
+		h.reqCache[key] = reqCacheEntry{at: time.Now(), result: res}
+		h.reqCacheMu.Unlock()
+		return res, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*requestlog.Result), nil
 }
 
 func reqCacheKey(f requestlog.Filter) string {

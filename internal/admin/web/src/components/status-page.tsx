@@ -157,7 +157,7 @@ export function StatusPage() {
     saveSavedTokens(tokens);
   }, [tokens]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (manual = false) => {
     setRefreshing(true);
     try {
       const d = await loadStatusOverview();
@@ -168,14 +168,18 @@ export function StatusPage() {
     } finally {
       setTimeout(() => setRefreshing(false), 400);
     }
-    // Bump the tick so the Dashboard panel re-fetches when the user hits
-    // Refresh. We don't auto-refresh that panel on the 15s interval to
-    // keep the public endpoint load proportional to actual attention.
-    setRefreshTick((t) => t + 1);
+    // Bump the tick so the Dashboard/Monitor panels re-fetch when the user
+    // hits Refresh — and only then. The panels already fetch once on mount;
+    // bumping here on the initial load would double that first request, and
+    // bumping on the 15s interval would re-scan the server's log archive
+    // per poll regardless of attention.
+    if (manual) {
+      setRefreshTick((t) => t + 1);
+    }
   }, []);
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 15000);
+    const t = setInterval(() => refresh(), 15000);
     return () => clearInterval(t);
   }, [refresh]);
 
@@ -267,7 +271,7 @@ export function StatusPage() {
               <Button
                 variant="outline"
                 size="icon"
-                onClick={refresh}
+                onClick={() => refresh(true)}
                 disabled={refreshing}
                 aria-label="Refresh"
                 title="Refresh"

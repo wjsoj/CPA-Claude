@@ -186,13 +186,16 @@ func (h *Handler) handleStatusDashboard(c *gin.Context) {
 		return
 	}
 
-	// 14-day window.
-	today := time.Now().UTC()
-	from14 := today.AddDate(0, 0, -13).Truncate(24 * time.Hour)
+	// 14-day window. Bounds are day-truncated: reqCacheKey serializes
+	// From/To at second precision, so a wall-clock `to` would make every
+	// call a distinct cache key — i.e. the cache would never hit and each
+	// poll would re-scan 14 days of log files.
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	from14 := today.AddDate(0, 0, -13)
 	to := today.Add(24 * time.Hour)
-	if res, err := h.cachedQuery(requestlog.Filter{
+	if res, err := h.cachedQueryShared(requestlog.Filter{
 		Dir: h.cfg.LogDir, From: from14, To: to, Limit: 1,
-	}); err == nil {
+	}, statusCacheTTL); err == nil {
 		out.Requests14d = statusDashboardRequests{
 			Summary:  res.Summary,
 			ByClient: anonymizeByClient(res.ByClient),
@@ -202,9 +205,9 @@ func (h *Handler) handleStatusDashboard(c *gin.Context) {
 	}
 
 	// All-time — needed for cache stats, tokens/$ and weekly/monthly charts.
-	if res, err := h.cachedQuery(requestlog.Filter{
+	if res, err := h.cachedQueryShared(requestlog.Filter{
 		Dir: h.cfg.LogDir, Limit: 1,
-	}); err == nil {
+	}, statusCacheTTL); err == nil {
 		out.RequestsAll = statusDashboardRequests{
 			Summary:  res.Summary,
 			ByClient: anonymizeByClient(res.ByClient),
@@ -214,11 +217,86 @@ func (h *Handler) handleStatusDashboard(c *gin.Context) {
 	}
 
 	// 24h hourly.
-	if buckets, err := requestlog.AggregateHourly(h.cfg.LogDir, 24); err == nil {
-		out.Hourly24h = buckets
-	}
+	out.Hourly24h = h.statusHourly24()
 
 	c.JSON(http.StatusOK, out)
+}
+
+// statusHourly24 returns the 24h hourly buckets for the public dashboard,
+// cached for statusCacheTTL with concurrent misses collapsed. Each cold
+// call re-reads up to two rotated log files — cheap once, but the page is
+// anonymous and polled, so misses multiply with viewers.
+func (h *Handler) statusHourly24() []requestlog.HourBucket {
+	h.statusAggMu.Lock()
+	if h.hourlyCache != nil && time.Since(h.hourlyAt) < statusCacheTTL {
+		buckets := h.hourlyCache
+		h.statusAggMu.Unlock()
+		return buckets
+	}
+	h.statusAggMu.Unlock()
+
+	v, err, _ := h.reqSF.Do("status-hourly24", func() (any, error) {
+		h.statusAggMu.Lock()
+		if h.hourlyCache != nil && time.Since(h.hourlyAt) < statusCacheTTL {
+			buckets := h.hourlyCache
+			h.statusAggMu.Unlock()
+			return buckets, nil
+		}
+		h.statusAggMu.Unlock()
+		buckets, err := requestlog.AggregateHourly(h.cfg.LogDir, 24)
+		if err != nil {
+			return nil, err
+		}
+		h.statusAggMu.Lock()
+		h.hourlyCache, h.hourlyAt = buckets, time.Now()
+		h.statusAggMu.Unlock()
+		return buckets, nil
+	})
+	if err != nil {
+		return nil
+	}
+	return v.([]requestlog.HourBucket)
+}
+
+// statusWindow24h returns the pool-wide 24h request/cost/error rollup for
+// the public overview, cached for statusCacheTTL. The underlying scan
+// covers ~2 rotated files per call.
+func (h *Handler) statusWindow24h() statusWindow24 {
+	h.statusAggMu.Lock()
+	if !h.window24At.IsZero() && time.Since(h.window24At) < statusCacheTTL {
+		w := h.window24Cache
+		h.statusAggMu.Unlock()
+		return w
+	}
+	h.statusAggMu.Unlock()
+
+	v, err, _ := h.reqSF.Do("status-window24h", func() (any, error) {
+		h.statusAggMu.Lock()
+		if !h.window24At.IsZero() && time.Since(h.window24At) < statusCacheTTL {
+			w := h.window24Cache
+			h.statusAggMu.Unlock()
+			return w, nil
+		}
+		h.statusAggMu.Unlock()
+		agg, err := requestlog.AggregateByAuth(h.cfg.LogDir, time.Now().Add(-24*time.Hour), time.Time{})
+		if err != nil {
+			return nil, err
+		}
+		var w statusWindow24
+		for _, a := range agg {
+			w.Requests += a.Count
+			w.CostUSD += a.CostUSD
+			w.Errors += a.Errors
+		}
+		h.statusAggMu.Lock()
+		h.window24Cache, h.window24At = w, time.Now()
+		h.statusAggMu.Unlock()
+		return w, nil
+	})
+	if err != nil {
+		return statusWindow24{}
+	}
+	return v.(statusWindow24)
 }
 
 // ---- /status/api/overview ----
@@ -299,16 +377,12 @@ func (h *Handler) handleStatusOverview(c *gin.Context) {
 	}
 	out.Counts.Models = len(h.pricing.Models())
 
-	// 24h aggregate across the whole pool.
+	// 24h aggregate across the whole pool (cached; see statusWindow24h).
 	if h.cfg.LogDir != "" {
-		agg, err := requestlog.AggregateByAuth(h.cfg.LogDir, time.Now().Add(-24*time.Hour), time.Time{})
-		if err == nil {
-			for _, a := range agg {
-				out.Window.Requests += a.Count
-				out.Window.CostUSD += a.CostUSD
-				out.Window.Errors += a.Errors
-			}
-		}
+		w := h.statusWindow24h()
+		out.Window.Requests = w.Requests
+		out.Window.CostUSD = w.CostUSD
+		out.Window.Errors = w.Errors
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -481,12 +555,21 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 		// per call and rewrite on emit; stale entries whose AuthID has been
 		// deleted fall back to the snapshot value.
 		labelIdx := h.pool.LabelIndex()
-		// No From bound — scan the whole archive. Limit is a safety cap;
-		// real deployments won't hit it.
-		res, err := requestlog.Query(requestlog.Filter{
+		// Bound the scan to the retention window (files older than that are
+		// pruned anyway; the bound is defensive against prune failures and
+		// short retention configs). From is day-truncated so the cache key
+		// stays stable across calls. Limit is a safety cap; real deployments
+		// won't hit it. The shared result is read-only — we only copy fields
+		// out of it below.
+		retention := h.cfg.LogRetentionDays
+		if retention <= 0 {
+			retention = 90
+		}
+		res, err := h.cachedQueryShared(requestlog.Filter{
 			Dir:   h.cfg.LogDir,
+			From:  time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -(retention - 1)),
 			Limit: 200000,
-		})
+		}, statusCacheTTL)
 		if err == nil {
 			for _, rec := range res.Entries {
 				b, ok := buckets[rec.ClientToken]
@@ -626,7 +709,11 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 			f.To = t
 		}
 	}
-	res, err := requestlog.Query(f)
+	// Shared read-only cache: the lookup pager re-issues the same filter
+	// for every page flip; without caching each flip re-scans the archive.
+	// User-supplied bounds are day-granular (parseDateBound), so keys stay
+	// stable across calls.
+	res, err := h.cachedQueryShared(f, statusCacheTTL)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
