@@ -48,8 +48,16 @@ active_window_minutes: 5
 
 # Default maximum concurrent in-flight requests per client token.
 # 0 = unlimited. Per-token overrides (set via admin panel) take
-# precedence. This cap is *global* across both endpoints.
+# precedence. Applies as-is to the Claude endpoint; the Codex endpoint
+# multiplies it by codex_concurrency_multiplier (below).
 client_max_concurrent: 15
+
+# Multiplier applied to client_max_concurrent on the Codex endpoint only.
+# Codex CLI fans out many short, bursty requests (parallel tool calls,
+# compaction probes) that would otherwise trip the shared cap, so its
+# effective limit is client_max_concurrent × this value (e.g. 15 × 5 = 75).
+# Claude is unaffected. 0 falls back to the default of 5.
+codex_concurrency_multiplier: 5
 
 # Default sliding 60-second requests-per-minute cap per client token.
 # Complements client_max_concurrent: concurrent limits fast bursts while

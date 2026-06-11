@@ -218,6 +218,14 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 
 	// Concurrency limit per client token.
 	maxConc := s.clientMaxConcurrent(clientToken)
+	if maxConc > 0 && auth.NormalizeProvider(provider) == auth.ProviderOpenAI {
+		// Codex gets a looser budget — see config.CodexConcurrencyMultiplier.
+		// Guard against a misconfigured 0/negative, which would otherwise
+		// zero out maxConc and disable the gate entirely.
+		if m := s.cfg.CodexConcurrencyMultiplier; m > 0 {
+			maxConc *= m
+		}
+	}
 	if maxConc > 0 {
 		// Scope the counter per provider so Claude and Codex share a token
 		// but not a concurrency bucket — matches the per-provider session

@@ -101,6 +101,13 @@ type Config struct {
 	// 0 = unlimited. Per-token overrides take precedence.
 	ClientMaxConcurrent int `yaml:"client_max_concurrent"`
 
+	// Multiplier applied to ClientMaxConcurrent on the Codex endpoint only:
+	// the effective Codex concurrency limit is this multiple of the per-token
+	// / global ClientMaxConcurrent. Codex CLI fans out many short, bursty
+	// requests that would otherwise trip the shared cap. 0 falls back to a
+	// sane default (see Normalize). Claude is unaffected.
+	CodexConcurrencyMultiplier int `yaml:"codex_concurrency_multiplier"`
+
 	// Default sliding-window requests-per-minute cap per client token.
 	// 0 = unlimited. Per-token overrides take precedence.
 	ClientRPM int `yaml:"client_rpm"`
@@ -269,6 +276,10 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// DefaultCodexConcurrencyMultiplier is the fallback for
+// Config.CodexConcurrencyMultiplier when it is unset (0).
+const DefaultCodexConcurrencyMultiplier = 5
+
 func applyDefaults(c *Config, path string) {
 	if c.Endpoints.Claude.Port == 0 {
 		c.Endpoints.Claude.Port = 8317
@@ -293,6 +304,9 @@ func applyDefaults(c *Config, path string) {
 	}
 	if c.ClientMaxConcurrent == 0 {
 		c.ClientMaxConcurrent = 15
+	}
+	if c.CodexConcurrencyMultiplier == 0 {
+		c.CodexConcurrencyMultiplier = DefaultCodexConcurrencyMultiplier
 	}
 	if c.ClientRPM == 0 {
 		c.ClientRPM = 60
