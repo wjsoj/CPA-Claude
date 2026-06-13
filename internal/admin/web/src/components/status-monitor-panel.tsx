@@ -38,6 +38,30 @@ export function StatusMonitorPanel({ refreshTick }: Props) {
     load();
   }, [load, refreshTick]);
 
+  // Self-contained live refresh. /status/api/monitor is a cheap in-memory
+  // snapshot (pool capacity + probe history) — it does NOT go through the 60s
+  // log-scan cache the dashboard/overview endpoints use, so polling it on its
+  // own short interval is safe. Deliberately NOT wired to the shared
+  // refreshTick: bumping that would re-trigger the expensive log-scanning
+  // panels on every tick (the regression e61bd5c fixed). Pause while the tab
+  // is hidden; refetch immediately on re-focus so a backgrounded console isn't
+  // left showing a stale badge.
+  useEffect(() => {
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      load();
+    };
+    const t = setInterval(tick, 30000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [load]);
+
   if (err || !data || data.providers.length === 0) return null;
 
   return (
