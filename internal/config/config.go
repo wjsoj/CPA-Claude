@@ -101,11 +101,13 @@ type Config struct {
 	// 0 = unlimited. Per-token overrides take precedence.
 	ClientMaxConcurrent int `yaml:"client_max_concurrent"`
 
-	// Multiplier applied to ClientMaxConcurrent on the Codex endpoint only:
-	// the effective Codex concurrency limit is this multiple of the per-token
-	// / global ClientMaxConcurrent. Codex CLI fans out many short, bursty
-	// requests that would otherwise trip the shared cap. 0 falls back to a
-	// sane default (see Normalize). Claude is unaffected.
+	// Multiplier applied on the Codex endpoint only to BOTH the per-token
+	// concurrency cap (ClientMaxConcurrent) and the per-token RPM cap
+	// (ClientRPM): the effective Codex limit on each gate is this multiple of
+	// the per-token / global value. Codex CLI fans out many short, bursty
+	// requests that would otherwise trip the shared caps. 0 falls back to a
+	// sane default (see Normalize). Claude is unaffected. (Name kept for
+	// config back-compat though it now governs RPM too.)
 	CodexConcurrencyMultiplier int `yaml:"codex_concurrency_multiplier"`
 
 	// Default sliding-window requests-per-minute cap per client token.

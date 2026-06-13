@@ -52,11 +52,12 @@ active_window_minutes: 5
 # multiplies it by codex_concurrency_multiplier (below).
 client_max_concurrent: 15
 
-# Multiplier applied to client_max_concurrent on the Codex endpoint only.
-# Codex CLI fans out many short, bursty requests (parallel tool calls,
-# compaction probes) that would otherwise trip the shared cap, so its
-# effective limit is client_max_concurrent × this value (e.g. 15 × 5 = 75).
-# Claude is unaffected. 0 falls back to the default of 5.
+# Multiplier applied on the Codex endpoint only to BOTH client_max_concurrent
+# and client_rpm. Codex CLI fans out many short, bursty requests (parallel
+# tool calls, compaction probes) that would otherwise trip the shared caps, so
+# its effective limits are each value × this multiplier (e.g. concurrency
+# 15 × 5 = 75, rpm 60 × 5 = 300). Claude is unaffected. 0 falls back to the
+# default of 5. (Key name kept for back-compat though it now governs RPM too.)
 codex_concurrency_multiplier: 5
 
 # Default sliding 60-second requests-per-minute cap per client token.

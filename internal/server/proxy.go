@@ -194,6 +194,15 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 	// 429s doesn't briefly occupy slots.
 	rpmKey := auth.NormalizeProvider(provider) + "|" + clientToken
 	if limit := s.clientRPM(clientToken); limit > 0 {
+		// Codex gets the same looser budget as the concurrency gate — the
+		// Codex CLI fans out many short, bursty requests that would otherwise
+		// trip the shared RPM cap. Mirrors config.CodexConcurrencyMultiplier
+		// usage below. Claude is unaffected.
+		if auth.NormalizeProvider(provider) == auth.ProviderOpenAI {
+			if m := s.cfg.CodexConcurrencyMultiplier; m > 0 {
+				limit *= m
+			}
+		}
 		if ok, retry := s.rpm.Allow(rpmKey, limit); !ok {
 			c.Header("Retry-After", strconv.Itoa(retry))
 			c.AbortWithStatusJSON(429, gin.H{
@@ -219,7 +228,8 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 	// Concurrency limit per client token.
 	maxConc := s.clientMaxConcurrent(clientToken)
 	if maxConc > 0 && auth.NormalizeProvider(provider) == auth.ProviderOpenAI {
-		// Codex gets a looser budget — see config.CodexConcurrencyMultiplier.
+		// Codex gets a looser budget — see config.CodexConcurrencyMultiplier
+		// (same multiplier is applied to the RPM gate above).
 		// Guard against a misconfigured 0/negative, which would otherwise
 		// zero out maxConc and disable the gate entirely.
 		if m := s.cfg.CodexConcurrencyMultiplier; m > 0 {
