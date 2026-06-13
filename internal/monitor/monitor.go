@@ -83,7 +83,19 @@ type Sample struct {
 // the upstream server itself erroring — is treated as a real provider-health
 // failure. Everything else defers to the passive pool-capacity signal (healthy
 // credentials / free slot), which is the source of truth for "can we serve".
-func (s Sample) realFailure() bool { return s.Status >= 500 }
+//
+// Cloudflare's edge-connectivity codes (520–527: "connection timed out",
+// "origin unreachable", "SSL handshake failed", …) carry a 5xx status but are
+// CF↔origin transport failures, NOT the origin application erroring — they're
+// indistinguishable from a Status==0 transport timeout from our side, and the
+// real forward path retries them. So they fall under "no signal" too, despite
+// being ≥ 500. A genuine origin 5xx (500/502/503/529) still counts.
+func (s Sample) realFailure() bool {
+	if s.Status >= 520 && s.Status <= 527 {
+		return false
+	}
+	return s.Status >= 500
+}
 
 // healthySignal reports whether the sample should count as healthy (green) in
 // the uptime timeline and toward the uptime percentage.

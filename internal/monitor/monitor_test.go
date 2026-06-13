@@ -95,6 +95,9 @@ func TestDeriveStatus(t *testing.T) {
 		{"healthy + slot + probe ok", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: true}}, "operational"},
 		{"healthy + slot + probe fail (5xx provider error)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 500}}, "degraded"},
 		{"healthy + slot + probe nodata (transport err)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 0}}, "operational"},
+		// Cloudflare 52x is a CF↔origin transport failure, not an origin 5xx —
+		// it must NOT degrade the badge (same class as a Status==0 timeout).
+		{"healthy + slot + probe 522 (CF edge timeout)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 522}}, "operational"},
 		// A 4xx is a probe-side rejection (the probe bypasses OAuth), not a
 		// provider outage — it must NOT degrade the badge.
 		{"healthy + slot + probe 400 (bad probe body)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 400}}, "operational"},
