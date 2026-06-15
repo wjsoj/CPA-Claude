@@ -166,6 +166,9 @@ export interface MonitorSample {
   status: number;
   latency_ms: number;
   err?: string;
+  // True when the passive pool had a healthy credential at probe time. Global
+  // health defers to pool capacity, so this overrides a failing probe status.
+  pool_healthy?: boolean;
 }
 
 export interface MonitorDay {

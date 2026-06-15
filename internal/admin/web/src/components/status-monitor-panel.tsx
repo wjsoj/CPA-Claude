@@ -209,13 +209,15 @@ function bucketRecent(samples: MonitorSample[], generatedAt: string): Slot[] {
     if (idx < 0) idx = 0;
     if (idx >= RECENT_SLOTS) idx = RECENT_SLOTS - 1;
     slots[idx].total++;
-    // Only a genuine provider-side failure (5xx) paints a slot red. The probe is
-    // a direct API-key call that never goes through OAuth, so a transport error
-    // (status 0) or a probe-side rejection (4xx — bad probe body, revoked/rate-
-    // limited key, unknown model) is "no signal", not a provider outage: it
-    // counts as healthy and defers to the passive pool signal. Mirrors the
-    // backend monitor.Sample.healthySignal() policy.
-    if (s.ok || (s.status ?? 0) < 500) slots[idx].ok++;
+    // Global health defers to passive pool capacity. The probe hits ONE api-key
+    // credential and never OAuth, so as long as the pool had a healthy credential
+    // (pool_healthy) the slot stays green regardless of how the probe fared. Only
+    // a genuine outage with no healthy credentials left paints red. Cloudflare's
+    // edge codes (520–527) and probe-side 4xx/transport errors are "no signal"
+    // too. Mirrors the backend monitor.Sample.healthySignal() policy exactly.
+    const status = s.status ?? 0;
+    const realFailure = !s.ok && status >= 500 && !(status >= 520 && status <= 527);
+    if (s.pool_healthy || !realFailure) slots[idx].ok++;
   }
   return slots;
 }

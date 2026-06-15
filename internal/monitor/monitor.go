@@ -68,6 +68,12 @@ type Sample struct {
 	Status    int       `json:"status"`
 	LatencyMs int64     `json:"latency_ms"`
 	Err       string    `json:"err,omitempty"`
+	// PoolHealthy records whether the passive pool had at least one healthy
+	// credential at the moment of this sample. Global health defers to pool
+	// capacity, so a probe failure with PoolHealthy=true is "no signal" — the
+	// probe hits ONE api-key credential and never OAuth, so it can't prove the
+	// pool can't serve. Status/LatencyMs are still kept for the tooltip/logs.
+	PoolHealthy bool `json:"pool_healthy,omitempty"`
 }
 
 // realFailure reports whether a probe sample reflects a genuine provider-side
@@ -98,8 +104,11 @@ func (s Sample) realFailure() bool {
 }
 
 // healthySignal reports whether the sample should count as healthy (green) in
-// the uptime timeline and toward the uptime percentage.
-func (s Sample) healthySignal() bool { return s.OK || !s.realFailure() }
+// the uptime timeline and toward the uptime percentage. Global health is the
+// passive pool signal: a sample counts as healthy whenever the pool had a
+// healthy credential (PoolHealthy), regardless of how the single api-key probe
+// fared. Only a genuine outage with NO healthy credentials paints red.
+func (s Sample) healthySignal() bool { return s.OK || s.PoolHealthy || !s.realFailure() }
 
 // DayStat is a per-local-day rollup of probe outcomes.
 type DayStat struct {
@@ -199,11 +208,20 @@ func (m *Monitor) probeAll(ctx context.Context) {
 		// provider with no API-key credential (OAuth-only), record a passive
 		// sample from the pool signal so the timeline stays populated (healthy
 		// when the pool has healthy credentials) instead of going blank.
+		var s Sample
 		if cred := m.pickAPIKeyCred(provider); cred != nil {
-			m.record(t.Provider, m.probe(ctx, provider, cred, t.Model))
+			s = m.probe(ctx, provider, cred, t.Model)
 		} else {
-			m.record(t.Provider, m.passiveSample(provider))
+			s = m.passiveSample(provider)
 		}
+		// Global health defers to passive pool capacity. The probe hits ONE
+		// api-key credential and never OAuth, so its failure says nothing about
+		// whether the pool can serve: stamp PoolHealthy so a probe error with
+		// healthy credentials still left counts as healthy (no signal), not red.
+		if healthy, _, _ := m.liveCounts(provider); healthy > 0 {
+			s.PoolHealthy = true
+		}
+		m.record(t.Provider, s)
 	}
 	m.save()
 }
@@ -517,22 +535,19 @@ func displayName(provider string) string {
 	return "Claude"
 }
 
-// deriveStatus combines the passive capacity signal with the most recent active
-// probe outcome into a single badge.
+// deriveStatus is the global health badge, derived purely from passive pool
+// capacity — the source of truth for "can we serve". The active probe never
+// factors in: it hits ONE api-key credential and never OAuth, so a probe
+// failure (even a genuine upstream 5xx) says nothing about whether the pool can
+// serve. As long as a healthy credential exists, the channel is healthy.
 func deriveStatus(ps ProviderSnapshot) string {
 	if ps.TotalCreds == 0 || ps.HealthyCreds == 0 {
 		return "down"
 	}
-	// Only a genuine provider-side failure (5xx) degrades the badge. A nodata
-	// probe (transport error / timeout) or a probe-side 4xx rejection is "no
-	// signal" — the probe bypasses OAuth, so it can't prove the provider is
-	// down — and we defer to the passive pool capacity, the source of truth.
-	probeBad := ps.ProbeEnabled && ps.LastProbe != nil && ps.LastProbe.realFailure()
-	if ps.SlotAvailable && !probeBad {
+	if ps.SlotAvailable {
 		return "operational"
 	}
-	// Healthy credentials exist, but either every slot is busy or the last
-	// end-to-end probe failed — partially available.
+	// Healthy credentials exist but every slot is busy — partially available.
 	return "degraded"
 }
 

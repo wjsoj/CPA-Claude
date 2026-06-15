@@ -41,6 +41,26 @@ func TestRecordRollupAndPrune(t *testing.T) {
 	}
 }
 
+func TestHealthySignalDefersToPool(t *testing.T) {
+	cases := []struct {
+		name string
+		s    Sample
+		want bool
+	}{
+		{"2xx ok", Sample{OK: true, Status: 200}, true},
+		{"5xx, pool healthy → still healthy (no signal)", Sample{OK: false, Status: 500, PoolHealthy: true}, true},
+		{"5xx, pool dead → red", Sample{OK: false, Status: 500}, false},
+		{"CF 52x, pool dead → still healthy (transport)", Sample{OK: false, Status: 522}, true},
+		{"4xx probe rejection, pool dead → still healthy", Sample{OK: false, Status: 400}, true},
+		{"503 passive sample, no creds → red", Sample{OK: false, Status: 503}, false},
+	}
+	for _, c := range cases {
+		if got := c.s.healthySignal(); got != c.want {
+			t.Errorf("%s: healthySignal = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestPruneDaysKeeps90(t *testing.T) {
 	m := &Monitor{stores: map[string]*provStore{}, cfg: Config{}}
 	base := time.Date(2026, 5, 29, 0, 0, 0, 0, time.UTC)
@@ -93,7 +113,10 @@ func TestDeriveStatus(t *testing.T) {
 		{"no creds", ProviderSnapshot{TotalCreds: 0}, "down"},
 		{"all unhealthy", ProviderSnapshot{TotalCreds: 3, HealthyCreds: 0}, "down"},
 		{"healthy + slot + probe ok", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: true}}, "operational"},
-		{"healthy + slot + probe fail (5xx provider error)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 500}}, "degraded"},
+		// Global health defers to pool capacity: the probe hits ONE api-key
+		// credential and never OAuth, so even a genuine upstream 5xx must NOT
+		// degrade the badge while healthy credentials remain.
+		{"healthy + slot + probe fail (5xx provider error)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 500}}, "operational"},
 		{"healthy + slot + probe nodata (transport err)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 0}}, "operational"},
 		// Cloudflare 52x is a CF↔origin transport failure, not an origin 5xx —
 		// it must NOT degrade the badge (same class as a Status==0 timeout).
