@@ -92,10 +92,15 @@ func NewHandler(store *db.DB, rate *Rate, gw Gateway, site string, auth TokenAut
 	}
 	return &Handler{
 		DB: store, Rate: rate, Gateway: gw, Site: site, Auth: auth,
-		// 15 min: Z-Pay QR codes themselves go stale in ~10-15 min, so a
-		// stricter TTL avoids "I scanned the QR an hour ago and paid, why
-		// am I not credited" cases against expired session-bound codes.
-		OrderTTL:          15 * time.Minute,
+		// 24h: a pending order stays creditable for a full day so a slow
+		// payment + late gateway notify still lands. A short TTL (the old
+		// 15 min) sweeps the order row before a delayed Z-Pay notify
+		// arrives; the late notify then hits applyNotification's "order not
+		// found" branch and the payment is silently dropped (real money
+		// paid, never credited). The Z-Pay QR going stale in ~10-15 min only
+		// blocks *new* payments on that code — it doesn't justify discarding
+		// an order a buyer may still pay against within the day.
+		OrderTTL:          24 * time.Hour,
 		MaxPendingPerUser: 5,
 		createdAt:         make(map[string][]time.Time),
 	}
