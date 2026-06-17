@@ -83,6 +83,11 @@ type Server struct {
 	// cfg.ClientGuard.Enabled is false — in that mode forward() skips the
 	// check and any client is accepted.
 	guard *clientguard.Guard
+
+	// codexRespAccount binds a Codex response id to the credential that produced
+	// it, namespaced by credential group. Backs the cross-group previous_response_id
+	// safety boundary on the WS path. Always initialized (cheap; janitor goroutine).
+	codexRespAccount *codexRespAccountStore
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -93,6 +98,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	gin.SetMode(gin.ReleaseMode)
 	cat := pricing.NewCatalog(cfg.Pricing)
 	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens, reqLog: reqLog}
+	s.codexRespAccount = newCodexRespAccountStore(codexRespAccountTTL)
 	if cfg.ClientGuard.Enabled {
 		s.guard = clientguard.New(cfg.ClientGuard.ExtraBlockedUserAgents, !cfg.ClientGuard.AllowEmptyUserAgent)
 		log.Infof("client-guard: enabled on Claude endpoint (blocklist=%d defaults + %d extra, block-empty-ua=%v)",
@@ -340,6 +346,11 @@ func (s *Server) buildCodexEngine(adminH *admin.Handler, primary bool) *gin.Engi
 		v1.POST("/responses", s.handleCodexResponses)
 		v1.POST("/responses/compact", s.handleCodexResponsesCompact)
 		v1.GET("/models", s.handleCodexModels)
+		// WebSocket ingress for /v1/responses (real codex-tui transport). Opt-in;
+		// a GET with Upgrade: websocket. The POST path above is unaffected.
+		if s.cfg.CodexWS.Enabled {
+			v1.GET("/responses", s.handleCodexResponsesWS)
+		}
 	}
 
 	if primary {
