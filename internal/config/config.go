@@ -86,6 +86,15 @@ type Config struct {
 	// Minutes of inactivity after which a client session releases its OAuth slot.
 	ActiveWindowMinutes int `yaml:"active_window_minutes"`
 
+	// DisplayTimezone is the IANA time zone (e.g. "Asia/Shanghai", "UTC",
+	// "Local") used to assign usage/request-log rollups to day and hour
+	// buckets in the admin panel. Without this, day boundaries fall on UTC
+	// midnight, so on a +08:00 host all traffic before 08:00 local is filed
+	// under the previous day and "today" reads empty until 08:00. Empty
+	// defaults to "Asia/Shanghai". Display only — on-disk log file names and
+	// retention stay UTC, and historical data re-buckets at query time.
+	DisplayTimezone string `yaml:"display_timezone,omitempty"`
+
 	// Token required to access the management panel and APIs.
 	// Empty = panel disabled. Send as X-Admin-Token header (or Authorization: Bearer).
 	AdminToken string `yaml:"admin_token,omitempty"`

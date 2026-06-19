@@ -1512,12 +1512,16 @@ func (h *Handler) remapDisplayNames(entries []requestlog.Record) {
 
 // parseDateBound accepts "YYYY-MM-DD" (start-of-day) or full RFC3339.
 // endOfDay=true shifts bare dates to 23:59:59 so `to=2026-04-14` covers
-// the whole day.
+// the whole day. Bare dates are interpreted in requestlog.BucketLocation()
+// (the configured display zone) so the day window lines up with the same
+// boundaries used for ByDay bucketing — otherwise a +08:00 panel would
+// query a UTC-midnight window against local-day buckets and lose the
+// first 8 hours.
 func parseDateBound(s string, endOfDay bool) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
 	}
-	t, err := time.Parse("2006-01-02", s)
+	t, err := time.ParseInLocation("2006-01-02", s, requestlog.BucketLocation())
 	if err != nil {
 		return time.Time{}, err
 	}

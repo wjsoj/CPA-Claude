@@ -535,7 +535,9 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 			daily       map[string]*statusDailyEntry
 		}
 		seedDays := make([]string, 0, statusDailyWindowDays)
-		today := time.Now().UTC()
+		// Day labels follow the configured display zone so this rollup lines
+		// up with the admin overview's ByDay buckets (default UTC).
+		today := time.Now().In(requestlog.BucketLocation())
 		for i := statusDailyWindowDays - 1; i >= 0; i-- {
 			d := today.AddDate(0, 0, -i)
 			seedDays = append(seedDays, d.Format("2006-01-02"))
@@ -589,7 +591,7 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 						b.agg.Errors++
 					}
 				}
-				dayKey := rec.TS.UTC().Format("2006-01-02")
+				dayKey := rec.TS.In(requestlog.BucketLocation()).Format("2006-01-02")
 				if d, ok := b.daily[dayKey]; ok {
 					d.CostUSD += rec.CostUSD
 					d.Requests++

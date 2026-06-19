@@ -45,6 +45,22 @@ func main() {
 	}
 	logging.Setup(cfg.LogLevel)
 
+	// Align usage/request-log day & hour buckets to the operator's local
+	// time zone so the panel's "today" matches wall-clock expectations
+	// instead of UTC midnight. Default Asia/Shanghai; "Local" follows the
+	// host TZ. Falls back to UTC if the zone can't be loaded (no tzdata).
+	tzName := strings.TrimSpace(cfg.DisplayTimezone)
+	if tzName == "" {
+		tzName = "Asia/Shanghai"
+	}
+	if loc, err := time.LoadLocation(tzName); err != nil {
+		log.Warnf("display_timezone %q could not be loaded (%v); buckets stay in UTC", tzName, err)
+	} else {
+		usage.SetBucketLocation(loc)
+		requestlog.SetBucketLocation(loc)
+		log.Infof("usage/request-log buckets aligned to %s", loc)
+	}
+
 	log.Infof("loading credentials from %s", cfg.AuthDir)
 	oauths, apikeysFromDir, err := auth.LoadAuthDir(cfg.AuthDir)
 	if err != nil {
