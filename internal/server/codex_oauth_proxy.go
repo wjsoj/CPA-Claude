@@ -195,20 +195,70 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		c.Writer.Write(payload)
 	} else if stream {
 		// Streaming client: passthrough SSE verbatim (with keepalive + terminal
-		// tracking). A truncated upstream (no terminal event) is surfaced in the
-		// request log instead of looking like a clean stream end.
-		writeResponseHeaders(c, resp)
-		if !streamSSECodexBackend(c, resp, &counts) {
-			streamErr = "stream truncated before terminal event"
+		// tracking). Headers are committed lazily inside the relay, so a break
+		// before the first byte reaches the client is recoverable.
+		res := streamSSECodexBackend(c, resp, &counts, func() { writeResponseHeaders(c, resp) })
+		if !res.sawTerminal && !res.wroteAny {
+			// Nothing reached the client yet. If the client itself went away,
+			// there's nobody to retry for; otherwise transparently fail over to
+			// another credential (same contract as the pre-response path above).
+			_ = resp.Body.Close()
+			if isClientDisconnect(ctx, res.err) {
+				a.MarkClientCancel(errString(res.err))
+				s.emitLog(requestlog.Record{
+					Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
+					AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
+					Stream: stream, Path: path, Status: 499, Attempts: attempts,
+					DurationMs: time.Since(start).Milliseconds(),
+					Error:      "client canceled before first event",
+				})
+				return false, true
+			}
+			log.Warnf("codex oauth: stream broke before any output via %s (attempt %d, %s): %v — retrying on another credential",
+				a.ID, attempts, time.Since(start).Round(time.Millisecond), res.err)
+			return true, false
+		}
+		if !res.sawTerminal {
+			// Bytes already went downstream — can't restart cleanly. Record the
+			// truncation richly so it's visible in logs + the request log
+			// instead of looking like a clean stream end.
+			streamErr = fmt.Sprintf("stream truncated mid-flight after %d event(s)/%dB: %v", res.events, res.bytes, res.err)
+			if isClientDisconnect(ctx, res.err) {
+				log.Infof("codex oauth: client disconnected mid-stream via %s (attempt %d, events=%d, bytes=%d, %s)",
+					a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond))
+			} else {
+				log.Warnf("codex oauth: SSE truncated mid-stream via %s (attempt %d, events=%d, bytes=%d, %s): %v",
+					a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond), res.err)
+			}
 		}
 	} else {
 		// Non-streaming client: aggregate SSE into a single response object
 		// (mirrors CLIProxyAPI's CodexExecutor.Execute aggregation).
 		payload, aerr := aggregateCodexResponseStream(resp.Body, &counts)
 		if aerr != nil {
+			_ = resp.Body.Close()
+			// The aggregate buffers the whole response before writing anything,
+			// so nothing has reached the client — a truncated/transient upstream
+			// can be retried cleanly on another credential. Client-gone and
+			// genuine parse errors (well-formed but unexpected shape) won't
+			// improve on retry, so those are surfaced as 499/502.
+			if isClientDisconnect(ctx, aerr) {
+				a.MarkClientCancel(aerr.Error())
+				s.emitLog(requestlog.Record{
+					Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
+					AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
+					Stream: stream, Path: path, Status: 499, Attempts: attempts,
+					DurationMs: time.Since(start).Milliseconds(),
+					Error:      "client canceled",
+				})
+				return false, true
+			}
+			if errors.Is(aerr, io.EOF) || errors.Is(aerr, io.ErrUnexpectedEOF) || isTransientNetErr(aerr) {
+				log.Warnf("codex oauth: aggregation truncated via %s (attempt %d): %v — retrying on another credential", a.ID, attempts, aerr)
+				return true, false
+			}
 			log.Warnf("codex oauth: aggregation via %s failed: %v", a.ID, aerr)
 			c.AbortWithStatusJSON(502, gin.H{"error": "codex upstream: " + aerr.Error()})
-			_ = resp.Body.Close()
 			s.emitLog(requestlog.Record{
 				Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
 				AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
@@ -385,33 +435,50 @@ func codexTerminalEvent(payload []byte) bool {
 // Usage arrives inside the `response.completed` event as
 // `response.usage.{input_tokens, output_tokens, input_tokens_details.cached_tokens}`.
 //
-// Beyond verbatim passthrough it (a) emits an SSE keepalive comment line during
-// silent gaps so intermediaries (Caddy/Cloudflare/the client's own idle timeout)
-// don't cut the long-lived stream while the model is mid-think, and (b) tracks
-// whether the terminal event arrived, so a truncated upstream is logged instead
-// of being passed off to the client as a clean end-of-stream (the root cause of
-// the "stream disconnected before completion" reports). Returns whether a
-// terminal event was observed.
+// Beyond verbatim passthrough it (a) commits the response headers lazily, via
+// commit(), right before the first byte is written downstream — so a break that
+// happens before any output reaches the client can be retried by the caller on
+// a different credential (the common "RST right after 200" case); (b) emits an
+// SSE keepalive comment line during silent gaps so intermediaries (Caddy/
+// Cloudflare/the client's own idle timeout) don't cut the long-lived stream
+// while the model is mid-think; and (c) tracks the terminal event + relay
+// counters so a truncated upstream is reported (logged + retried/surfaced)
+// instead of being passed off to the client as a clean end-of-stream — the root
+// cause of the "stream disconnected before completion" reports.
 //
 // gin's ResponseWriter is not goroutine-safe, so the keepalive goroutine and the
 // read loop share one mutex around every Write/Flush.
-func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Counts) (sawTerminal bool) {
+func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Counts, commit func()) codexStreamResult {
 	flusher, _ := c.Writer.(http.Flusher)
+	var res codexStreamResult
 	var mu sync.Mutex
+	committed := false
 	lastWrite := time.Now()
 
+	// write commits the headers on first use (so the caller can still retry up
+	// to that point), then writes + flushes under the mutex.
 	write := func(b []byte) {
 		mu.Lock()
-		_, _ = c.Writer.Write(b)
+		defer mu.Unlock()
+		if !committed {
+			if commit != nil {
+				commit()
+			}
+			committed = true
+			res.wroteAny = true
+		}
+		n, _ := c.Writer.Write(b)
+		res.bytes += int64(n)
 		if flusher != nil {
 			flusher.Flush()
 		}
 		lastWrite = time.Now()
-		mu.Unlock()
 	}
 
 	// Keepalive: after >=10s of downstream silence, emit an SSE comment line
-	// (":\n\n", ignored by SSE clients) to keep the connection warm.
+	// (":\n\n", ignored by SSE clients) to keep the connection warm. Only runs
+	// once the stream has started — before the first real event the window must
+	// stay write-free so the caller can still fail over to another credential.
 	const keepaliveIdle = 10 * time.Second
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -427,8 +494,9 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 			case <-t.C:
 				mu.Lock()
 				idle := time.Since(lastWrite)
+				active := committed
 				mu.Unlock()
-				if idle >= keepaliveIdle {
+				if active && idle >= keepaliveIdle {
 					write([]byte(":\n\n"))
 				}
 			}
@@ -447,25 +515,44 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 			if bytes.HasPrefix(trim, []byte("data:")) {
 				payload := bytes.TrimSpace(trim[5:])
 				if len(payload) > 0 && payload[0] == '{' {
+					res.events++
 					counts.Add(extractCodexBackendUsageFromJSON(payload))
 					if codexTerminalEvent(payload) {
-						sawTerminal = true
+						res.sawTerminal = true
 					}
 				}
 			}
 			write(line)
 		}
 		if err != nil {
-			if !sawTerminal {
-				if errors.Is(err, io.EOF) {
-					log.Warnf("codex oauth: SSE stream EOF before terminal event (truncated upstream)")
-				} else {
-					log.Warnf("codex oauth: SSE stream error before terminal event: %v", err)
-				}
+			if !errors.Is(err, io.EOF) {
+				res.err = err
+			} else if !res.sawTerminal {
+				// Clean EOF but no terminal event → upstream truncated us.
+				res.err = io.ErrUnexpectedEOF
 			}
-			return sawTerminal
+			return res
 		}
 	}
+}
+
+// codexStreamResult reports the outcome of a Codex backend SSE relay so the
+// caller can choose between a transparent retry (nothing reached the client yet)
+// and a logged give-up (bytes already committed downstream — uninterruptible).
+type codexStreamResult struct {
+	sawTerminal bool  // a response.{completed,failed,...} event was relayed
+	wroteAny    bool  // at least one byte was committed to the client
+	events      int   // data: events relayed (diagnostics)
+	bytes       int64 // bytes written downstream (diagnostics)
+	err         error // underlying read error when the stream broke early
+}
+
+// errString renders an error for a log/record field, tolerating nil.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // extractCodexBackendUsageFromJSON reads usage from the ChatGPT Codex
