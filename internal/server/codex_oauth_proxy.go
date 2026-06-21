@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +17,7 @@ import (
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/mimicry"
 	"github.com/wjsoj/cc-core/requestlog"
+	ccstream "github.com/wjsoj/cc-core/stream"
 	"github.com/wjsoj/cc-core/usage"
 )
 
@@ -450,90 +450,42 @@ func codexTerminalEvent(payload []byte) bool {
 // read loop share one mutex around every Write/Flush.
 func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Counts, commit func()) codexStreamResult {
 	flusher, _ := c.Writer.(http.Flusher)
-	var res codexStreamResult
-	var mu sync.Mutex
-	committed := false
-	lastWrite := time.Now()
-
-	// write commits the headers on first use (so the caller can still retry up
-	// to that point), then writes + flushes under the mutex.
-	write := func(b []byte) {
-		mu.Lock()
-		defer mu.Unlock()
-		if !committed {
-			if commit != nil {
-				commit()
-			}
-			committed = true
-			res.wroteAny = true
-		}
-		n, _ := c.Writer.Write(b)
-		res.bytes += int64(n)
-		if flusher != nil {
-			flusher.Flush()
-		}
-		lastWrite = time.Now()
-	}
-
-	// Keepalive: after >=10s of downstream silence, emit an SSE comment line
-	// (":\n\n", ignored by SSE clients) to keep the connection warm. Only runs
-	// once the stream has started — before the first real event the window must
-	// stay write-free so the caller can still fail over to another credential.
-	const keepaliveIdle = 10 * time.Second
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		t := time.NewTicker(2 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-t.C:
-				mu.Lock()
-				idle := time.Since(lastWrite)
-				active := committed
-				mu.Unlock()
-				if active && idle >= keepaliveIdle {
-					write([]byte(":\n\n"))
-				}
-			}
-		}
-	}()
-	// LIFO: close(done) first, then wait for the goroutine to exit before
-	// returning, so no keepalive write races the caller's resp.Body.Close().
-	defer wg.Wait()
-	defer close(done)
-
 	reader := newLineReader(resp.Body)
-	for {
-		line, err := reader.readLine()
+	events := 0
+
+	// next supplies framing (raw lines) + usage + terminal detection to the
+	// shared relay; cc-core/stream.Relay owns keepalive + lazy commit + locking.
+	next := func() (out []byte, terminal bool, err error) {
+		line, rerr := reader.readLine()
 		if len(line) > 0 {
 			trim := bytes.TrimRight(line, "\r\n")
 			if bytes.HasPrefix(trim, []byte("data:")) {
 				payload := bytes.TrimSpace(trim[5:])
 				if len(payload) > 0 && payload[0] == '{' {
-					res.events++
+					events++
 					counts.Add(extractCodexBackendUsageFromJSON(payload))
 					if codexTerminalEvent(payload) {
-						res.sawTerminal = true
+						terminal = true
 					}
 				}
 			}
-			write(line)
 		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				res.err = err
-			} else if !res.sawTerminal {
-				// Clean EOF but no terminal event → upstream truncated us.
-				res.err = io.ErrUnexpectedEOF
-			}
-			return res
-		}
+		return line, terminal, rerr
 	}
+
+	// Keepalive: an SSE comment line (":\n\n", ignored by SSE clients) keeps the
+	// connection warm during silent gaps.
+	r := ccstream.Relay(c.Writer, func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}, ccstream.RelayOptions{
+		Commit:           commit,
+		KeepaliveIdle:    10 * time.Second,
+		KeepalivePayload: []byte(":\n\n"),
+		Next:             next,
+	})
+	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err}
 }
 
 // codexStreamResult reports the outcome of a Codex backend SSE relay so the
