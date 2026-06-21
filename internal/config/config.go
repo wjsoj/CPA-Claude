@@ -83,6 +83,10 @@ type Config struct {
 	// Persistence file for usage statistics and session state.
 	StateFile string `yaml:"state_file"`
 
+	// Off-host disaster-recovery backup to an S3-compatible bucket. Disabled
+	// by default. See BackupConfig.
+	Backup BackupConfig `yaml:"backup,omitempty"`
+
 	// Minutes of inactivity after which a client session releases its OAuth slot.
 	ActiveWindowMinutes int `yaml:"active_window_minutes"`
 
@@ -388,6 +392,7 @@ func applyDefaults(c *Config, path string) {
 	} else if !filepath.IsAbs(c.SaaS.DBPath) {
 		c.SaaS.DBPath = filepath.Join(dir, c.SaaS.DBPath)
 	}
+	c.Backup.applyDefaults()
 	if c.SaaS.Site == "" {
 		c.SaaS.Site = "CPA-Claude"
 	}

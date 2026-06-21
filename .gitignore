@@ -7,6 +7,8 @@
 /bin/
 *.log
 *.bak
+.env
+.env.*
 
 # Admin SPA build output & deps
 /internal/admin/web/node_modules/
