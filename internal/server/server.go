@@ -383,20 +383,13 @@ func corsMiddleware() gin.HandlerFunc {
 }
 
 // clientAuth matches the incoming Authorization: Bearer or x-api-key against
-// the live client token store (config.yaml tokens + runtime-added tokens).
-// If the store is empty the proxy runs in open mode.
+// the live client token store (config.yaml tokens + runtime-added tokens). It
+// FAILS CLOSED: an unrecognised token is always rejected. There is deliberately
+// no "open mode" — the old "empty store ⇒ open proxy" convenience is removed so
+// the proxy can never become an unbilled open relay if the store is ever empty.
 func (s *Server) clientAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tok := extractClientToken(c.Request)
-		if s.tokens.Empty() {
-			if tok == "" {
-				tok = c.ClientIP()
-			}
-			c.Set("client_token", tok)
-			c.Set("client_name", "")
-			c.Next()
-			return
-		}
 		if tok == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 			return
