@@ -23,6 +23,9 @@ interface Props {
   a: AuthRow;
   onAction: (a: AuthRow, act: Action) => void;
   onEdit: (a: AuthRow) => void;
+  // Optional drag handle (rendered in the header) for sortable API-key cards.
+  // Omitted for OAuth and read-only (config.yaml) API keys.
+  dragHandle?: React.ReactNode;
 }
 
 function statusMeta(a: AuthRow) {
@@ -37,7 +40,7 @@ function statusMeta(a: AuthRow) {
   return { label: "Degraded", tone: "text-[color:var(--warning)]", dot: "bg-[color:var(--warning)]" };
 }
 
-export function AuthCard({ a, onAction, onEdit }: Props) {
+export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
   const slot =
     a.max_concurrent > 0 ? `${a.active_clients}/${a.max_concurrent}` : `${a.active_clients}/∞`;
   const slotRatio =
@@ -66,6 +69,7 @@ export function AuthCard({ a, onAction, onEdit }: Props) {
       <header className="px-5 py-4 border-b border-border flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
+            {dragHandle}
             <span className="relative inline-flex h-2 w-2 shrink-0">
               {!a.disabled && a.healthy && (
                 <span

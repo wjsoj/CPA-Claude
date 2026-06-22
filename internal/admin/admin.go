@@ -221,6 +221,7 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.GET("/summary", h.handleSummary)
 		api.POST("/auths/upload", h.handleUpload)
 		api.PATCH("/auths/:id", h.handlePatchAuth)
+		api.POST("/auths/reorder", h.handleReorderAPIKeys)
 		api.DELETE("/auths/:id", h.handleDeleteAuth)
 		api.POST("/auths/:id/refresh", h.handleRefresh)
 		api.POST("/auths/:id/clear-quota", h.handleClearQuota)
@@ -356,6 +357,10 @@ type authRow struct {
 	BaseURL       string     `json:"base_url,omitempty"`
 	Group         string     `json:"group,omitempty"`
 	MaxConcurrent int        `json:"max_concurrent"`
+	// Order is the operator-assigned API-key selection priority (lower = used
+	// first). Always emitted so the panel can sort/persist drag order; 0 for
+	// OAuth and unranked keys.
+	Order         int        `json:"order"`
 	ActiveClients int        `json:"active_clients"`
 	ClientTokens  []string   `json:"client_tokens"`
 	Disabled      bool       `json:"disabled"`
@@ -486,6 +491,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			BaseURL:            st.Auth.BaseURL,
 			Group:              st.Auth.Group,
 			MaxConcurrent:      st.Auth.MaxConcurrent,
+			Order:              st.Auth.Order,
 			ActiveClients:      st.ActiveClients,
 			ClientTokens:       h.resolveClientTokenLabels(st.ClientTokens),
 			Disabled:           st.Auth.Disabled,
@@ -768,6 +774,25 @@ func (h *Handler) handlePatchAuth(c *gin.Context) {
 		a.SetModelMap(*body.ModelMap)
 	}
 	if err := a.Persist(); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "persist failed: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// handleReorderAPIKeys sets API-key selection priority from a client-supplied
+// ID sequence: ids[0] becomes the highest-priority key. OAuth IDs in the list
+// are harmlessly ignored by the pool (they don't live in p.apikeys). The new
+// order is persisted to each touched credential file.
+func (h *Handler) handleReorderAPIKeys(c *gin.Context) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.pool.ReorderAPIKeys(body.IDs); err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "persist failed: " + err.Error()})
 		return
 	}

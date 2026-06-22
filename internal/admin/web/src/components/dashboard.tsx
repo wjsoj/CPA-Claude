@@ -206,6 +206,22 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     }
   };
 
+  // Persist a new API-key priority order. Optimistic UI lives in the panel;
+  // here we POST the full ordered id list and resync from the backend. Rethrows
+  // so the panel can revert its optimistic state on failure.
+  const onReorder = async (_p: Provider, orderedIds: string[]) => {
+    try {
+      await api(`/admin/api/auths/reorder`, {
+        method: "POST",
+        body: JSON.stringify({ ids: orderedIds }),
+      });
+      await refresh();
+    } catch (x: any) {
+      toast.error("Reorder failed", { description: x.message });
+      throw x;
+    }
+  };
+
   const auths = data?.auths || [];
   const oauths = auths.filter((a) => a.kind === "oauth");
   const apikeys = auths.filter((a) => a.kind === "apikey");
@@ -389,6 +405,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
               onAddAPIKey={(p) => setAPIKeying(p)}
               onUpload={(p) => setUploading(p)}
               onAddSessionCookie={() => setSessionCookieOpen(true)}
+              onReorder={onReorder}
             />
           )}
           {tab === "tokens" && (

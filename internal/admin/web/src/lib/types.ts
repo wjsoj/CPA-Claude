@@ -37,6 +37,8 @@ export interface AuthRow {
   base_url?: string;
   group?: string;
   max_concurrent: number;
+  // API-key selection priority (lower = used first). 0 for OAuth / unranked.
+  order: number;
   active_clients: number;
   client_tokens: string[];
   disabled: boolean;
