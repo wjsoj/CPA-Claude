@@ -113,19 +113,41 @@ export function CredentialsPanel({
 
   const current = TABS.find((t) => t.id === provider)!;
 
-  // Local optimistic order for the sortable API keys. Resynced from the backend
-  // whenever the set or its server-side order changes (e.g. a poll refresh or
-  // another admin reordering), keyed by an id:order signature so an unrelated
-  // poll that returns the same order doesn't clobber an in-flight drag.
-  const [ordered, setOrdered] = useState<AuthRow[]>(sortableKeys);
+  // Drag order is tracked as a list of ids ONLY — never a snapshot of the row
+  // objects. The cards always render from the latest `sortableKeys` (so a
+  // status change like enable/disable/quota shows immediately), reordered by
+  // this id list. A previous version cached full row snapshots here, which
+  // froze each card at its pre-click state and made Enable/Disable look dead.
+  const [orderIds, setOrderIds] = useState<string[]>(() =>
+    sortableKeys.map((a) => a.id),
+  );
+
+  // Resync the id order from the backend whenever the *set* of keys or their
+  // server-assigned order changes (new key added, removed, or reordered
+  // elsewhere). Keyed by an id:order signature so an unrelated poll that
+  // returns the same ordering doesn't clobber an in-flight drag.
   const sig = sortableKeys.map((a) => `${a.id}:${a.order}`).join(",");
   useEffect(() => {
-    setOrdered(sortableKeys);
+    setOrderIds(sortableKeys.map((a) => a.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sig, provider]);
 
+  // Materialize the render list: latest row data, in the local drag order.
+  // Any id in orderIds that no longer exists is dropped; any new key not yet
+  // in orderIds is appended so it still renders.
+  const byId = new Map(sortableKeys.map((a) => [a.id, a]));
+  const ordered: AuthRow[] = [
+    ...orderIds.map((id) => byId.get(id)).filter((a): a is AuthRow => !!a),
+    ...sortableKeys.filter((a) => !orderIds.includes(a.id)),
+  ];
+
+  // Larger activation distance so an ordinary button click with a few px of
+  // natural cursor drift is never mistaken for a drag. Combined with the
+  // handle-only listeners on SortableAuthCard, a drag can only start from the
+  // GripVertical handle — clicking Enable/Disable/Edit anywhere else on the
+  // card stays a plain click.
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 10 } }),
   );
   const canSort = ordered.length >= 2;
 
@@ -135,16 +157,13 @@ export function CredentialsPanel({
     const oldIndex = ordered.findIndex((a) => a.id === active.id);
     const newIndex = ordered.findIndex((a) => a.id === over.id);
     if (oldIndex < 0 || newIndex < 0) return;
-    const prev = ordered;
-    const next = arrayMove(ordered, oldIndex, newIndex);
-    setOrdered(next);
+    const prevIds = orderIds;
+    const nextIds = arrayMove(ordered, oldIndex, newIndex).map((a) => a.id);
+    setOrderIds(nextIds);
     try {
-      await onReorder(
-        provider,
-        next.map((a) => a.id),
-      );
+      await onReorder(provider, nextIds);
     } catch {
-      setOrdered(prev); // toast is raised by the caller; just revert here
+      setOrderIds(prevIds); // toast is raised by the caller; just revert here
     }
   };
 

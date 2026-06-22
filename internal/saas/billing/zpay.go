@@ -16,11 +16,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // ZPayGateway implements Gateway against the 易支付-format API exposed at
@@ -62,8 +65,31 @@ func NewZPayGateway(p ZPayParams) (*ZPayGateway, error) {
 		Key:       strings.TrimSpace(p.Key),
 		NotifyURL: strings.TrimSpace(p.NotifyURL),
 		ReturnURL: strings.TrimSpace(p.ReturnURL),
-		HTTP:      &http.Client{Timeout: 15 * time.Second},
+		HTTP:      newZPayHTTPClient(),
 	}, nil
+}
+
+// newZPayHTTPClient builds the HTTP client used for all zpayz.cn calls. The
+// short per-connection dial timeout (4s) is the important part: zpayz.cn
+// resolves to multiple CDN IPs and at times one of them blackholes TCP (SYN
+// dropped → the kernel hangs for the full ~10s+ retransmit window). With a 4s
+// DialContext deadline a dead IP fails fast, letting CreatePayment retry —
+// where Go's dialer picks a fresh IP from the DNS set and usually lands on a
+// healthy one. The overall client Timeout stays generous enough for one slow
+// but live response.
+func newZPayHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: 4 * time.Second, KeepAlive: 30 * time.Second}
+	return &http.Client{
+		Timeout: 12 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           dialer.DialContext,
+			TLSHandshakeTimeout:   4 * time.Second,
+			ResponseHeaderTimeout: 8 * time.Second,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       60 * time.Second,
+		},
+	}
 }
 
 // AppID returns the PID. The applyNotification path validates AppID
@@ -106,20 +132,9 @@ func (g *ZPayGateway) CreatePayment(ctx context.Context, p PayParams) (*PayResul
 	for k, v := range params {
 		form.Set(k, v)
 	}
+	encoded := form.Encode()
 
-	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx2, http.MethodPost, g.BaseURL+"/mapi.php", strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := g.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := g.postMapiWithRetry(ctx, encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +160,61 @@ func (g *ZPayGateway) CreatePayment(ctx context.Context, p PayParams) (*PayResul
 		return nil, errors.New("zpay: empty payment surface in response")
 	}
 	return out, nil
+}
+
+// postMapiWithRetry POSTs the encoded form to /mapi.php, retrying on transport
+// errors (dial/TLS/timeout/connection reset). zpayz.cn round-robins several CDN
+// IPs and one occasionally blackholes TCP; a retry re-dials and Go's resolver
+// usually hands back a healthy IP, so a single dead node no longer fails the
+// whole top-up. Business-level rejects (HTTP 200 with a non-success code) are
+// NOT retried — the caller decodes and surfaces those. Each attempt gets its
+// own fresh body reader and a bounded sub-context.
+func (g *ZPayGateway) postMapiWithRetry(ctx context.Context, encoded string) ([]byte, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Per-attempt deadline. Kept under the client's own 12s Timeout so a
+		// slow-but-live node still completes, while a dead IP trips the 4s dial
+		// timeout well inside this window and frees the attempt to retry.
+		attemptCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, g.BaseURL+"/mapi.php", strings.NewReader(encoded))
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err := g.HTTP.Do(req)
+		if err != nil {
+			cancel()
+			lastErr = err
+			// Don't retry if the *caller's* context is done (client gone) —
+			// only transient gateway-side failures are worth a second try.
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			if attempt < maxAttempts {
+				log.Warnf("zpay: mapi attempt %d/%d failed (%v) — retrying", attempt, maxAttempts, err)
+				continue
+			}
+			return nil, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		cancel()
+		if readErr != nil {
+			lastErr = readErr
+			if ctx.Err() != nil {
+				return nil, readErr
+			}
+			if attempt < maxAttempts {
+				log.Warnf("zpay: mapi attempt %d/%d read failed (%v) — retrying", attempt, maxAttempts, readErr)
+				continue
+			}
+			return nil, readErr
+		}
+		return body, nil
+	}
+	return nil, lastErr
 }
 
 // VerifyNotify checks an incoming notify (GET) — verifies signature and
