@@ -185,6 +185,15 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
             <dd className="mono text-[11px] break-all">{a.base_url}</dd>
           </div>
         )}
+        {a.kind === "apikey" && !!a.price_multiplier && a.price_multiplier > 0 && (
+          <div className="col-span-2">
+            <dt className="eyebrow mb-1.5">Billing override</dt>
+            <dd className="mono text-[11px]">
+              official × {a.price_multiplier}
+              <span className="text-muted-foreground"> (bypasses group rate)</span>
+            </dd>
+          </div>
+        )}
         {a.model_map && Object.keys(a.model_map).length > 0 && (
           <div className="col-span-2">
             <dt className="eyebrow mb-1.5">Model map ({Object.keys(a.model_map).length})</dt>

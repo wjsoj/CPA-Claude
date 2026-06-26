@@ -27,6 +27,9 @@ export function EditAuthModal({ auth, onClose, onSaved }: Props) {
   const [maxC, setMaxC] = useState(String(auth.max_concurrent || 0));
   const [proxy, setProxy] = useState(auth.proxy_url || "");
   const [baseURL, setBaseURL] = useState(auth.base_url || "");
+  const [priceMult, setPriceMult] = useState(
+    auth.price_multiplier ? String(auth.price_multiplier) : "",
+  );
   const [label, setLabel] = useState(auth.label || "");
   const [group, setGroup] = useState(auth.group || "");
   const [modelMapText, setModelMapText] = useState(modelMapToText(auth.model_map));
@@ -40,7 +43,15 @@ export function EditAuthModal({ auth, onClose, onSaved }: Props) {
     try {
       const body: Record<string, unknown> = { disabled, proxy_url: proxy, label, group };
       if (!isApiKey) body.max_concurrent = Number(maxC);
-      if (isApiKey) body.base_url = baseURL;
+      if (isApiKey) {
+        body.base_url = baseURL;
+        // Empty input clears the override (0); otherwise send the number.
+        const pm = priceMult.trim() === "" ? 0 : Number(priceMult);
+        if (Number.isNaN(pm) || pm < 0) {
+          throw new Error("price multiplier must be a non-negative number");
+        }
+        body.price_multiplier = pm;
+      }
       const parsed = textToModelMap(modelMapText);
       if (parsed.errors.length > 0) {
         throw new Error("model map: " + parsed.errors.join("; "));
@@ -93,6 +104,27 @@ export function EditAuthModal({ auth, onClose, onSaved }: Props) {
               />
               <p className="text-xs text-muted-foreground">
                 Per-key upstream override; leave blank for the provider default.
+              </p>
+            </div>
+          )}
+          {isApiKey && (
+            <div className="space-y-1.5">
+              <Label>Price multiplier (billing)</Label>
+              <Input
+                className="mono"
+                type="number"
+                min={0}
+                step="0.01"
+                placeholder="blank = use the client's pricing-group rate"
+                value={priceMult}
+                onChange={(e) => setPriceMult(e.currentTarget.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                When set, requests served by this key are billed{" "}
+                <span className="mono">official × multiplier</span>, bypassing the
+                client's pricing-group discount — use it to charge a markup for
+                upstream relay capacity (e.g. <span className="mono">1.2</span>).
+                Leave blank to fall back to the group rate.
               </p>
             </div>
           )}

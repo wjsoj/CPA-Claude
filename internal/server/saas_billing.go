@@ -68,6 +68,15 @@ func (s *Server) mountBillingRoutes(engine *gin.Engine) {
 		// the operator has a single public URL to configure on Resend.
 		s.inbox.PublicRoutes(engine.Group("/api"))
 	}
+	// Self-service token settings. The only user-mutable token field: the
+	// per-token opt-in to fall back to (marked-up) upstream API keys when the
+	// self-run OAuth pool is exhausted. Bearer-auth'd against the clienttoken
+	// store (same resolver as makeBearerAuth) — lives on Server, not the
+	// billing Handler, because the flag is in the clienttoken store, not the
+	// wallet DB.
+	g.GET("/settings", s.handleWalletSettingsGet)
+	g.PATCH("/settings", s.handleWalletSettingsPatch)
+
 	// Pricing-group catalog. Exposed for the status SPA so a user can see
 	// which group their token belongs to without admin access.
 	g.GET("/groups", func(c *gin.Context) {
@@ -93,6 +102,41 @@ func (s *Server) mountBillingRoutes(engine *gin.Engine) {
 		}
 		c.JSON(200, gin.H{"groups": out})
 	})
+}
+
+// handleWalletSettingsGet returns the authenticated token's self-service
+// settings. Currently just the upstream-fallback opt-in.
+func (s *Server) handleWalletSettingsGet(c *gin.Context) {
+	tok := extractClientToken(c.Request)
+	t, ok := s.tokens.Lookup(tok)
+	if tok == "" || !ok {
+		c.JSON(401, gin.H{"error": "missing or unknown bearer token"})
+		return
+	}
+	c.JSON(200, gin.H{"upstream_fallback": t.UpstreamFallback})
+}
+
+// handleWalletSettingsPatch toggles the authenticated token's upstream-fallback
+// opt-in. Body: {"upstream_fallback": bool}. This is the only token field a
+// user may change about themselves — everything else is operator-only.
+func (s *Server) handleWalletSettingsPatch(c *gin.Context) {
+	tok := extractClientToken(c.Request)
+	if _, ok := s.tokens.Lookup(tok); tok == "" || !ok {
+		c.JSON(401, gin.H{"error": "missing or unknown bearer token"})
+		return
+	}
+	var body struct {
+		UpstreamFallback *bool `json:"upstream_fallback"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.UpstreamFallback == nil {
+		c.JSON(400, gin.H{"error": "upstream_fallback (bool) required"})
+		return
+	}
+	if err := s.tokens.SetUpstreamFallback(tok, *body.UpstreamFallback); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"upstream_fallback": *body.UpstreamFallback})
 }
 
 // makeBearerAuth returns a TokenAuthFunc that resolves the bearer token
@@ -180,7 +224,11 @@ func (b *saasBilling) PrecheckBalance(ctx context.Context, token string) (float6
 //
 // Returns the (multiplier, billed) pair so the caller can attach them to
 // the request log without re-querying the DB.
-func (b *saasBilling) SettleCharge(ctx context.Context, token, provider, model string, officialUSD float64, ref string) (multiplier float64, billed float64) {
+// overrideMult > 0 replaces the pricing-group multiplier entirely — used when
+// the serving credential is an upstream API key carrying a per-key price
+// multiplier (official × overrideMult), so marked-up relay capacity isn't sold
+// at the cheap OAuth-subscription discount. 0 = no override (group multiplier).
+func (b *saasBilling) SettleCharge(ctx context.Context, token, provider, model string, officialUSD, overrideMult float64, ref string) (multiplier float64, billed float64) {
 	if b == nil || b.db == nil || token == "" || officialUSD <= 0 {
 		return 1, 0
 	}
@@ -195,11 +243,15 @@ func (b *saasBilling) SettleCharge(ctx context.Context, token, provider, model s
 		return 1, 0
 	}
 	mult := g.MultiplierFor(provider)
+	note := fmt.Sprintf("%s/%s × %.4f", provider, model, mult)
+	if overrideMult > 0 {
+		mult = overrideMult
+		note = fmt.Sprintf("%s/%s × %.4f (upstream key)", provider, model, mult)
+	}
 	cost := billing.ChargeFromOfficial(officialUSD, mult)
 	if cost <= 0 {
 		return mult, 0
 	}
-	note := fmt.Sprintf("%s/%s × %.4f", provider, model, mult)
 	if _, err := b.db.AddBalance(ctx, token, saasdb.TxKindCharge, -cost, ref, note, true); err != nil {
 		log.Warnf("saas: settle charge: debit failed for %s: %v", maskTokenShort(token), err)
 		return mult, 0

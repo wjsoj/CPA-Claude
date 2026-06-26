@@ -345,6 +345,24 @@ export function topupWallet(token: string, usd: number): Promise<TopupResp> {
   });
 }
 
+export interface WalletSettings {
+  upstream_fallback: boolean;
+}
+
+export function loadWalletSettings(token: string): Promise<WalletSettings> {
+  return authedJSON<WalletSettings>("/api/wallet/settings", token);
+}
+
+export function updateWalletSettings(
+  token: string,
+  patch: Partial<WalletSettings>,
+): Promise<WalletSettings> {
+  return authedJSON<WalletSettings>("/api/wallet/settings", token, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 export function loadExchangeRate(): Promise<ExchangeRate> {
   return fetchJSON<ExchangeRate>("/api/wallet/rate");
 }

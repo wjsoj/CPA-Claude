@@ -23,6 +23,7 @@ import {
   FileText,
   Download,
   Search,
+  ShieldCheck,
 } from "lucide-react";
 import {
   loadActiveToken,
@@ -34,6 +35,8 @@ import {
   cancelWalletOrder,
   topupWallet,
   loadExchangeRate,
+  loadWalletSettings,
+  updateWalletSettings,
   loadInvoiceSummary,
   loadInvoices,
   createInvoice,
@@ -276,6 +279,8 @@ export function WalletPanel() {
         </div>
       </div>
 
+      <UpstreamFallbackCard token={activeToken} />
+
       {/* Orders + Transactions, two columns on desktop */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <OrdersCard
@@ -298,6 +303,99 @@ export function WalletPanel() {
           refresh();
         }}
       />
+    </div>
+  );
+}
+
+// UpstreamFallbackCard is the only self-service token setting: opt in to let
+// requests fall back to the (marked-up) upstream API-key pool when our own
+// OAuth pool is exhausted. Off by default — enabling it trades a higher
+// per-request price for availability during an outage.
+function UpstreamFallbackCard({ token }: { token: string }) {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadWalletSettings(token)
+      .then((s) => {
+        if (!cancelled) setOn(s.upstream_fallback);
+      })
+      .catch(() => {
+        // Endpoint only exists in SaaS mode; hide the card on failure.
+        if (!cancelled) setOn(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  // null = not loaded / unavailable → render nothing.
+  if (on === null) return null;
+
+  const toggle = async () => {
+    if (saving) return;
+    const next = !on;
+    setSaving(true);
+    setOn(next); // optimistic
+    try {
+      const s = await updateWalletSettings(token, { upstream_fallback: next });
+      setOn(s.upstream_fallback);
+      toast.success(
+        s.upstream_fallback
+          ? "已开启上游号池保底"
+          : "已关闭上游号池保底",
+      );
+    } catch (e: any) {
+      setOn(!next); // revert
+      toast.error("设置失败", { description: e.message || String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-border-strong bg-card/60 p-4 md:p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3 min-w-0">
+          <ShieldCheck
+            className={cn(
+              "h-5 w-5 mt-0.5 shrink-0",
+              on ? "text-primary" : "text-muted-foreground",
+            )}
+          />
+          <div className="min-w-0">
+            <div className="font-display text-base tracking-tight">
+              故障时使用上游号池（加价保底）
+            </div>
+            <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+              开启后，当我们自营的订阅号池全部不可用时，你的请求会自动改用上游
+              API key 继续服务，<span className="text-foreground/80">按更高倍率计费</span>。
+              默认关闭——关闭时遇到号池故障会直接返回错误，不会产生加价费用。
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-label="toggle upstream fallback"
+          disabled={saving}
+          onClick={toggle}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
+            on ? "bg-primary" : "bg-muted-foreground/30",
+            saving && "opacity-60 cursor-wait",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform",
+              on ? "translate-x-5" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </div>
     </div>
   );
 }

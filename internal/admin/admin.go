@@ -347,31 +347,35 @@ func (h *Handler) adminAuth() gin.HandlerFunc {
 // ---- responses ----
 
 type authRow struct {
-	ID            string     `json:"id"`
-	Kind          string     `json:"kind"`
-	Provider      string     `json:"provider"` // "anthropic" | "openai"
-	PlanType      string     `json:"plan_type,omitempty"`
-	Label         string     `json:"label"`
-	Email         string     `json:"email,omitempty"`
-	ProxyURL      string     `json:"proxy_url"`
-	BaseURL       string     `json:"base_url,omitempty"`
-	Group         string     `json:"group,omitempty"`
-	MaxConcurrent int        `json:"max_concurrent"`
+	ID            string `json:"id"`
+	Kind          string `json:"kind"`
+	Provider      string `json:"provider"` // "anthropic" | "openai"
+	PlanType      string `json:"plan_type,omitempty"`
+	Label         string `json:"label"`
+	Email         string `json:"email,omitempty"`
+	ProxyURL      string `json:"proxy_url"`
+	BaseURL       string `json:"base_url,omitempty"`
+	Group         string `json:"group,omitempty"`
+	MaxConcurrent int    `json:"max_concurrent"`
 	// Order is the operator-assigned API-key selection priority (lower = used
 	// first). Always emitted so the panel can sort/persist drag order; 0 for
 	// OAuth and unranked keys.
-	Order         int        `json:"order"`
-	ActiveClients int        `json:"active_clients"`
-	ClientTokens  []string   `json:"client_tokens"`
-	Disabled      bool       `json:"disabled"`
-	QuotaExceeded bool       `json:"quota_exceeded"`
-	QuotaResetAt  *time.Time `json:"quota_reset_at,omitempty"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-	LastFailure   string     `json:"last_failure,omitempty"`
-	FileBacked    bool       `json:"file_backed"`
-	Healthy       bool       `json:"healthy"`
-	HardFailure   bool       `json:"hard_failure"`
-	FailureReason string     `json:"failure_reason,omitempty"`
+	Order int `json:"order"`
+	// PriceMultiplier overrides billing for this API key: when > 0 a request
+	// served by it is charged official × this, bypassing the client's pricing-
+	// group discount. 0 = unset (use group multiplier). API-key only.
+	PriceMultiplier float64    `json:"price_multiplier,omitempty"`
+	ActiveClients   int        `json:"active_clients"`
+	ClientTokens    []string   `json:"client_tokens"`
+	Disabled        bool       `json:"disabled"`
+	QuotaExceeded   bool       `json:"quota_exceeded"`
+	QuotaResetAt    *time.Time `json:"quota_reset_at,omitempty"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	LastFailure     string     `json:"last_failure,omitempty"`
+	FileBacked      bool       `json:"file_backed"`
+	Healthy         bool       `json:"healthy"`
+	HardFailure     bool       `json:"hard_failure"`
+	FailureReason   string     `json:"failure_reason,omitempty"`
 	// Most recent client-initiated cancellation. Informational only —
 	// doesn't affect Healthy or trigger any cooldown. Used by the panel to
 	// show a low-tone "client canceled" hint distinct from upstream
@@ -492,6 +496,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			Group:              st.Auth.Group,
 			MaxConcurrent:      st.Auth.MaxConcurrent,
 			Order:              st.Auth.Order,
+			PriceMultiplier:    st.Auth.PriceMultiplier,
 			ActiveClients:      st.ActiveClients,
 			ClientTokens:       h.resolveClientTokenLabels(st.ClientTokens),
 			Disabled:           st.Auth.Disabled,
@@ -657,7 +662,7 @@ type clientRow struct {
 	Managed      bool              `json:"managed,omitempty"` // true = panel can edit/delete
 	Group        string            `json:"group,omitempty"`
 	Providers    []string          `json:"providers,omitempty"` // provider allow-list; empty = both
-	RPM          int               `json:"rpm,omitempty"` // per-token RPM override (0 = global default)
+	RPM          int               `json:"rpm,omitempty"`       // per-token RPM override (0 = global default)
 	Total        usage.ClientCost  `json:"total"`
 	Weekly       []usage.WeekEntry `json:"weekly,omitempty"`
 	LastUsed     *time.Time        `json:"last_used,omitempty"`
@@ -725,6 +730,9 @@ type patchAuthBody struct {
 	Label         *string            `json:"label"`
 	Group         *string            `json:"group"`
 	ModelMap      *map[string]string `json:"model_map"`
+	// PriceMultiplier overrides billing for an API key (official × this).
+	// Pointer so omitting it leaves the value unchanged; send 0 to clear.
+	PriceMultiplier *float64 `json:"price_multiplier"`
 }
 
 func (h *Handler) handlePatchAuth(c *gin.Context) {
@@ -765,6 +773,10 @@ func (h *Handler) handlePatchAuth(c *gin.Context) {
 	}
 	if body.Group != nil {
 		a.SetGroup(*body.Group)
+	}
+	if body.PriceMultiplier != nil {
+		// API-key only; SetPriceMultiplier clamps negatives to 0 (= unset).
+		a.SetPriceMultiplier(*body.PriceMultiplier)
 	}
 	if body.ModelMap != nil {
 		// Rewrite table for both kinds. API-key relays use it to remap vendor
@@ -1085,6 +1097,8 @@ type createAPIKeyBody struct {
 	Filename string            `json:"filename"`
 	Group    string            `json:"group"`
 	ModelMap map[string]string `json:"model_map"`
+	// PriceMultiplier overrides billing (official × this) when > 0. Optional.
+	PriceMultiplier float64 `json:"price_multiplier"`
 }
 
 func (h *Handler) handleCreateAPIKey(c *gin.Context) {
@@ -1136,6 +1150,9 @@ func (h *Handler) handleCreateAPIKey(c *gin.Context) {
 	}
 	if g := auth.NormalizeGroup(body.Group); g != "" {
 		raw["group"] = g
+	}
+	if body.PriceMultiplier > 0 {
+		raw["price_multiplier"] = body.PriceMultiplier
 	}
 	if len(body.ModelMap) > 0 {
 		mm := make(map[string]any, len(body.ModelMap))

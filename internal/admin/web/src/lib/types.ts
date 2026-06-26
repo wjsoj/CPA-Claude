@@ -39,6 +39,8 @@ export interface AuthRow {
   max_concurrent: number;
   // API-key selection priority (lower = used first). 0 for OAuth / unranked.
   order: number;
+  // API-key billing override: official × this. 0/absent = use group multiplier.
+  price_multiplier?: number;
   active_clients: number;
   client_tokens: string[];
   disabled: boolean;

@@ -263,7 +263,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 			s.usage.RecordClient(clientToken, clientName, counts, costUSD)
 			multiplier, billed = s.saas.SettleCharge(c.Request.Context(),
 				clientToken, auth.ProviderOpenAI, model, costUSD,
-				"codex:"+a.ID)
+				apiKeyPriceOverride(a), "codex:"+a.ID)
 		}
 	}
 	errField := ""

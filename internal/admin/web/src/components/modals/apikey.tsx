@@ -47,6 +47,7 @@ export function APIKeyModal({ provider, onClose, onSaved }: Props) {
   const [proxy, setProxy] = useState("");
   const [baseURL, setBaseURL] = useState("");
   const [group, setGroup] = useState("");
+  const [priceMult, setPriceMult] = useState("");
   const [modelMapText, setModelMapText] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -59,6 +60,10 @@ export function APIKeyModal({ provider, onClose, onSaved }: Props) {
       if (parsed.errors.length > 0) {
         throw new Error("model map: " + parsed.errors.join("; "));
       }
+      const pm = priceMult.trim() === "" ? 0 : Number(priceMult);
+      if (Number.isNaN(pm) || pm < 0) {
+        throw new Error("price multiplier must be a non-negative number");
+      }
       await api("/admin/api/apikeys", {
         method: "POST",
         body: JSON.stringify({
@@ -68,6 +73,7 @@ export function APIKeyModal({ provider, onClose, onSaved }: Props) {
           proxy_url: proxy.trim(),
           base_url: baseURL.trim(),
           group: group.trim(),
+          price_multiplier: pm,
           model_map: parsed.map,
         }),
       });
@@ -135,6 +141,24 @@ export function APIKeyModal({ provider, onClose, onSaved }: Props) {
             value={group}
             onChange={(e) => setGroup(e.currentTarget.value)}
           />
+        </div>
+        <div className="space-y-1.5">
+          <Label>Price multiplier (optional, billing)</Label>
+          <Input
+            className="mono"
+            type="number"
+            min={0}
+            step="0.01"
+            placeholder="blank = use the client's pricing-group rate"
+            value={priceMult}
+            onChange={(e) => setPriceMult(e.currentTarget.value)}
+          />
+          <p className="text-xs text-muted-foreground">
+            When set, requests served by this key bill{" "}
+            <span className="mono">official × multiplier</span>, bypassing the
+            client's group discount — markup for upstream relay capacity (e.g.{" "}
+            <span className="mono">1.2</span>). Blank = group rate.
+          </p>
         </div>
         <div className="space-y-1.5">
           <Label>Model map (optional)</Label>

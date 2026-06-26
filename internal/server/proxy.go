@@ -285,6 +285,9 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 	tried := make(map[string]bool)
 	attempts := 0
 	var lastDeferred *deferredResponse
+	// Per-token opt-in: whether the OAuth-exhausted path may fall back to
+	// upstream API keys. Stable for the whole request, computed once.
+	allowFallback := s.allowAPIKeyFallback(clientToken)
 
 	// surfaceDeferred replays a withheld upstream error to the client once no
 	// healthy credential remains — preferable to a synthetic 503 because the
@@ -305,7 +308,10 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 		for id := range tried {
 			excludeIDs = append(excludeIDs, id)
 		}
-		a := s.pool.Acquire(c.Request.Context(), provider, clientToken, clientGroup, model, slotID, excludeIDs...)
+		a := s.pool.AcquireWithOptions(c.Request.Context(), provider, clientToken, clientGroup, model, slotID, auth.AcquireOptions{
+			AllowAPIKeyFallback: allowFallback,
+			ExcludeIDs:          excludeIDs,
+		})
 		if a == nil {
 			// No healthy/untried credential left. If we withheld an upstream
 			// error on the way here, surface that genuine status; otherwise
@@ -908,7 +914,7 @@ recoveredFromSignature:
 		// billed amount.
 		multiplier, billedMain = s.saas.SettleCharge(c.Request.Context(),
 			clientToken, auth.NormalizeProvider(a.Provider), model, costUSD,
-			"request:"+a.ID)
+			apiKeyPriceOverride(a), "request:"+a.ID)
 	}
 	s.emitLog(requestlog.Record{
 		Client:      clientName,
@@ -1184,7 +1190,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 			s.usage.RecordClient(clientToken, clientName, clientCounts, costUSD+advisorCost)
 			multiplier, billedMain = s.saas.SettleCharge(c.Request.Context(),
 				clientToken, auth.NormalizeProvider(a.Provider), model, costUSD,
-				"request:"+a.ID)
+				apiKeyPriceOverride(a), "request:"+a.ID)
 		}
 	}
 	errField := ""
@@ -1379,6 +1385,34 @@ func (u usageJSON) toCounts() usage.Counts {
 	}
 }
 
+// allowAPIKeyFallback decides whether a request may fall back to (marked-up)
+// upstream API keys once the self-run OAuth pool is exhausted. In non-SaaS
+// operator mode (billing disabled) the legacy always-fall-back behaviour is
+// kept so existing self-hosting deployments are unaffected. In SaaS mode it is
+// a strict per-token opt-in (default false) so paying users aren't silently
+// served — and billed at the upstream markup — without enabling it themselves.
+func (s *Server) allowAPIKeyFallback(clientToken string) bool {
+	if s.billing == nil {
+		return true
+	}
+	if tok, ok := s.tokens.Lookup(clientToken); ok {
+		return tok.UpstreamFallback
+	}
+	return false
+}
+
+// apiKeyPriceOverride returns the per-credential billing multiplier to pass to
+// SettleCharge: the API key's PriceMultiplier when it's an API-key credential
+// with one set, else 0 (meaning "use the client's pricing-group multiplier").
+// OAuth credentials never override — their cheap subscription rate is exactly
+// what the group discount models.
+func apiKeyPriceOverride(a *auth.Auth) float64 {
+	if a != nil && a.Kind == auth.KindAPIKey {
+		return a.PriceMultiplierValue()
+	}
+	return 0
+}
+
 // recordSubUsage charges advisor (and any future server-side sub-model)
 // counts to the same auth that handled the parent request, and emits one
 // extra requestlog row per distinct sub-model so by-model aggregation in
@@ -1413,7 +1447,7 @@ func (s *Server) recordSubUsage(a *auth.Auth, authKind, clientToken, clientName,
 		if clientToken != "" {
 			mult, billed = s.saas.SettleCharge(context.Background(),
 				clientToken, provider, subModel, cost,
-				"advisor:"+a.ID)
+				apiKeyPriceOverride(a), "advisor:"+a.ID)
 		}
 		s.emitLog(requestlog.Record{
 			Client:      clientName,

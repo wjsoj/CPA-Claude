@@ -179,7 +179,12 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 		for id := range tried {
 			exclude = append(exclude, id)
 		}
-		cand := s.pool.Acquire(c.Request.Context(), provider, clientToken, clientGroup, model, slotID, exclude...)
+		// The ChatGPT WS backend only speaks OAuth — API-key relays are
+		// rejected below — so never let the pool fall back to one here.
+		cand := s.pool.AcquireWithOptions(c.Request.Context(), provider, clientToken, clientGroup, model, slotID, auth.AcquireOptions{
+			AllowAPIKeyFallback: false,
+			ExcludeIDs:          exclude,
+		})
 		if cand == nil {
 			break
 		}
@@ -360,7 +365,7 @@ func (s *Server) billCodexWS(c *gin.Context, a *auth.Auth, model, clientToken, c
 		if s.saas != nil {
 			multiplier, billed = s.saas.SettleCharge(c.Request.Context(),
 				clientToken, auth.ProviderOpenAI, model, costUSD,
-				"codex-oauth-ws:"+a.ID)
+				apiKeyPriceOverride(a), "codex-oauth-ws:"+a.ID)
 		}
 	}
 	s.emitLog(requestlog.Record{

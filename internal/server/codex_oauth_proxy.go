@@ -291,7 +291,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		s.usage.RecordClient(clientToken, clientName, counts, costUSD)
 		multiplier, billed = s.saas.SettleCharge(c.Request.Context(),
 			clientToken, auth.ProviderOpenAI, model, costUSD,
-			"codex-oauth:"+a.ID)
+			apiKeyPriceOverride(a), "codex-oauth:"+a.ID)
 	}
 	s.emitLog(requestlog.Record{
 		Client:      clientName,
