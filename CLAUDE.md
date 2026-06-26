@@ -91,7 +91,7 @@ API-key credentials never trigger sidecars (the third-party-detection signal we'
 
 ### Codex path (`codex_proxy.go` + `codex_oauth_proxy.go`)
 
-OpenAI-format requests on the Codex endpoint. **API-key credentials** forward to `api.openai.com` mostly verbatim; **OAuth (ChatGPT Plus/Pro/Team)** credentials forward to `chatgpt.com/backend-api/codex/responses` with the session/account headers the real Codex CLI sends. JWT parsing in `internal/auth/codex_jwt.go` extracts `chatgpt_account_id` and `chatgpt_plan_type` from the id_token; `codex_models.go` synthesizes a per-plan-tier `/v1/models` catalog so clients see only what their subscription allows.
+OpenAI-format requests on the Codex endpoint. **API-key credentials** forward to `api.openai.com` mostly verbatim; **OAuth (ChatGPT Plus/Pro/Team)** credentials forward to `chatgpt.com/backend-api/codex/responses` with the session/account headers the real Codex CLI sends. JWT parsing in cc-core `auth/codex_jwt.go` extracts `chatgpt_account_id` and `chatgpt_plan_type` from the id_token; cc-core `auth/codex_models.go` synthesizes a per-plan-tier `/v1/models` catalog so clients see only what their subscription allows.
 
 > **Codex OAuth has not been smoke-tested against a real ChatGPT subscription token in production.** The auth-layer paths (token exchange, refresh, JWT) work; full request/response parity against `chatgpt.com/backend-api` is pending. If you change anything in this path, exercise both the API-key and OAuth branches.
 
