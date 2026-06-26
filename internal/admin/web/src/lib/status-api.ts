@@ -85,6 +85,11 @@ export interface StatusTokenResult {
   weekly_used_usd: number;
   pricing_group?: string;
   group_id?: number;
+  // Workspace (group shared pool) — present only when the token is a member.
+  workspace?: string;
+  pool_avail_usd?: number;
+  is_team_admin?: boolean;
+  is_team_member?: boolean;
   total: { tokens: Record<string, number>; cost_usd: number; requests: number };
   weekly?: StatusWeekEntry[];
   daily?: StatusDailyEntry[];

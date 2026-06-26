@@ -11,6 +11,7 @@ import {
   Wallet,
   FileText,
   Inbox,
+  Users,
 } from "lucide-react";
 import { api, setToken, ApiError } from "@/lib/api";
 import type { AuthRow, ClientRow, Provider, Summary } from "@/lib/types";
@@ -23,6 +24,7 @@ import { PricingStats } from "./pricing-stats";
 import { PaymentsPanel } from "./payments-panel";
 import { InvoicesPanel } from "./invoices-panel";
 import { InboxPanel } from "./inbox-panel";
+import { WorkspacesPanel } from "./workspaces-panel";
 import { EditAuthModal } from "./modals/edit-auth";
 import { UploadModal } from "./modals/upload";
 import { APIKeyModal } from "./modals/apikey";
@@ -36,12 +38,13 @@ import { confirmDialog } from "@/hooks/use-confirm";
 import { cn, fmtDate, fmtInt } from "@/lib/utils";
 
 type Action = "toggle" | "refresh" | "clear-quota" | "clear-failure" | "delete";
-type Tab = "overview" | "credentials" | "tokens" | "requests" | "pricing" | "payments" | "invoices" | "inbox";
+type Tab = "overview" | "credentials" | "tokens" | "workspaces" | "requests" | "pricing" | "payments" | "invoices" | "inbox";
 
 const TABS: { key: Tab; label: string; hint: string; icon: typeof Activity }[] = [
   { key: "overview", label: "Overview", hint: "charts · fleet health", icon: Activity },
   { key: "credentials", label: "Credentials", hint: "auth files · quota", icon: ShieldCheck },
   { key: "tokens", label: "Tokens", hint: "client keys · limits", icon: Coins },
+  { key: "workspaces", label: "Workspaces", hint: "shared pools · teams", icon: Users },
   { key: "requests", label: "Requests", hint: "ledger · search", icon: ScrollText },
   { key: "pricing", label: "Pricing", hint: "models · savings", icon: Receipt },
   { key: "payments", label: "Payments", hint: "top-ups · Z-Pay", icon: Wallet },
@@ -416,6 +419,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
               onDelete={onDeleteToken}
             />
           )}
+          {tab === "workspaces" && <WorkspacesPanel refreshTick={refreshTick} />}
           {tab === "requests" && (
             <RequestsExplorer refreshTick={refreshTick} pricing={data?.pricing} />
           )}

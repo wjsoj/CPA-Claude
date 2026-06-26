@@ -28,16 +28,21 @@ type AlipayOrder struct {
 	Status     string
 	TradeNo    string
 	QRCode     string
-	CreatedAt  time.Time
-	PaidAt     time.Time
+	// WorkspaceID is 0 for a personal top-up (credited to Token's wallet) and
+	// >0 when the top-up funds a workspace shared pool (credited via
+	// CreditPaidOrderToWorkspace). Token still records who initiated the order
+	// (the group admin) for ownership / rate-limit / display.
+	WorkspaceID int64
+	CreatedAt   time.Time
+	PaidAt      time.Time
 }
 
-const orderCols = `out_trade_no, token, cny_amount, usd_credit, rate, status, trade_no, qr_code, created_at, paid_at`
+const orderCols = `out_trade_no, token, cny_amount, usd_credit, rate, status, trade_no, qr_code, workspace_id, created_at, paid_at`
 
 func scanOrder(row interface{ Scan(...any) error }) (*AlipayOrder, error) {
 	var o AlipayOrder
 	var c, p int64
-	if err := row.Scan(&o.OutTradeNo, &o.Token, &o.CNYAmount, &o.USDCredit, &o.Rate, &o.Status, &o.TradeNo, &o.QRCode, &c, &p); err != nil {
+	if err := row.Scan(&o.OutTradeNo, &o.Token, &o.CNYAmount, &o.USDCredit, &o.Rate, &o.Status, &o.TradeNo, &o.QRCode, &o.WorkspaceID, &c, &p); err != nil {
 		return nil, err
 	}
 	o.CreatedAt = time.Unix(c, 0)
@@ -50,9 +55,9 @@ func scanOrder(row interface{ Scan(...any) error }) (*AlipayOrder, error) {
 func (db *DB) CreateOrder(ctx context.Context, o AlipayOrder) error {
 	o.CreatedAt = time.Now()
 	_, err := db.ExecContext(ctx, `INSERT INTO alipay_orders
-		(out_trade_no, token, cny_amount, usd_credit, rate, status, trade_no, qr_code, created_at, paid_at)
-		VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, 0)`,
-		o.OutTradeNo, o.Token, o.CNYAmount, o.USDCredit, o.Rate, OrderPending, o.QRCode, o.CreatedAt.Unix())
+		(out_trade_no, token, cny_amount, usd_credit, rate, status, trade_no, qr_code, workspace_id, created_at, paid_at)
+		VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, 0)`,
+		o.OutTradeNo, o.Token, o.CNYAmount, o.USDCredit, o.Rate, OrderPending, o.QRCode, o.WorkspaceID, o.CreatedAt.Unix())
 	return err
 }
 

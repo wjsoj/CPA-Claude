@@ -62,6 +62,29 @@ func (s *Server) mountBillingRoutes(engine *gin.Engine) {
 	if s.invoice != nil {
 		s.invoice.UserRoutes(g)
 	}
+
+	// Group-admin console — /api/team/*. Scoped to one workspace, gated by a
+	// client token that administers it. Reuses the billing Handler's
+	// order-creation machinery for pool top-ups.
+	if s.saasDB != nil {
+		team := &billing.TeamHandler{
+			DB:      s.saasDB,
+			Billing: s.billing,
+			LogDir:  s.cfg.LogDir,
+			Auth:    s.makeBearerAuth(),
+			TokenExists: func(tok string) bool {
+				_, ok := s.tokens.Lookup(tok)
+				return ok
+			},
+			TokenLabel: func(tok string) string {
+				if e, ok := s.tokens.Lookup(tok); ok {
+					return e.Name
+				}
+				return ""
+			},
+		}
+		team.Routes(engine.Group("/api/team"))
+	}
 	if s.inbox != nil {
 		// Webhook lives under /api/webhooks/* (not /api/wallet/*) — it's
 		// Resend-facing, not user-facing. Mounted on the same engine so
@@ -213,7 +236,11 @@ func (b *saasBilling) PrecheckBalance(ctx context.Context, token string) (float6
 	if err != nil {
 		return 0, err
 	}
-	return w.BalanceUSD, nil
+	// A workspace member can also spend the shared pool. Surface
+	// personal + available-pool so a member with a drained personal wallet
+	// but a funded group pool isn't 402'd. MemberPoolAvail returns 0 for
+	// non-members / disabled groups / empty pools.
+	return w.BalanceUSD + b.db.MemberPoolAvail(ctx, token), nil
 }
 
 // SettleCharge applies the per-(group × provider) multiplier to the
@@ -253,7 +280,12 @@ func (b *saasBilling) SettleCharge(ctx context.Context, token, provider, model s
 	if cost <= 0 {
 		return mult, 0
 	}
-	if _, err := b.db.AddBalance(ctx, token, saasdb.TxKindCharge, -cost, ref, note, true); err != nil {
+	// ChargeMemberFirst debits the workspace shared pool first (bounded by the
+	// member's daily/monthly cap), then the personal wallet. For a token with
+	// no workspace membership it degrades to a plain personal-wallet charge —
+	// identical to the legacy AddBalance(charge) path. Either way the total
+	// billed is `cost`, so the request-log row is unchanged.
+	if _, _, err := b.db.ChargeMemberFirst(ctx, token, cost, ref, note); err != nil {
 		log.Warnf("saas: settle charge: debit failed for %s: %v", maskTokenShort(token), err)
 		return mult, 0
 	}

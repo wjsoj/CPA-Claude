@@ -194,12 +194,14 @@ func (db *DB) FleetTotals(ctx context.Context) (*FleetWalletTotals, error) {
 
 // RekeyTokenReport tells the caller exactly what was migrated.
 type RekeyTokenReport struct {
-	WalletRowsAffected     int64
-	WalletTxRowsAffected   int64
-	OrdersRowsAffected     int64
-	OldBalanceUSD          float64
-	NewBalanceUSDAfterMove float64
-	BackupPath             string
+	WalletRowsAffected      int64
+	WalletTxRowsAffected    int64
+	OrdersRowsAffected      int64
+	MemberRowsAffected      int64
+	WorkspaceTxRowsAffected int64
+	OldBalanceUSD           float64
+	NewBalanceUSDAfterMove  float64
+	BackupPath              string
 }
 
 // RekeyToken migrates all wallet-side state from oldToken to newToken
@@ -236,6 +238,7 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 		hadWallet = true
 	}
 	var oldTxCount, oldOrderCount, dstWalletCount int64
+	var oldMemberCount, oldWsTxCount, dstMemberCount int64
 	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(1) FROM wallet_tx WHERE token = ?`, oldToken).Scan(&oldTxCount); err != nil {
 		return nil, err
@@ -250,6 +253,24 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 	}
 	if dstWalletCount > 0 {
 		return nil, errors.New("destination token already has a wallet; refusing to overwrite")
+	}
+	// Workspace state moves with the token too (membership row + the pool
+	// ledger's per-member attribution). Counted here for the same
+	// conservation guarantee the wallet rows get.
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM workspace_members WHERE token = ?`, oldToken).Scan(&oldMemberCount); err != nil {
+		return nil, err
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM workspace_tx WHERE token = ?`, oldToken).Scan(&oldWsTxCount); err != nil {
+		return nil, err
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM workspace_members WHERE token = ?`, newToken).Scan(&dstMemberCount); err != nil {
+		return nil, err
+	}
+	if dstMemberCount > 0 {
+		return nil, errors.New("destination token already belongs to a workspace; refusing to overwrite")
 	}
 
 	if db.path != "" {
@@ -295,6 +316,24 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 	rep.OrdersRowsAffected, _ = res.RowsAffected()
 	if rep.OrdersRowsAffected != oldOrderCount {
 		return nil, fmt.Errorf("alipay_orders conservation broken: pre=%d post=%d", oldOrderCount, rep.OrdersRowsAffected)
+	}
+	res, err = tx.ExecContext(ctx,
+		`UPDATE workspace_members SET token = ?, updated_at = ? WHERE token = ?`, newToken, time.Now().Unix(), oldToken)
+	if err != nil {
+		return nil, err
+	}
+	rep.MemberRowsAffected, _ = res.RowsAffected()
+	if rep.MemberRowsAffected != oldMemberCount {
+		return nil, fmt.Errorf("workspace_members conservation broken: pre=%d post=%d", oldMemberCount, rep.MemberRowsAffected)
+	}
+	res, err = tx.ExecContext(ctx,
+		`UPDATE workspace_tx SET token = ? WHERE token = ?`, newToken, oldToken)
+	if err != nil {
+		return nil, err
+	}
+	rep.WorkspaceTxRowsAffected, _ = res.RowsAffected()
+	if rep.WorkspaceTxRowsAffected != oldWsTxCount {
+		return nil, fmt.Errorf("workspace_tx conservation broken: pre=%d post=%d", oldWsTxCount, rep.WorkspaceTxRowsAffected)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

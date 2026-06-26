@@ -250,6 +250,11 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.GET("/orders", h.handleListAllOrders)
 		api.POST("/orders/:id/reconcile", h.handleReconcileOrder)
 		api.GET("/wallet/:token", h.handleAdminWallet)
+		// Workspaces: shared-pool groups + group-admin assignment.
+		api.GET("/workspaces", h.handleListWorkspaces)
+		api.POST("/workspaces", h.handleCreateWorkspace)
+		api.PATCH("/workspaces/:id", h.handlePatchWorkspace)
+		api.GET("/workspaces/:id/members", h.handleListWorkspaceMembers)
 		// Invoices: list / issue (PDF upload) / reject / re-download.
 		api.GET("/invoices", h.handleListInvoices)
 		api.POST("/invoices/:id/issue", h.handleIssueInvoice)
@@ -1747,9 +1752,28 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 
 func (h *Handler) handleDeleteToken(c *gin.Context) {
 	tok := c.Param("token")
+	// Refuse to delete a token that is the SOLE admin of a workspace —
+	// doing so would orphan the group's management. Operator must reassign
+	// the admin role first (via the team console or by promoting a member).
+	if h.wallets != nil {
+		if wsID, sole, err := h.wallets.SoleAdminWorkspace(c.Request.Context(), tok); err == nil && sole {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error":        "token is the only admin of a workspace; reassign the admin role before deleting",
+				"workspace_id": wsID,
+			})
+			return
+		}
+	}
 	if err := h.tokens.Delete(tok); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	// Best-effort: drop any workspace membership row for the deleted token so
+	// it doesn't dangle. The workspace_tx history (audit) is preserved.
+	if h.wallets != nil {
+		if err := h.wallets.RemoveMember(c.Request.Context(), tok); err != nil && !errors.Is(err, saasdb.ErrNotFound) {
+			log.Warnf("admin: delete token %s: membership cleanup failed: %v", maskToken(tok), err)
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

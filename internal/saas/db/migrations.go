@@ -141,6 +141,62 @@ CREATE TABLE inbound_emails (
 CREATE INDEX idx_inbound_emails_received ON inbound_emails(received_at DESC);
 CREATE INDEX idx_inbound_emails_read ON inbound_emails(read_at, received_at DESC);
 `,
+	// 4: workspaces (组共享额度 + 组管理员). A workspace is a shared USD
+	// pool plus a set of member tokens. Members spend the pool first (bounded
+	// by a per-member daily/monthly cap) and fall back to their personal
+	// wallet when the pool or their cap is exhausted — so this layer sits on
+	// top of the existing per-token wallet without replacing it.
+	//
+	//   - workspace_members.token is UNIQUE: one token belongs to at most one
+	//     workspace. role only gates the /api/team console (admin can manage),
+	//     it does NOT change billing — admins and members both charge through
+	//     ChargeMemberFirst identically.
+	//   - daily/monthly_usd_cap = 0 means "unlimited" (only the pool total
+	//     bounds the member). Caps bound POOL consumption, not total spend;
+	//     beyond a cap the member silently falls back to personal balance.
+	//   - workspace_tx is the pool's ledger: charge rows (negative, attributed
+	//     to the spending member token) + topup/adjust rows (positive). The
+	//     (token, kind, created_at) index backs the per-member cap rollup.
+	//   - alipay_orders gains workspace_id (0 = personal top-up, unchanged
+	//     path). >0 routes the credit to the pool via CreditPaidOrderToWorkspace.
+	`
+CREATE TABLE workspaces (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    balance_usd REAL NOT NULL DEFAULT 0,
+    disabled    INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE workspace_members (
+    workspace_id    INTEGER NOT NULL,
+    token           TEXT NOT NULL UNIQUE,
+    role            TEXT NOT NULL DEFAULT 'member',
+    daily_usd_cap   REAL NOT NULL DEFAULT 0,
+    monthly_usd_cap REAL NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+);
+CREATE INDEX idx_ws_members_ws ON workspace_members(workspace_id);
+
+CREATE TABLE workspace_tx (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    token        TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL,
+    amount_usd   REAL NOT NULL,
+    ref          TEXT NOT NULL DEFAULT '',
+    note         TEXT NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+);
+CREATE INDEX idx_ws_tx_member_period ON workspace_tx(token, kind, created_at);
+CREATE INDEX idx_ws_tx_ws ON workspace_tx(workspace_id, created_at);
+
+ALTER TABLE alipay_orders ADD COLUMN workspace_id INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 func (db *DB) migrate() error {

@@ -227,75 +227,80 @@ func (h *Handler) topup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
 		return
 	}
-	if math.IsInf(req.USD, 0) || math.IsNaN(req.USD) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount"})
+	resp, status, err := h.CreateTopup(c, tok, 0, req.USD)
+	if err != nil {
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	if req.USD < 1 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "min top-up is $1"})
-		return
+	c.JSON(status, resp)
+}
+
+// CreateTopup is the shared order-creation core behind both personal top-ups
+// (workspaceID=0, credited to initiator's wallet) and workspace pool top-ups
+// (workspaceID>0, credited to the pool). The same rate-limit, pending-cap,
+// gateway and mock-autoconfirm machinery applies; `initiator` is the token
+// that owns the order for ownership / rate-limit / display (the group admin on
+// the workspace path). Returns (response, httpStatus, err) — on err the caller
+// writes httpStatus + err; on success httpStatus is 200.
+func (h *Handler) CreateTopup(c *gin.Context, initiator string, workspaceID int64, usd float64) (gin.H, int, error) {
+	if math.IsInf(usd, 0) || math.IsNaN(usd) {
+		return nil, http.StatusBadRequest, errors.New("invalid amount")
 	}
-	if req.USD > 1000 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "max top-up is $1000"})
-		return
+	if usd < 1 {
+		return nil, http.StatusBadRequest, errors.New("min top-up is $1")
 	}
-	if okRate, retry := h.allowCreate(tok); !okRate {
+	if usd > 1000 {
+		return nil, http.StatusBadRequest, errors.New("max top-up is $1000")
+	}
+	if okRate, retry := h.allowCreate(initiator); !okRate {
 		c.Header("Retry-After", strconv.Itoa(retry))
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many top-up requests", "retry_after": retry})
-		return
+		return nil, http.StatusTooManyRequests, fmt.Errorf("too many top-up requests; retry after %ds", retry)
 	}
-	if pending, _ := h.DB.CountPendingOrders(c.Request.Context(), tok); pending >= h.MaxPendingPerUser {
-		c.JSON(http.StatusTooManyRequests, gin.H{
-			"error":          "too many pending orders",
-			"pending_orders": pending,
-			"max_pending":    h.MaxPendingPerUser,
-			"hint":           "wait for existing orders to expire or close them via the Billing page",
-		})
-		return
+	if pending, _ := h.DB.CountPendingOrders(c.Request.Context(), initiator); pending >= h.MaxPendingPerUser {
+		return nil, http.StatusTooManyRequests, fmt.Errorf("too many pending orders (%d/%d); close or wait for existing orders", pending, h.MaxPendingPerUser)
 	}
-	if _, err := h.DB.EnsureWallet(c.Request.Context(), tok); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	if _, err := h.DB.EnsureWallet(c.Request.Context(), initiator); err != nil {
+		return nil, http.StatusInternalServerError, err
 	}
 	rate := h.Rate.CNYPerUSD()
-	cny := round2(req.USD * rate)
-	out, err := genOutTradeNo(tok)
+	cny := round2(usd * rate)
+	out, err := genOutTradeNo(initiator)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		return nil, http.StatusInternalServerError, err
 	}
-	subject := fmt.Sprintf("%s wallet top-up: $%.2f", h.Site, req.USD)
+	subject := fmt.Sprintf("%s wallet top-up: $%.2f", h.Site, usd)
+	if workspaceID > 0 {
+		subject = fmt.Sprintf("%s team pool top-up: $%.2f", h.Site, usd)
+	}
 	pr, err := h.Gateway.CreatePayment(c.Request.Context(), PayParams{
 		OutTradeNo: out, Subject: subject, TotalCNY: cny,
 		Method: "alipay", ClientIP: c.ClientIP(),
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "gateway: " + err.Error()})
-		return
+		return nil, http.StatusInternalServerError, fmt.Errorf("gateway: %w", err)
 	}
 	// Pack the three surfaces into qr_code as JSON so we don't need a
 	// schema migration to add pay_url/img alongside it.
 	stored, _ := json.Marshal(pr)
 	if err := h.DB.CreateOrder(c.Request.Context(), db.AlipayOrder{
-		OutTradeNo: out, Token: tok, CNYAmount: cny, USDCredit: req.USD,
+		OutTradeNo: out, Token: initiator, WorkspaceID: workspaceID, CNYAmount: cny, USDCredit: usd,
 		Rate: rate, QRCode: string(stored),
 	}); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	if mock, ok := h.Gateway.(*MockGateway); ok {
 		go mock.AutoConfirm(h, out)
 	}
-	c.JSON(http.StatusOK, gin.H{
+	return gin.H{
 		"out_trade_no": out,
 		"cny_amount":   cny,
-		"usd_credit":   req.USD,
+		"usd_credit":   usd,
 		"rate":         rate,
 		"method":       "alipay",
 		"qr_code":      pr.QRCode,
 		"pay_url":      pr.PayURL,
 		"img":          pr.Img,
-	})
+	}, http.StatusOK, nil
 }
 
 func (h *Handler) orderStatus(c *gin.Context) {
@@ -397,6 +402,20 @@ func (h *Handler) applyNotification(ctx context.Context, n *Notification, source
 		return ErrOrderExpired
 	}
 	note := fmt.Sprintf("zpay top-up ¥%.2f @ %.4f (%s)", o.CNYAmount, o.Rate, source)
+	// workspace_id > 0 routes the credit to a shared pool via a parallel,
+	// equally-idempotent method — the personal CreditPaidOrder path below is
+	// left untouched so its battle-tested validation/ordering is unchanged.
+	if o.WorkspaceID > 0 {
+		if _, err := h.DB.CreditPaidOrderToWorkspace(ctx, o.OutTradeNo, n.TradeNo, o.WorkspaceID, o.USDCredit, o.OutTradeNo, note); err != nil {
+			if errors.Is(err, db.ErrOrderNotPending) {
+				return nil
+			}
+			return err
+		}
+		log.Infof("billing [%s]: credited workspace=%d order=%s usd=%.2f cny=%.2f trade_no=%s",
+			source, o.WorkspaceID, o.OutTradeNo, o.USDCredit, o.CNYAmount, n.TradeNo)
+		return nil
+	}
 	if _, err := h.DB.CreditPaidOrder(ctx, o.OutTradeNo, n.TradeNo, o.Token, o.USDCredit, o.OutTradeNo, note); err != nil {
 		if errors.Is(err, db.ErrOrderNotPending) {
 			return nil

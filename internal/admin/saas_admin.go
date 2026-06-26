@@ -3,6 +3,7 @@ package admin
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -251,3 +252,169 @@ func (h *Handler) handleAdminWallet(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, resp)
 }
+
+// ---- Workspaces (组共享额度 + 组管理员) ----
+
+func workspaceView(w *saasdb.WorkspaceWithMeta) gin.H {
+	return gin.H{
+		"id":           w.ID,
+		"name":         w.Name,
+		"balance_usd":  w.BalanceUSD,
+		"disabled":     w.Disabled,
+		"member_count": w.MemberCount,
+		"admin_count":  w.AdminCount,
+		"created_at":   w.CreatedAt.Unix(),
+		"updated_at":   w.UpdatedAt.Unix(),
+	}
+}
+
+func (h *Handler) handleListWorkspaces(c *gin.Context) {
+	if h.wallets == nil {
+		c.JSON(http.StatusOK, gin.H{"workspaces": []any{}, "enabled": false})
+		return
+	}
+	ws, err := h.wallets.ListWorkspaces(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]gin.H, 0, len(ws))
+	for _, w := range ws {
+		out = append(out, workspaceView(w))
+	}
+	c.JSON(http.StatusOK, gin.H{"workspaces": out, "enabled": true})
+}
+
+type createWorkspaceBody struct {
+	Name       string  `json:"name"`
+	AdminToken string  `json:"admin_token"`
+	InitialUSD float64 `json:"initial_usd"`
+}
+
+func (h *Handler) handleCreateWorkspace(c *gin.Context) {
+	if h.wallets == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "saas billing disabled"})
+		return
+	}
+	var body createWorkspaceBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	adminTok := strings.TrimSpace(body.AdminToken)
+	if adminTok == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_token required"})
+		return
+	}
+	if _, ok := h.tokens.Lookup(adminTok); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_token is not a registered client token"})
+		return
+	}
+	ws, err := h.wallets.CreateWorkspace(c.Request.Context(), body.Name)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.wallets.AddMember(c.Request.Context(), ws.ID, adminTok, saasdb.WSRoleAdmin, 0, 0); err != nil {
+		// Roll back the just-created (empty) workspace so a failed admin
+		// assignment doesn't leave an orphan group.
+		_ = h.wallets.UpdateWorkspace(c.Request.Context(), ws.ID, nil, ptrBool(true))
+		if err == saasdb.ErrMemberExists {
+			c.JSON(http.StatusConflict, gin.H{"error": "that token already belongs to a workspace"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "assign admin: " + err.Error()})
+		return
+	}
+	if body.InitialUSD > 0 {
+		if _, err := h.wallets.AdjustWorkspaceBalance(c.Request.Context(), ws.ID, body.InitialUSD, saasdb.TxKindTopup, "admin-create", "initial pool credit"); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "seed balance: " + err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"id": ws.ID, "name": ws.Name})
+}
+
+type patchWorkspaceBody struct {
+	Name         *string  `json:"name"`
+	Disabled     *bool    `json:"disabled"`
+	BalanceDelta *float64 `json:"balance_delta"`
+	BalanceNote  string   `json:"balance_note"`
+}
+
+func (h *Handler) handlePatchWorkspace(c *gin.Context) {
+	if h.wallets == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "saas billing disabled"})
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+		return
+	}
+	var body patchWorkspaceBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.Name != nil || body.Disabled != nil {
+		if err := h.wallets.UpdateWorkspace(c.Request.Context(), id, body.Name, body.Disabled); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.BalanceDelta != nil && *body.BalanceDelta != 0 {
+		note := body.BalanceNote
+		if note == "" {
+			note = "admin manual adjustment"
+		}
+		kind := saasdb.TxKindAdjust
+		if *body.BalanceDelta > 0 {
+			kind = saasdb.TxKindTopup
+		}
+		if _, err := h.wallets.AdjustWorkspaceBalance(c.Request.Context(), id, *body.BalanceDelta, kind, "admin-patch", note); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "balance: " + err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (h *Handler) handleListWorkspaceMembers(c *gin.Context) {
+	if h.wallets == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "saas billing disabled"})
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+		return
+	}
+	ms, err := h.wallets.ListMembers(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	labels := make(map[string]string)
+	for _, t := range h.tokens.List() {
+		if t.Name != "" {
+			labels[t.Token] = t.Name
+		}
+	}
+	out := make([]gin.H, 0, len(ms))
+	for _, m := range ms {
+		day, month := h.wallets.MemberPeriodPoolSpend(c.Request.Context(), m.Token)
+		out = append(out, gin.H{
+			"masked":          maskToken(m.Token),
+			"label":           labels[m.Token],
+			"role":            m.Role,
+			"daily_usd_cap":   m.DailyUSDCap,
+			"monthly_usd_cap": m.MonthlyUSDCap,
+			"used_day_usd":    day,
+			"used_month_usd":  month,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"members": out})
+}
+
+func ptrBool(b bool) *bool { return &b }

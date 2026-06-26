@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
+	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/cc-core/usage"
@@ -394,15 +395,23 @@ type statusQueryBody struct {
 }
 
 type statusTokenResult struct {
-	Masked        string                `json:"masked"`
-	Found         bool                  `json:"found"`
-	Name          string                `json:"name,omitempty"`
-	Group         string                `json:"group,omitempty"`
+	Masked string `json:"masked"`
+	Found  bool   `json:"found"`
+	Name   string `json:"name,omitempty"`
+	Group  string `json:"group,omitempty"`
 	// BalanceUSD + Blocked replace the old WeeklyLimit/Blocked pair.
 	// Blocked is true when the wallet is at or below zero, which is what
 	// the proxy hot-path uses to refuse new requests.
-	BalanceUSD    float64               `json:"balance_usd"`
-	Blocked       bool                  `json:"blocked"`
+	BalanceUSD float64 `json:"balance_usd"`
+	Blocked    bool    `json:"blocked"`
+	// Workspace (group shared pool) fields — set only when the token is a
+	// member of a workspace. PoolAvailUSD is what this member may still draw
+	// from the pool right now (after caps); IsTeamAdmin unlocks the team
+	// console in the status SPA.
+	Workspace    string  `json:"workspace,omitempty"`
+	PoolAvailUSD float64 `json:"pool_avail_usd,omitempty"`
+	IsTeamAdmin  bool    `json:"is_team_admin,omitempty"`
+	IsTeamMember bool    `json:"is_team_member,omitempty"`
 	// WeeklyUsedUSD is informational — current ISO-week spend from the
 	// usage ledger. Not a limit any more.
 	WeeklyUsedUSD float64               `json:"weekly_used_usd"`
@@ -437,13 +446,13 @@ type statusRecentEntry struct {
 	// statuses where nothing settled. The status page's Usage Lookup
 	// renders this as the primary number; cost_usd is shown in the
 	// hover popup as the "official" upstream cost.
-	BilledUSD  float64   `json:"billed_usd,omitempty"`
-	Multiplier float64   `json:"multiplier,omitempty"`
-	Status     int       `json:"status"`
-	DurationMs int64     `json:"duration_ms"`
-	Stream     bool      `json:"stream,omitempty"`
-	AuthLabel  string    `json:"auth_label,omitempty"`
-	AuthKind   string    `json:"auth_kind,omitempty"`
+	BilledUSD  float64 `json:"billed_usd,omitempty"`
+	Multiplier float64 `json:"multiplier,omitempty"`
+	Status     int     `json:"status"`
+	DurationMs int64   `json:"duration_ms"`
+	Stream     bool    `json:"stream,omitempty"`
+	AuthLabel  string  `json:"auth_label,omitempty"`
+	AuthKind   string  `json:"auth_kind,omitempty"`
 }
 
 const statusRecentLimit = 60
@@ -510,7 +519,21 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 				if g, err := h.wallets.GetGroup(c.Request.Context(), w.GroupID); err == nil {
 					r.PricingGroup = g.Name
 				}
-				if w.BalanceUSD <= 0 {
+				// Workspace membership: a member can spend the shared pool
+				// before their personal balance, so the "blocked" decision
+				// must include the available pool, mirroring the proxy
+				// hot-path's PrecheckBalance.
+				poolAvail := 0.0
+				if m, err := h.wallets.MemberFor(c.Request.Context(), tok); err == nil {
+					r.IsTeamMember = true
+					r.IsTeamAdmin = m.Role == saasdb.WSRoleAdmin
+					if ws, err := h.wallets.GetWorkspace(c.Request.Context(), m.WorkspaceID); err == nil {
+						r.Workspace = ws.Name
+					}
+					poolAvail = h.wallets.MemberPoolAvail(c.Request.Context(), tok)
+					r.PoolAvailUSD = poolAvail
+				}
+				if w.BalanceUSD <= 0 && poolAvail <= 0 {
 					r.Blocked = true
 				}
 			}
@@ -569,7 +592,7 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 		}
 		res, err := h.cachedQueryShared(requestlog.Filter{
 			Dir:   h.cfg.LogDir,
-			From:  time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -(retention - 1)),
+			From:  time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -(retention - 1)),
 			Limit: 200000,
 		}, statusCacheTTL)
 		if err == nil {

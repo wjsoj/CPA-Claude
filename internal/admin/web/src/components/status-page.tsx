@@ -19,6 +19,7 @@ import {
 import { StatusDashboardPanel } from "./status-dashboard-panel";
 import { StatusMonitorPanel } from "./status-monitor-panel";
 import { WalletPanel } from "./wallet-panel";
+import { TeamPanel } from "./team-panel";
 import {
   loadStatusDashboard,
   loadStatusOverview,
@@ -699,6 +700,21 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
         </div>
       </div>
 
+      {/* Workspace shared pool — shown when this token is a group member. The
+          member spends the pool first (up to their cap), then personal balance. */}
+      {r.is_team_member && (
+        <div className="flex items-center justify-between rounded-sm border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+          <span className="opacity-80">
+            组共享池{r.workspace ? ` · ${r.workspace}` : ""}
+            {r.is_team_admin && <span className="ml-1 font-semibold text-primary">（管理员）</span>}
+          </span>
+          <span className="mono">
+            可用 <span className="font-semibold text-primary">${(r.pool_avail_usd || 0).toFixed(4)}</span>
+            <span className="opacity-50"> · 优先于个人余额</span>
+          </span>
+        </div>
+      )}
+
       {/* Daily cost line chart */}
       {daily.length > 0 && daily.some((d) => d.cost_usd > 0) && (
         <div>
@@ -754,6 +770,18 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
             </LineChart>
           </ChartContainer>
         </div>
+      )}
+
+      {/* Group-admin console — only when this token administers a workspace. */}
+      {r.is_team_admin && (
+        <details className="rounded-md border border-primary/30 bg-primary/5">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-primary">
+            团队管理（组共享额度）
+          </summary>
+          <div className="border-t border-primary/20 p-3">
+            <TeamPanel token={fullToken} />
+          </div>
+        </details>
       )}
 
       {/* Detailed request ledger with pagination */}
