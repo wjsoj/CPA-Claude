@@ -51,11 +51,16 @@ func TestSettleChargeOverride(t *testing.T) {
 // TestAllowAPIKeyFallback verifies the per-token gate: non-SaaS always allows
 // (legacy operator behaviour), SaaS defaults off and honours the opt-in.
 func TestAllowAPIKeyFallback(t *testing.T) {
+	optOut := false
+	optIn := true
 	store := clienttoken.OpenInMemory()
-	if err := store.Add(clienttoken.Token{Token: "t1"}); err != nil {
+	if err := store.Add(clienttoken.Token{Token: "t1"}); err != nil { // unset → default ON
 		t.Fatal(err)
 	}
-	if err := store.Add(clienttoken.Token{Token: "t2", UpstreamFallback: true}); err != nil {
+	if err := store.Add(clienttoken.Token{Token: "t2", UpstreamFallback: &optOut}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(clienttoken.Token{Token: "t3", UpstreamFallback: &optIn}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,16 +70,19 @@ func TestAllowAPIKeyFallback(t *testing.T) {
 		t.Fatal("non-SaaS mode must keep legacy always-fall-back")
 	}
 
-	// SaaS enabled → strict per-token opt-in.
+	// SaaS enabled → default ON, explicit opt-out respected.
 	on := &Server{tokens: store, billing: &billing.Handler{}}
-	if on.allowAPIKeyFallback("t1") {
-		t.Fatal("SaaS default-off token must not fall back")
+	if !on.allowAPIKeyFallback("t1") {
+		t.Fatal("unset token must default to fall-back ON")
 	}
-	if !on.allowAPIKeyFallback("t2") {
+	if on.allowAPIKeyFallback("t2") {
+		t.Fatal("opted-out token must NOT fall back")
+	}
+	if !on.allowAPIKeyFallback("t3") {
 		t.Fatal("opted-in token must fall back")
 	}
-	if on.allowAPIKeyFallback("unknown") {
-		t.Fatal("unknown token must not fall back")
+	if !on.allowAPIKeyFallback("unknown") {
+		t.Fatal("unknown token defaults to fall-back ON")
 	}
 }
 
@@ -108,20 +116,20 @@ func TestWalletSettingsEndpoints(t *testing.T) {
 		return w
 	}
 
-	// GET default → 200 + false.
-	if w := do("GET", "", tok); w.Code != 200 || !strings.Contains(w.Body.String(), `"upstream_fallback":false`) {
+	// GET default → 200 + true (default ON).
+	if w := do("GET", "", tok); w.Code != 200 || !strings.Contains(w.Body.String(), `"upstream_fallback":true`) {
 		t.Fatalf("GET default: code=%d body=%s", w.Code, w.Body.String())
 	}
-	// PATCH true → 200.
-	if w := do("PATCH", `{"upstream_fallback":true}`, tok); w.Code != 200 {
-		t.Fatalf("PATCH true: code=%d body=%s", w.Code, w.Body.String())
+	// PATCH false (opt out) → 200, persisted as explicit false.
+	if w := do("PATCH", `{"upstream_fallback":false}`, tok); w.Code != 200 {
+		t.Fatalf("PATCH false: code=%d body=%s", w.Code, w.Body.String())
 	}
-	if v, _ := store.Lookup(tok); !v.UpstreamFallback {
-		t.Fatal("PATCH did not persist upstream_fallback=true")
+	if v, _ := store.Lookup(tok); v.UpstreamFallbackEnabled() {
+		t.Fatal("PATCH did not persist the opt-out")
 	}
-	// GET now reflects true.
-	if w := do("GET", "", tok); !strings.Contains(w.Body.String(), `"upstream_fallback":true`) {
-		t.Fatalf("GET after patch: body=%s", w.Body.String())
+	// GET now reflects false.
+	if w := do("GET", "", tok); !strings.Contains(w.Body.String(), `"upstream_fallback":false`) {
+		t.Fatalf("GET after opt-out: body=%s", w.Body.String())
 	}
 	// Missing/unknown bearer → 401.
 	if w := do("GET", "", ""); w.Code != http.StatusUnauthorized {

@@ -1388,17 +1388,19 @@ func (u usageJSON) toCounts() usage.Counts {
 // allowAPIKeyFallback decides whether a request may fall back to (marked-up)
 // upstream API keys once the self-run OAuth pool is exhausted. In non-SaaS
 // operator mode (billing disabled) the legacy always-fall-back behaviour is
-// kept so existing self-hosting deployments are unaffected. In SaaS mode it is
-// a strict per-token opt-in (default false) so paying users aren't silently
-// served — and billed at the upstream markup — without enabling it themselves.
+// kept. In SaaS mode it defaults ON for every token (stability first) and a
+// user may opt out per-token via the self-service Wallet setting — see
+// clienttoken.Token.UpstreamFallbackEnabled (nil = default on).
 func (s *Server) allowAPIKeyFallback(clientToken string) bool {
 	if s.billing == nil {
 		return true
 	}
 	if tok, ok := s.tokens.Lookup(clientToken); ok {
-		return tok.UpstreamFallback
+		return tok.UpstreamFallbackEnabled()
 	}
-	return false
+	// Unknown token never reaches here in practice (auth gate runs first); be
+	// conservative and allow, matching the default-on policy.
+	return true
 }
 
 // apiKeyPriceOverride returns the per-credential billing multiplier to pass to

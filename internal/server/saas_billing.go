@@ -113,7 +113,8 @@ func (s *Server) handleWalletSettingsGet(c *gin.Context) {
 		c.JSON(401, gin.H{"error": "missing or unknown bearer token"})
 		return
 	}
-	c.JSON(200, gin.H{"upstream_fallback": t.UpstreamFallback})
+	// Effective value: default ON unless the user explicitly opted out.
+	c.JSON(200, gin.H{"upstream_fallback": t.UpstreamFallbackEnabled()})
 }
 
 // handleWalletSettingsPatch toggles the authenticated token's upstream-fallback

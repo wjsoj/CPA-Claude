@@ -369,9 +369,10 @@ function UpstreamFallbackCard({ token }: { token: string }) {
               故障时使用上游号池（加价保底）
             </div>
             <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-              开启后，当我们自营的订阅号池全部不可用时，你的请求会自动改用上游
-              API key 继续服务，<span className="text-foreground/80">按更高倍率计费</span>。
-              默认关闭——关闭时遇到号池故障会直接返回错误，不会产生加价费用。
+              <span className="text-foreground/80">默认开启</span>：当我们自营的订阅号池全部不可用时，你的请求会自动改用上游
+              API key 继续服务，保证可用性（部分上游 key 会
+              <span className="text-foreground/80">按更高倍率计费</span>）。
+              如果你不希望在故障时产生加价费用，可关闭——届时遇到号池故障会直接返回错误。
             </p>
           </div>
         </div>
