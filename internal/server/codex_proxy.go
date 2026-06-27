@@ -16,6 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/mimicry"
 	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/cc-core/usage"
 )
@@ -117,7 +118,7 @@ func (s *Server) fetchCodexAPIKeyModels(ctx context.Context, a *auth.Auth) ([]co
 	if baseURL == "" {
 		baseURL = strings.TrimRight(s.cfg.OpenAIBaseURL, "/")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mimicry.JoinCodexAPIKeyUpstreamURL(baseURL, "/v1/models"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +182,11 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	if baseURL == "" {
 		baseURL = strings.TrimRight(s.cfg.OpenAIBaseURL, "/")
 	}
-	upURL := baseURL + path
+	// Shared join rule (mimicry.JoinCodexAPIKeyUpstreamURL): bare-origin relay
+	// BaseURL keeps /v1 (new-api/one-api serve under /v1); a BaseURL that already
+	// carries a path (/v1, /codex, …) is authoritative and the inbound /v1 is
+	// stripped — so a /v1-suffixed BaseURL no longer doubles into /v1/v1.
+	upURL := mimicry.JoinCodexAPIKeyUpstreamURL(baseURL, path)
 
 	upstreamBody := body
 	rewriteClientModel := ""
