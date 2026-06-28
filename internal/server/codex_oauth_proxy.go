@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -289,7 +290,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
 		costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, counts)
 		s.usage.RecordClient(clientToken, clientName, counts, costUSD)
-		multiplier, billed = s.saas.SettleCharge(c.Request.Context(),
+		multiplier, billed = s.saas.SettleCharge(context.WithoutCancel(c.Request.Context()),
 			clientToken, auth.ProviderOpenAI, model, costUSD,
 			apiKeyPriceOverride(a), "codex-oauth:"+a.ID)
 	}

@@ -64,6 +64,17 @@ function renderProfile(profile: UpstreamResponse["profile"] | undefined) {
   );
 }
 
+// reachedLabel renders rate_limit_reached_type, which the wham/usage backend
+// returns as either a bare string ("primary"/"secondary") or, more recently,
+// an object ({type, resets_at, ...}). Coerce to a short string so the badge
+// never prints the literal "[object Object]".
+function reachedLabel(x: string | { type?: string } | null | undefined): string {
+  if (!x) return "";
+  if (typeof x === "string") return x;
+  if (typeof x === "object" && typeof x.type === "string") return x.type;
+  return "";
+}
+
 function renderWindows(usage: UpstreamUsage | undefined, tick: number) {
   if (!usage || !usage.body) return null;
   const body = usage.body;
@@ -380,7 +391,7 @@ export function CardUpstreamCodex({ auth }: { auth: AuthRow }) {
               {u.plan_type && <span className="text-foreground font-semibold">plan {u.plan_type}</span>}
               {rl?.limit_reached && (
                 <span className="text-destructive mono uppercase">
-                  limit reached{u.rate_limit_reached_type ? ` (${u.rate_limit_reached_type})` : ""}
+                  limit reached{reachedLabel(u.rate_limit_reached_type) ? ` (${reachedLabel(u.rate_limit_reached_type)})` : ""}
                 </span>
               )}
               {spend?.reached && <span className="text-amber-500 mono uppercase">spend cap reached</span>}

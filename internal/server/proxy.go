@@ -912,7 +912,7 @@ recoveredFromSignature:
 		// Advisor sub-charges are debited separately inside
 		// recordSubUsage so each row in the request log carries its own
 		// billed amount.
-		multiplier, billedMain = s.saas.SettleCharge(c.Request.Context(),
+		multiplier, billedMain = s.saas.SettleCharge(context.WithoutCancel(c.Request.Context()),
 			clientToken, auth.NormalizeProvider(a.Provider), model, costUSD,
 			apiKeyPriceOverride(a), "request:"+a.ID)
 	}
@@ -1188,7 +1188,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 				clientCounts.Add(sc)
 			}
 			s.usage.RecordClient(clientToken, clientName, clientCounts, costUSD+advisorCost)
-			multiplier, billedMain = s.saas.SettleCharge(c.Request.Context(),
+			multiplier, billedMain = s.saas.SettleCharge(context.WithoutCancel(c.Request.Context()),
 				clientToken, auth.NormalizeProvider(a.Provider), model, costUSD,
 				apiKeyPriceOverride(a), "request:"+a.ID)
 		}

@@ -277,7 +277,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		if counts.Requests > 0 && clientToken != "" {
 			costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, counts)
 			s.usage.RecordClient(clientToken, clientName, counts, costUSD)
-			multiplier, billed = s.saas.SettleCharge(c.Request.Context(),
+			multiplier, billed = s.saas.SettleCharge(context.WithoutCancel(c.Request.Context()),
 				clientToken, auth.ProviderOpenAI, model, costUSD,
 				apiKeyPriceOverride(a), "codex:"+a.ID)
 		}

@@ -363,7 +363,7 @@ func (s *Server) billCodexWS(c *gin.Context, a *auth.Auth, model, clientToken, c
 		costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, *counts)
 		s.usage.RecordClient(clientToken, clientName, *counts, costUSD)
 		if s.saas != nil {
-			multiplier, billed = s.saas.SettleCharge(c.Request.Context(),
+			multiplier, billed = s.saas.SettleCharge(context.WithoutCancel(c.Request.Context()),
 				clientToken, auth.ProviderOpenAI, model, costUSD,
 				apiKeyPriceOverride(a), "codex-oauth-ws:"+a.ID)
 		}

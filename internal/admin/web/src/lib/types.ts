@@ -96,7 +96,10 @@ export interface CodexUsage {
     reached?: boolean;
     individual_limit?: number | null;
   };
-  rate_limit_reached_type?: string | null;
+  // Historically a bare string ("primary"/"secondary"), but the wham/usage
+  // backend now sometimes returns an object ({type, resets_at, ...}). Accept
+  // any shape; render via reachedLabel() so it never prints "[object Object]".
+  rate_limit_reached_type?: string | { type?: string } | null;
 }
 
 export interface CodexUsageResponse {
