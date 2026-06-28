@@ -311,6 +311,10 @@ func (t *TeamHandler) requests(c *gin.Context) {
 			Dir:         t.LogDir,
 			ClientToken: masked,
 			Limit:       100,
+			// Only res.Entries is read below — skip the per-member aggregates
+			// and stop scanning at the newest 100 hits so a 50-member team
+			// dashboard doesn't trigger 50 full-archive scans.
+			PageOnly: true,
 		})
 		if qerr != nil {
 			continue

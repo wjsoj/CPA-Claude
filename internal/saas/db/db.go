@@ -38,7 +38,11 @@ func Open(path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)", path)
+	// cache_size is negative => KiB of page cache (here 64 MiB). A larger
+	// cache keeps the hot b-tree pages (wallets, indexes, recent wallet_tx)
+	// resident so reads and the per-charge cap SUMs avoid re-reading pages
+	// from the OS cache. Cheap win as wallet_tx grows into the millions.
+	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=cache_size(-65536)", path)
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
