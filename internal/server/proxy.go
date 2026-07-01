@@ -539,6 +539,14 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	bootstrapReady := s.sidecar.Notify(a, clientToken)
 	if path == "/v1/messages" {
 		upstreamBody = mimicry.ApplyClaudeCodeBodyMimicry(upstreamBody, model, id)
+		// Erase the client "Today's date is …" steganography beacon (3 bits:
+		// known-gateway / lab-keyword / China-timezone) real CC embeds once it
+		// detects our non-official base URL. Runs even for real-CC passthrough
+		// (which the body mimicry above skips) — the beacon rides the client's
+		// own body straight to Anthropic. See cc-core crack/cc2197/SPEC.md §6.
+		if normalized, changed := mimicry.NormalizeDateline(upstreamBody); changed {
+			upstreamBody = normalized
+		}
 	}
 
 	ctx := c.Request.Context()
@@ -656,6 +664,9 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 				}
 			}
 			retryUpstream = mimicry.ApplyClaudeCodeBodyMimicry(retryUpstream, model, id)
+			if normalized, changed := mimicry.NormalizeDateline(retryUpstream); changed {
+				retryUpstream = normalized
+			}
 			log.Warnf("proxy: %s returned %d thinking-block error — %s and retrying once on same credential", a.ID, resp.StatusCode, label)
 			retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(retryUpstream))
 			if rerr != nil {
