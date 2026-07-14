@@ -52,6 +52,17 @@ active_window_minutes: 5
 # multiplies it by codex_concurrency_multiplier (below).
 client_max_concurrent: 15
 
+# Max pool slots one client token may hold at once per provider. 0 = unlimited.
+# This is a FAIR-SHARE cap, distinct from client_max_concurrent: a pool slot is
+# what a credential's max_concurrent rations, and slots are held for very unequal
+# durations — an HTTP request holds one for seconds, but a codex-tui WebSocket
+# session holds one for as long as the socket is open (chatgpt.com keeps these
+# alive up to an hour). Without a cap a couple of WS users can sit on most of a
+# provider's slot capacity and everyone else gets "no credentials available"
+# from a healthy fleet. Only NEW sessions are refused; an established session is
+# never torn down. Leave at 0 unless you see WS users starving others.
+client_max_sessions: 0
+
 # Multiplier applied on the Codex endpoint only to BOTH client_max_concurrent
 # and client_rpm. Codex CLI fans out many short, bursty requests (parallel
 # tool calls, compaction probes) that would otherwise trip the shared caps, so

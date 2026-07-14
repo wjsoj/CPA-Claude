@@ -143,6 +143,22 @@ type Config struct {
 	// 0 = unlimited. Per-token overrides take precedence.
 	ClientMaxConcurrent int `yaml:"client_max_concurrent"`
 
+	// Maximum pool slots one client token may hold at once for a single
+	// provider. 0 = unlimited.
+	//
+	// This is a fair-share cap, and it is NOT the same thing as
+	// ClientMaxConcurrent. A pool slot is what a credential's max_concurrent
+	// actually rations, and slots are held for wildly unequal durations: an
+	// HTTP request holds one for seconds, but a codex-tui WebSocket session
+	// holds one for as long as the socket is open — chatgpt.com keeps those
+	// alive for up to an hour. So a couple of WS users can sit on most of a
+	// provider's total slot capacity, and every other client then gets
+	// "no credentials available" from a completely healthy fleet.
+	//
+	// Only NEW slots are refused; a session that already holds one keeps
+	// working, so this never kills a conversation mid-flight.
+	ClientMaxSessions int `yaml:"client_max_sessions"`
+
 	// Multiplier applied on the Codex endpoint only to BOTH the per-token
 	// concurrency cap (ClientMaxConcurrent) and the per-token RPM cap
 	// (ClientRPM): the effective Codex limit on each gate is this multiple of

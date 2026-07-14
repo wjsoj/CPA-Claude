@@ -286,6 +286,23 @@ function codexCountdown(ts?: number): string {
   return `${m}m`;
 }
 
+// windowLabel renders a rate-limit window's duration from the length the
+// upstream actually reported, instead of a hardcoded "5h"/"7d". ChatGPT retired
+// the 5h primary window in 2026-07 and now reports a 7-day (604800s) primary
+// window, so the old fixed "primary (5h)" label was simply wrong — the 59% a
+// user sees is really their weekly usage. Falls back to a bare name when the
+// upstream omits the length. Duration format matches hypitoken's
+// fmtWindowSeconds so both admin UIs read identically (e.g. 604800 -> "7d").
+function windowLabel(name: string, secs: number | undefined): string {
+  if (!secs || secs <= 0) return name;
+  let dur: string;
+  if (secs % 86400 === 0) dur = `${secs / 86400}d`;
+  else if (secs % 3600 === 0) dur = `${secs / 3600}h`;
+  else if (secs % 60 === 0) dur = `${secs / 60}m`;
+  else dur = `${secs}s`;
+  return `${name} (${dur})`;
+}
+
 function pctTone(raw: number | undefined): { pct: number | null; color: string } {
   // wham/usage `used_percent` is ALREADY a 0–100 percentage (e.g. 1 = 1%),
   // unlike Anthropic's 0–1 `utilization`. Do NOT apply the "<=1 ? *100"
@@ -410,7 +427,7 @@ export function CardUpstreamCodex({ auth }: { auth: AuthRow }) {
               <tbody>
                 {primary && (
                   <tr className="border-b last:border-b-0">
-                    <td className="py-1.5 pr-2">primary (5h)</td>
+                    <td className="py-1.5 pr-2">{windowLabel("primary", primary.limit_window_seconds)}</td>
                     <td className="py-1.5 mono text-right tabular">
                       {(() => {
                         const { pct } = pctTone(primary.used_percent);
@@ -436,7 +453,7 @@ export function CardUpstreamCodex({ auth }: { auth: AuthRow }) {
                 )}
                 {secondary && (
                   <tr>
-                    <td className="py-1.5 pr-2">secondary (7d)</td>
+                    <td className="py-1.5 pr-2">{windowLabel("secondary", secondary.limit_window_seconds)}</td>
                     <td className="py-1.5 mono text-right tabular">
                       {(() => {
                         const { pct } = pctTone(secondary.used_percent);
