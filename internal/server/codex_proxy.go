@@ -265,8 +265,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 				missingUsage = true
 				counts = usage.MissingUsageFallbackCounts(body)
 				log.Warnf("codex proxy(apikey): %s streamed success without usage; applying fallback charge and cooling credential", a.ID)
-				a.MarkFailure(usage.MissingUsageError)
-				a.MarkQuotaExceeded(time.Now().Add(45 * time.Second))
+				s.cooldownCodexAPIKey(a, http.StatusBadGateway, time.Time{})
 			}
 		} else {
 			respBody, _ := io.ReadAll(br)
@@ -277,8 +276,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 			if usage.MissingUsage(parsed) {
 				_ = resp.Body.Close()
 				log.Warnf("codex proxy(apikey): %s returned success without usage on non-stream response; failing closed", a.ID)
-				a.MarkFailure(usage.MissingUsageError)
-				a.MarkQuotaExceeded(time.Now().Add(45 * time.Second))
+				s.cooldownCodexAPIKey(a, http.StatusBadGateway, time.Time{})
 				c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "upstream response missing usage; billing cannot be computed"})
 				s.emitLog(requestlog.Record{
 					Client: clientName, ClientToken: maskClientToken(clientToken),
@@ -343,6 +341,26 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		Error:       errField,
 	})
 	return false, true
+}
+
+// codexAPIKey5xxCooldown is how long a Codex API-key relay is quarantined after
+// a 5xx / missing-usage response, so a briefly-degraded relay stops being
+// picked without being permanently retired (API keys never auto-hard-fail).
+const codexAPIKey5xxCooldown = 45 * time.Second
+
+// cooldownCodexAPIKey briefly benches a Codex API-key credential after a
+// retryable upstream failure. 429s go through the pool's rate-limit path
+// (honouring any reset hint); every other status is a transient relay fault
+// (5xx, gateway HTML, missing usage) recorded as a failure + short quota
+// cooldown. Kept identical to hypitoken so the two forks bench a bad relay the
+// same way.
+func (s *Server) cooldownCodexAPIKey(a *auth.Auth, status int, resetAt time.Time) {
+	if status == http.StatusTooManyRequests {
+		s.pool.ReportUpstreamError(a, status, resetAt)
+		return
+	}
+	a.MarkFailure(fmt.Sprintf("upstream %d", status))
+	a.MarkQuotaExceeded(time.Now().Add(codexAPIKey5xxCooldown))
 }
 
 // responseIsSSE reports whether a <400 response should be parsed as an SSE
