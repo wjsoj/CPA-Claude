@@ -320,9 +320,14 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 				surfaceDeferred(lastDeferred)
 				return
 			}
-			msg := "no upstream credentials available"
+			msg, retryAfter := s.poolUnavailable(provider, allowFallback)
 			if len(tried) > 0 {
-				msg = "all upstream credentials exhausted"
+				// We did get credentials, tried them all, and every one bounced.
+				msg = fmt.Sprintf("tried all %d available %s credentials for this request and none could serve it; %s",
+					len(tried), auth.NormalizeProvider(provider), msg)
+			}
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
 			}
 			c.AbortWithStatusJSON(503, gin.H{"error": msg})
 			s.emitLog(requestlog.Record{
@@ -379,6 +384,81 @@ func (s *Server) emitLog(r requestlog.Record) {
 		return
 	}
 	s.reqLog.Log(r)
+}
+
+// poolUnavailable explains why Acquire came back empty for this provider, so a
+// client sees what is actually wrong (and whether waiting will help) instead of
+// an opaque "no upstream credentials available".
+//
+// The distinction that matters to a caller is transient-vs-not: credentials in
+// a cooldown (quota/rate-limit) or a degraded re-probe window come back on
+// their own, so the right move is to back off and retry. Hard-failed or
+// disabled credentials do not — they need an operator. Saturation is neither:
+// the fleet is healthy and simply busy.
+//
+// Returns the message and a Retry-After hint in seconds (0 = retrying will not
+// help by itself).
+func (s *Server) poolUnavailable(provider string, allowFallback bool) (string, int) {
+	want := auth.NormalizeProvider(provider)
+	var total, disabled, hardFailed, cooling, degraded, saturated int
+	var soonest time.Time
+	now := time.Now()
+
+	for _, st := range s.pool.Status() {
+		if auth.NormalizeProvider(st.Auth.Provider) != want {
+			continue
+		}
+		if st.Auth.Kind == auth.KindAPIKey && !allowFallback {
+			continue // not eligible for this token; don't describe it
+		}
+		total++
+		if st.Auth.Disabled {
+			disabled++
+			continue
+		}
+		a := s.pool.FindByID(st.Auth.ID)
+		if a == nil {
+			continue
+		}
+		healthy, hardFailure, _, _ := a.HealthSnapshot()
+		switch {
+		case hardFailure:
+			hardFailed++
+		case !st.Auth.QuotaResetAt.IsZero() && st.Auth.QuotaResetAt.After(now):
+			cooling++
+			if soonest.IsZero() || st.Auth.QuotaResetAt.Before(soonest) {
+				soonest = st.Auth.QuotaResetAt
+			}
+		case !healthy:
+			degraded++
+		case st.Auth.MaxConcurrent > 0 && st.ActiveClients >= st.Auth.MaxConcurrent:
+			saturated++
+		}
+	}
+
+	switch {
+	case total == 0:
+		return fmt.Sprintf("no %s credentials are configured on this proxy", want), 0
+	case hardFailed+disabled == total:
+		return fmt.Sprintf("all %d %s credentials are hard-failed or disabled and need an operator to clear them; retrying will not help",
+			total, want), 0
+	case cooling > 0 && !soonest.IsZero():
+		wait := int(time.Until(soonest).Seconds()) + 1
+		if wait < 1 {
+			wait = 1
+		}
+		return fmt.Sprintf("all %d %s credentials are rate-limited or out of quota; the earliest resets in %s",
+			total, want, time.Until(soonest).Round(time.Second)), wait
+	case degraded > 0:
+		// The credentials are quarantined after upstream errors and will be
+		// re-probed automatically (cc-core degradedProbeAfter). Transient.
+		return fmt.Sprintf("%d of %d %s credentials are temporarily degraded after upstream errors and are being re-probed; retry shortly",
+			degraded, total, want), 30
+	case saturated > 0:
+		return fmt.Sprintf("all %d %s credentials are at their concurrency limit; too many requests are in flight, retry shortly",
+			total, want), 5
+	}
+	return fmt.Sprintf("no %s credential is currently available to serve this request", want), 15
 }
 
 // clientSlotID derives a per-window slot identifier from the incoming request.
