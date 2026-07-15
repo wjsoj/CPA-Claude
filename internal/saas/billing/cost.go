@@ -9,7 +9,7 @@
 // `multiplier` is the per-(group × provider) coefficient stored on the
 // pricing_groups table (claude_multiplier / codex_multiplier). Operator
 // edits it from the admin panel; defaults are claude=0.05 (1/20) and
-// codex=0.0125 (1/80). A non-positive multiplier falls back to 1.0 so
+// codex=0.02 (1/50). A non-positive multiplier falls back to 1.0 so
 // callers don't need to special-case missing config.
 package billing
 

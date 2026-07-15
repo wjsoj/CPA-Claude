@@ -18,7 +18,7 @@ var ErrNotFound = errors.New("not found")
 // reorder or rewrite a previous entry — only append.
 var migrations = []string{
 	// 1: initial schema. Defaults match the operator-requested values —
-	// claude=1/20 (0.05), codex=1/80 (0.0125). The seed row is created
+	// claude=1/20 (0.05), codex=1/50 (0.02). The seed row is created
 	// with those values so a freshly-installed instance is ready to bill
 	// without an admin first having to touch the pricing-groups table.
 	`
@@ -26,7 +26,7 @@ CREATE TABLE pricing_groups (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     name                TEXT NOT NULL UNIQUE,
     description         TEXT NOT NULL DEFAULT '',
-    codex_multiplier    REAL NOT NULL DEFAULT 0.0125,
+    codex_multiplier    REAL NOT NULL DEFAULT 0.02,
     claude_multiplier   REAL NOT NULL DEFAULT 0.05,
     credential_group    TEXT NOT NULL DEFAULT '',
     is_default          INTEGER NOT NULL DEFAULT 0,
@@ -34,7 +34,7 @@ CREATE TABLE pricing_groups (
     updated_at          INTEGER NOT NULL
 );
 INSERT INTO pricing_groups (name, description, codex_multiplier, claude_multiplier, is_default, created_at, updated_at)
-VALUES ('default', 'Default pricing group', 0.0125, 0.05, 1, strftime('%s','now'), strftime('%s','now'));
+VALUES ('default', 'Default pricing group', 0.02, 0.05, 1, strftime('%s','now'), strftime('%s','now'));
 
 CREATE TABLE wallets (
     token         TEXT PRIMARY KEY,

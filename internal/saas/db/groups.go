@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// Defaults match the operator-requested ratios: claude 1/20, codex 1/80.
+// Defaults match the operator-requested ratios: claude 1/20, codex 1/50.
 // Both are <1 so users pay less than the upstream rack rate.
 const (
 	DefaultClaudeMultiplier = 0.05
-	DefaultCodexMultiplier  = 0.0125
+	DefaultCodexMultiplier  = 0.02
 )
 
 type PricingGroup struct {
