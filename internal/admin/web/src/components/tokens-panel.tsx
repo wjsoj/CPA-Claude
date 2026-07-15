@@ -4,8 +4,10 @@ import type { ClientRow, Summary } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Terminal } from "lucide-react";
 import { GroupBadge } from "./group-badge";
 import { CopyTokenBtn } from "./copy-token-btn";
+import { TokenSetupModal } from "./modals/token-setup";
 import { cn, fmtDate, fmtInt, isoWeekRange } from "@/lib/utils";
 
 interface Props {
@@ -22,6 +24,7 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: "weekly", dir: "desc" });
   const [filter, setFilter] = useState<"all" | "managed" | "config" | "blocked">("all");
+  const [setupClient, setSetupClient] = useState<ClientRow | null>(null);
 
   const clients = summary?.clients || [];
   const totalWeekly = clients.reduce((s, c) => s + c.weekly_usd, 0);
@@ -285,6 +288,15 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
                         {cl.full_token ? (
                           <div className="flex gap-1.5 justify-end flex-wrap">
                             <CopyTokenBtn token={cl.full_token} />
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="gap-1.5"
+                              onClick={() => setSetupClient(cl)}
+                            >
+                              <Terminal className="h-3.5 w-3.5" />
+                              Setup
+                            </Button>
                             <Button size="sm" variant="outline" onClick={() => onEdit(cl)}>
                               Edit
                             </Button>
@@ -311,6 +323,7 @@ export function TokensPanel({ summary, onAdd, onEdit, onDelete }: Props) {
           </div>
         )}
       </div>
+      <TokenSetupModal client={setupClient} onClose={() => setSetupClient(null)} />
     </div>
   );
 }
