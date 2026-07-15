@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
-import { Gauge, RefreshCw } from "lucide-react";
+import { Gauge, RefreshCw, Zap } from "lucide-react";
 import { api } from "@/lib/api";
-import type { AuthRow, CodexUsageResponse, UpstreamResponse, UpstreamUsage, UsageWindow } from "@/lib/types";
+import type {
+  AuthRow,
+  CodexResetResponse,
+  CodexUsageResponse,
+  UpstreamResponse,
+  UpstreamUsage,
+  UsageWindow,
+} from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { cn, fmtCountdown, fmtLocalTime } from "@/lib/utils";
 
@@ -269,6 +276,8 @@ interface CodexState {
   error?: string;
   data?: CodexUsageResponse;
   ts?: number;
+  resetting?: boolean;
+  resetMsg?: string;
 }
 
 function fmtUnix(ts?: number): string | null {
@@ -359,6 +368,38 @@ export function CardUpstreamCodex({ auth }: { auth: AuthRow }) {
   const spend = u?.spend_control;
   const primary = rl?.primary_window;
   const secondary = rl?.secondary_window;
+  const resetAvailable = u?.rate_limit_reset_credits?.available_count ?? 0;
+
+  // Consume one rate-limit reset credit. Irreversible (burns a card), so we
+  // confirm first. On success the response carries a refreshed usage snapshot
+  // — swap it in so the countdowns and remaining-credit count update at once.
+  const doReset = async () => {
+    if (st.resetting) return;
+    if (resetAvailable <= 0) return;
+    if (
+      !window.confirm(
+        `Consume one reset credit for ${auth.email || auth.id}? This immediately resets the rate-limit window and cannot be undone. ${resetAvailable} credit(s) available.`,
+      )
+    )
+      return;
+    setSt((s) => ({ ...s, resetting: true, error: "", resetMsg: "" }));
+    try {
+      const d = await api<CodexResetResponse>(
+        `/admin/api/auths/${encodeURIComponent(auth.id)}/reset-codex-credit`,
+        { method: "POST" },
+      );
+      const windows = d.reset?.windows_reset ?? 0;
+      setSt((s) => ({
+        ...s,
+        resetting: false,
+        resetMsg: `Reset done — ${windows} window(s) reset${d.reset?.code ? ` (${d.reset.code})` : ""}.`,
+        data: d.usage ? { usage: d.usage } : s.data,
+        ts: d.usage ? Date.now() : s.ts,
+      }));
+    } catch (x: any) {
+      setSt((s) => ({ ...s, resetting: false, error: x?.message || String(x) }));
+    }
+  };
 
   return (
     <div className="px-5 py-3 border-t border-border bg-muted/20" key={tick}>
@@ -497,6 +538,38 @@ export function CardUpstreamCodex({ auth }: { auth: AuthRow }) {
               {credits.overage_limit_reached && (
                 <span className="text-destructive">overage limit reached</span>
               )}
+            </div>
+          )}
+          {u && (
+            <div className="flex items-center justify-between gap-2 flex-wrap border-t border-border pt-2">
+              <div className="text-[11px] text-muted-foreground mono">
+                reset cards:{" "}
+                <span className={cn("font-semibold", resetAvailable > 0 ? "text-foreground" : "")}>
+                  {resetAvailable}
+                </span>{" "}
+                available
+              </div>
+              <div className="flex items-center gap-2">
+                {st.resetMsg && <span className="text-[11px] text-emerald-500 mono">{st.resetMsg}</span>}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void doReset();
+                  }}
+                  disabled={st.resetting || resetAvailable <= 0}
+                  title={
+                    resetAvailable > 0
+                      ? "Consume one reset credit to reset the rate-limit window now"
+                      : "No reset credits available"
+                  }
+                >
+                  <Zap className={cn("h-3 w-3", st.resetting && "animate-pulse")} />
+                  {st.resetting ? "Resetting…" : "Reset quota"}
+                </Button>
+              </div>
             </div>
           )}
         </div>

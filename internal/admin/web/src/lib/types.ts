@@ -100,9 +100,34 @@ export interface CodexUsage {
   // backend now sometimes returns an object ({type, resets_at, ...}). Accept
   // any shape; render via reachedLabel() so it never prints "[object Object]".
   rate_limit_reached_type?: string | { type?: string } | null;
+  // One-off rate-limit reset credits ("quota reset cards"). available_count is
+  // how many the account can still redeem; each entry in credits carries an
+  // expiry. Consuming one resets the account's rolling window(s) immediately.
+  rate_limit_reset_credits?: {
+    available_count?: number;
+    credits?: { expires_at?: string }[];
+  };
 }
 
 export interface CodexUsageResponse {
+  usage?: CodexUsage;
+}
+
+// Response of POST /auths/:id/reset-codex-credit. usage is the refreshed
+// wham/usage snapshot taken right after the redeem (may be absent if that
+// follow-up probe failed — the reset itself still succeeded).
+export interface CodexResetResponse {
+  reset?: {
+    code?: string;
+    windows_reset?: number;
+    credit?: {
+      reset_type?: string;
+      status?: string;
+      granted_at?: string;
+      expires_at?: string;
+      redeemed_at?: string;
+    };
+  };
   usage?: CodexUsage;
 }
 
