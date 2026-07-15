@@ -583,9 +583,8 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
       </div>
     );
   }
-  // Wallet-low ratio drives the "near limit" badge — replaces the old
-  // weekly-quota progress signal. Threshold is arbitrary; balance < $1
-  // is "topping up soon" territory.
+  // Wallet-low ratio drives the "near limit" badge. Threshold is arbitrary;
+  // balance < $1 is "topping up soon" territory.
   const balanceLow = r.balance_usd > 0 && r.balance_usd < 1;
   const daily = r.daily || [];
   const lastRecent = r.recent && r.recent.length > 0 ? r.recent[0] : undefined;

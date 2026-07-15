@@ -651,8 +651,7 @@ type clientRow struct {
 	FullToken string `json:"full_token,omitempty"`
 	Label     string `json:"label,omitempty"`
 	// WeeklyUSD is the rolling-week USD spend (informational, derived from
-	// the usage ledger). The weekly *limit* is gone — billing is now
-	// balance-based, not budget-based.
+	// the usage ledger). Access is gated on the wallet balance, not this.
 	WeeklyUSD float64 `json:"weekly_usd"`
 	// BalanceUSD is the wallet balance, from the SaaS store. Zero when
 	// SaaS is disabled or the wallet was never created.
@@ -1725,7 +1724,7 @@ func (h *Handler) handlePatchToken(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.tokens.Update(tok, body.Name, nil /*weekly*/, body.MaxConcurrent, body.RPM, body.Group, nil /*groups — CPA-Claude is single-channel*/, body.Providers); err != nil {
+	if err := h.tokens.Update(tok, body.Name, nil /*weekly: unused*/, body.MaxConcurrent, body.RPM, body.Group, nil /*groups — CPA-Claude is single-channel*/, body.Providers); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

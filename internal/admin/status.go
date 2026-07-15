@@ -399,7 +399,6 @@ type statusTokenResult struct {
 	Found  bool   `json:"found"`
 	Name   string `json:"name,omitempty"`
 	Group  string `json:"group,omitempty"`
-	// BalanceUSD + Blocked replace the old WeeklyLimit/Blocked pair.
 	// Blocked is true when the wallet is at or below zero, which is what
 	// the proxy hot-path uses to refuse new requests.
 	BalanceUSD float64 `json:"balance_usd"`

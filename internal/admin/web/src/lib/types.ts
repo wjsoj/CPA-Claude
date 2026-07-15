@@ -115,7 +115,8 @@ export interface ClientRow {
   // Empty / absent = both (unrestricted). Values are canonical provider
   // ids ("anthropic" | "openai").
   providers?: string[];
-  // Current rolling-week spend (informational; no quota any more).
+  // Current rolling-week spend (informational). Access is gated on the
+  // wallet balance below, not on this.
   weekly_usd: number;
   // SaaS wallet — balance + pricing-group assignment. Zero when SaaS
   // billing is disabled or the wallet row hasn't been created yet.
