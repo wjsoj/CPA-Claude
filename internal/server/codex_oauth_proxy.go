@@ -130,6 +130,14 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusForbidden:
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		// A 429 with an explicit model-capacity body is scoped to this model
+		// request, not to the account. Try another credential without setting
+		// account quota; the official usage probe remains authoritative for a
+		// genuine subscription limit.
+		if resp.StatusCode == http.StatusTooManyRequests && isCodexCapacityError(errBody) {
+			log.Warnf("codex oauth: model capacity rejection via %s; retrying another credential without cooling account", a.ID)
+			return true, false
+		}
 		resetAt := parseCodexResetAt(errBody)
 		if resetAt.IsZero() {
 			resetAt = parseRetryAfter(resp.Header)
@@ -138,14 +146,18 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		log.Warnf("codex oauth: credential %s received %d: %s", a.ID, resp.StatusCode, truncate(errBody, 240))
 		return true, false
 	}
-	// Capacity errors come back with 200+JSON on some edge deployments or
-	// as 4xx; the body message is what we actually key on.
+	// Capacity errors can also come back as non-429 4xx responses; the body
+	// message is what we actually key on. This is a
+	// model/request-scoped signal, not an account-quota signal: another account
+	// may still have capacity, but cooling this credential would also take all
+	// of its other models offline. Retry another credential for this request
+	// without mutating credential health. Genuine account quota is identified
+	// by request-time usage-limit responses and the proactive wham/usage probe.
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if isCodexCapacityError(errBody) {
-			resetAt := parseCodexResetAt(errBody)
-			s.pool.ReportUpstreamError(a, http.StatusTooManyRequests, resetAt)
+			log.Warnf("codex oauth: model capacity rejection via %s; retrying another credential without cooling account", a.ID)
 			return true, false
 		}
 		writeResponseHeaders(c, resp)
@@ -540,8 +552,9 @@ func extractCodexBackendUsageFromJSON(body []byte) usage.Counts {
 }
 
 // isCodexCapacityError detects the upstream's "model is at capacity"
-// rejection so the picker cools down this credential without giving up on
-// the request. Strings come from CLIProxyAPI's codex_executor.go.
+// rejection so the current request can try another credential without
+// treating a model-scoped outage as account quota. Strings come from
+// CLIProxyAPI's codex_executor.go.
 func isCodexCapacityError(body []byte) bool {
 	lower := bytes.ToLower(body)
 	return bytes.Contains(lower, []byte("selected model is at capacity")) ||

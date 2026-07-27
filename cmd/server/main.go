@@ -13,12 +13,13 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/wjsoj/cc-core/auth"
-	"github.com/wjsoj/cc-core/clienttoken"
+	"github.com/wjsoj/CPA-Claude/internal/codexquota"
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/logging"
-	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/CPA-Claude/internal/server"
+	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/clienttoken"
+	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/cc-core/usage"
 )
 
@@ -154,6 +155,12 @@ func main() {
 	// concurrent exchanges.
 	refresherCtx, refresherCancel := context.WithCancel(context.Background())
 	go pool.RunRefresher(refresherCtx, time.Minute, 10*time.Minute)
+
+	// Proactively mirror the official Codex account quota into scheduler
+	// health. Model-capacity errors are intentionally request-scoped and do
+	// not freeze credentials; only wham/usage limit_reached (or a genuine
+	// request-time quota response) creates a quota cooldown.
+	go codexquota.Run(refresherCtx, pool, cfg.UseUTLS, 5*time.Minute)
 
 	// Daily 00:00 reset for unhealthy Anthropic API-key credentials.
 	// Consecutive upstream errors auto-promote those creds to a sticky
