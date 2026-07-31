@@ -33,6 +33,12 @@ function statusMeta(a: AuthRow) {
     return { label: "Disabled", tone: "text-muted-foreground", dot: "bg-muted-foreground" };
   if (a.quota_exceeded)
     return { label: "Quota", tone: "text-[color:var(--warning)]", dot: "bg-[color:var(--warning)]" };
+  // Distinct from both Quota and Unhealthy: the channel is temporarily out of
+  // rotation after repeated upstream errors and re-probes itself. Without its
+  // own state a paused channel is indistinguishable from an idle healthy one,
+  // which is how a silently dead relay goes unnoticed.
+  if (a.quarantined_until)
+    return { label: "Paused", tone: "text-[color:var(--warning)]", dot: "bg-[color:var(--warning)]" };
   if (a.hard_failure)
     return { label: "Unhealthy", tone: "text-destructive", dot: "bg-destructive" };
   if (a.healthy)
@@ -106,7 +112,14 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
           {a.quota_reset_at ? `resets ${fmtDate(a.quota_reset_at)}` : "no reset time reported"}
         </AlertStrip>
       )}
-      {!a.quota_exceeded && a.failure_reason && (
+      {a.quarantined_until && (
+        <AlertStrip tone="warning" icon={<AlertTriangle className="h-3.5 w-3.5" />} label="Channel paused">
+          {`repeated upstream errors — traffic rotated to other keys. Re-probes ${fmtDate(
+            a.quarantined_until,
+          )}${a.quarantine_strikes ? ` (backoff round ${a.quarantine_strikes})` : ""}; one good response restores it automatically.`}
+        </AlertStrip>
+      )}
+      {!a.quota_exceeded && !a.quarantined_until && a.failure_reason && (
         <AlertStrip
           tone={a.hard_failure ? "error" : "warning"}
           icon={a.hard_failure ? <ShieldOff className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
