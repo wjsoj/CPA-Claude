@@ -355,10 +355,19 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up codexws.Conn, a *auth.Auth, group string, counts *usage.Counts, onTurn func(turn usage.Counts, dur time.Duration)) {
 	done := make(chan struct{})
 	var once sync.Once
-	stop := func() {
+	// stop tears the session down. closeCode/closeReason describe why, so the
+	// client gets a real WebSocket Close frame instead of a bare TCP close.
+	//
+	// A bare Close() is what codex-tui reports as "websocket closed by server
+	// before response completed": mid-turn the socket simply dies, with no frame
+	// to say whether the server crashed, the upstream hiccuped, or the turn
+	// finished. Sending a close frame first lets the CLI distinguish a normal end
+	// (NormalClosure) from a retryable upstream drop (TryAgainLater).
+	stop := func(code int, reason string) {
 		once.Do(func() {
 			close(done)
 			_ = up.Close()
+			closeCodexWS(client, code, reason)
 			_ = client.Close()
 		})
 	}
@@ -369,16 +378,32 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 	// upstream -> client
 	go func() {
 		defer wg.Done()
-		defer stop()
 		// billed tracks the token totals already settled via onTurn, so each
 		// terminal event bills only its own turn's delta. turnStart bounds the
 		// per-turn duration reported to the request log.
 		var billed usage.Counts
 		turnStart := time.Now()
+		// midTurn is true once upstream has sent anything for a turn that hasn't
+		// reached its terminal event — i.e. exactly the window in which a drop
+		// leaves the client with a half-written response.
+		midTurn := false
 		for {
 			_ = up.SetReadDeadline(time.Now().Add(codexWSReadDeadline))
 			mt, data, err := up.ReadMessage()
 			if err != nil {
+				// Upstream ended the session. A clean close mid-turn is still a
+				// truncated response from the client's point of view, so both are
+				// logged; only an unexpected drop is surfaced as retryable.
+				if codexWSNormalClose(err) && !midTurn {
+					stop(gorillaws.CloseNormalClosure, "upstream closed")
+					return
+				}
+				// This used to `return` silently, which is why a user-visible
+				// "closed before response completed" left no trace in the logs at
+				// all. Always record it, with the credential that was serving.
+				log.Warnf("codex ws: upstream read via %s ended after %s (midTurn=%t): %v",
+					a.ID, time.Since(turnStart).Round(time.Millisecond), midTurn, err)
+				stop(gorillaws.CloseTryAgainLater, "upstream connection lost")
 				return
 			}
 			if mt == codexws.TextMessage && len(data) > 0 {
@@ -388,16 +413,22 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 				counts.Add(extractCodexBackendUsageFromJSON(data))
 				if codexTerminalEvent(data) {
 					counts.Requests++
+					midTurn = false
 					if onTurn != nil {
 						onTurn(codexTurnDelta(*counts, billed), time.Since(turnStart))
 						billed = *counts
 						billed.Requests = 0 // Requests isn't part of the token delta
 						turnStart = time.Now()
 					}
+				} else {
+					midTurn = true
 				}
 			}
 			_ = client.SetWriteDeadline(time.Now().Add(codexWSWriteDeadline))
 			if err := client.WriteMessage(gorillaws.TextMessage, data); err != nil {
+				// The client is gone; there is nobody left to send a frame to.
+				log.Infof("codex ws: client write via %s failed (midTurn=%t): %v", a.ID, midTurn, err)
+				stop(gorillaws.CloseNormalClosure, "")
 				return
 			}
 		}
@@ -406,10 +437,12 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 	// client -> upstream
 	go func() {
 		defer wg.Done()
-		defer stop()
 		for {
 			mt, data, err := client.ReadMessage()
 			if err != nil {
+				// Client hung up — the ordinary way a session ends. Nothing to
+				// report to it; just tear the upstream leg down.
+				stop(gorillaws.CloseNormalClosure, "")
 				return
 			}
 			if mt == gorillaws.TextMessage {
@@ -421,6 +454,8 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 			}
 			_ = up.SetWriteDeadline(time.Now().Add(codexWSWriteDeadline))
 			if err := up.WriteMessage(codexws.TextMessage, data); err != nil {
+				log.Warnf("codex ws: upstream write via %s failed: %v", a.ID, err)
+				stop(gorillaws.CloseTryAgainLater, "upstream write failed")
 				return
 			}
 		}
@@ -435,7 +470,8 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 			case <-done:
 				return
 			case <-ctx.Done():
-				stop()
+				// Server shutting down or the request context was canceled.
+				stop(gorillaws.CloseServiceRestart, "server shutting down")
 				return
 			case <-t.C:
 				_ = up.Ping(time.Now().Add(5 * time.Second))
@@ -499,6 +535,19 @@ func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToke
 		Stream:      true,
 		Path:        "/v1/responses",
 	})
+}
+
+// codexWSNormalClose reports whether a read error is the upstream closing the
+// socket in an orderly way, as opposed to the connection dropping underneath
+// us. Only the orderly case may be relayed to the client as a normal closure;
+// everything else (h2 PROTOCOL_ERROR, a dead pooled conn, a proxy hiccup, a
+// read deadline) means the response was cut off and the client should be told
+// it can retry.
+func codexWSNormalClose(err error) bool {
+	return gorillaws.IsCloseError(err,
+		gorillaws.CloseNormalClosure,
+		gorillaws.CloseGoingAway,
+	)
 }
 
 func closeCodexWS(conn *gorillaws.Conn, code int, reason string) {

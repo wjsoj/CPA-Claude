@@ -32,6 +32,23 @@ type DB struct {
 // CPA-Claude traffic is nowhere near the throughput where the difference
 // would matter.
 //
+// _txlock=immediate: every BeginTx opens BEGIN IMMEDIATE rather than Go's
+// default BEGIN DEFERRED. This is load-bearing, not a tuning knob. A deferred
+// transaction takes a read lock on its first SELECT and only asks for the write
+// lock at its first write; when another connection already holds the write
+// lock, SQLite fails that upgrade with SQLITE_BUSY *immediately and
+// deliberately ignores busy_timeout* — backing off would deadlock two readers
+// both waiting to upgrade. So busy_timeout cannot help a deferred read→write
+// transaction, which is exactly the shape of Charge (read balance, then write
+// balance + ledger row). The sibling fork ran this configuration into ~29% of
+// all charge attempts failing under normal concurrency, with no retry anywhere:
+// requests served, never billed. With IMMEDIATE the write lock is taken at
+// BEGIN, so contention waits on busy_timeout instead of erroring out.
+//
+// Every BeginTx site in this module writes, so nothing pays for the
+// serialization needlessly; plain Query/Exec outside a transaction is
+// unaffected. busy_timeout is 10s (was 5s) purely for headroom.
+//
 // File mode is force-chmoded to 0600 after open so the wallet ledger is
 // not world-readable even if the filesystem default umask was lax.
 func Open(path string) (*DB, error) {
@@ -42,7 +59,7 @@ func Open(path string) (*DB, error) {
 	// cache keeps the hot b-tree pages (wallets, indexes, recent wallet_tx)
 	// resident so reads and the per-charge cap SUMs avoid re-reading pages
 	// from the OS cache. Cheap win as wallet_tx grows into the millions.
-	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=cache_size(-65536)", path)
+	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=cache_size(-65536)", path)
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
