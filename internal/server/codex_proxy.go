@@ -166,17 +166,21 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	}
 
 	// API-key passthrough. We do not inject any Codex-CLI mimicry, do not
-	// use uTLS, do not normalize the request body (compact whitelist /
-	// stream_options injection), and do not retry across credentials.
-	// Whatever the upstream returns is forwarded to the client verbatim.
-	// The only allowed request-side change is the per-credential model
-	// rewrite (and matching response-side rewrite) so model_map'd relay
-	// vendors keep working.
+	// use uTLS, and do not normalize the request body (compact whitelist /
+	// stream_options injection). The only allowed request-side change is the
+	// per-credential model rewrite (and matching response-side rewrite) so
+	// model_map'd relay vendors keep working.
 	//
-	// Health tracking is intentionally minimal: success → MarkSuccess,
-	// 401/403 → MarkHardFailure (sticky Unhealthy in admin). Transient
-	// 5xx / 429 / network errors are NOT recorded — we don't want a brief
-	// upstream flap to flip the credential into a "degraded" yellow state.
+	// Health tracking shares classifyUpstreamStatus with the Anthropic
+	// API-key path (upstream_health.go). Retryable faults — 429, 5xx,
+	// transport errors, and a rejected key — are NOT relayed: we roll back to
+	// the forward loop (retry=true) so it excludes this credential and tries
+	// the next, and report the fault so cc-core's breaker pauses the relay and
+	// stops it being picked. This is what keeps one dead relay (e.g. a
+	// reseller returning a 502 page) from surfacing 502s to every client when
+	// healthy Codex credentials are available. Client-side faults (400, 404,
+	// 422 …) are forwarded verbatim and leave health alone. See
+	// reportCodexAPIKeyFault.
 	snap := a.Snapshot()
 	baseURL := strings.TrimRight(snap.BaseURL, "/")
 	if baseURL == "" {
@@ -230,15 +234,44 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 			})
 			return false, true
 		}
-		log.Warnf("codex proxy(apikey): upstream transport error via %s: %v", a.ID, err)
-		c.AbortWithStatusJSON(502, gin.H{"error": err.Error()})
+		// Transport/gateway failure — treat like a retryable 5xx: report the
+		// fault so the breaker can pause this relay, and roll back to the loop
+		// to try the next credential instead of handing the client a bare 502.
+		log.Warnf("codex proxy(apikey): upstream transport error via %s: %v — rotating to next credential", a.ID, err)
+		s.reportCodexAPIKeyFault(a, http.StatusBadGateway, time.Time{})
 		s.emitLog(requestlog.Record{
 			Client: clientName, ClientToken: maskClientToken(clientToken),
 			Provider: auth.ProviderOpenAI, AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
 			Model: model, Stream: stream, Path: path, Status: 502,
 			DurationMs: time.Since(start).Milliseconds(), Attempts: attempts, Error: err.Error(),
 		})
-		return false, true
+		return true, false
+	}
+
+	// Retryable fault (throttle / overload / gateway down / this key rejected):
+	// don't relay it. Read+discard the body, report the fault so the breaker
+	// can pause the relay, and roll back to the loop to try the next
+	// credential. Nothing has been written to the client yet, so the retry is
+	// transparent. This is what keeps one dead relay (a reseller returning a
+	// 502 page) from surfacing 502s to every client while healthy Codex
+	// credentials sit idle.
+	//
+	// classifyUpstreamStatus is shared with the Anthropic API-key path, so the
+	// two providers agree about which statuses are the client's own fault and
+	// must not be retried or counted against a credential.
+	if classifyUpstreamStatus(resp.StatusCode).retryable() {
+		errBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		log.Warnf("codex proxy(apikey): %s returned %d — rotating to next credential. body=%s", a.ID, resp.StatusCode, truncate(errBody, 500))
+		s.reportCodexAPIKeyFault(a, resp.StatusCode, parseRetryAfter(resp.Header))
+		s.emitLog(requestlog.Record{
+			Client: clientName, ClientToken: maskClientToken(clientToken),
+			Provider: auth.ProviderOpenAI, AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
+			Model: model, Stream: stream, Path: path, Status: resp.StatusCode,
+			DurationMs: time.Since(start).Milliseconds(), Attempts: attempts,
+			Error: fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate(errBody, 200)),
+		})
+		return true, false
 	}
 
 	var counts usage.Counts
@@ -265,7 +298,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 				missingUsage = true
 				counts = usage.MissingUsageFallbackCounts(body)
 				log.Warnf("codex proxy(apikey): %s streamed success without usage; applying fallback charge and cooling credential", a.ID)
-				s.cooldownCodexAPIKey(a, http.StatusBadGateway, time.Time{})
+				s.reportCodexAPIKeyFault(a, http.StatusBadGateway, time.Time{})
 			}
 		} else {
 			respBody, _ := io.ReadAll(br)
@@ -276,7 +309,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 			if usage.MissingUsage(parsed) {
 				_ = resp.Body.Close()
 				log.Warnf("codex proxy(apikey): %s returned success without usage on non-stream response; failing closed", a.ID)
-				s.cooldownCodexAPIKey(a, http.StatusBadGateway, time.Time{})
+				s.reportCodexAPIKeyFault(a, http.StatusBadGateway, time.Time{})
 				c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "upstream response missing usage; billing cannot be computed"})
 				s.emitLog(requestlog.Record{
 					Client: clientName, ClientToken: maskClientToken(clientToken),
@@ -293,11 +326,13 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	}
 	_ = resp.Body.Close()
 
-	switch {
-	case resp.StatusCode < 400 && !missingUsage:
+	// Only success is recorded here. Every retryable fault — including
+	// 401/402/403, which used to be marked at this point — returns above,
+	// having already been reported to the breaker by reportCodexAPIKeyFault.
+	// What reaches here with a >=400 status is a client-side fault (400, 404,
+	// 422 …), which by design leaves credential health untouched.
+	if resp.StatusCode < 400 && !missingUsage {
 		a.MarkSuccess()
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		a.MarkHardFailure(fmt.Sprintf("upstream %d", resp.StatusCode))
 	}
 
 	var costUSD float64
@@ -343,24 +378,39 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	return false, true
 }
 
-// codexAPIKey5xxCooldown is how long a Codex API-key relay is quarantined after
-// a 5xx / missing-usage response, so a briefly-degraded relay stops being
-// picked without being permanently retired (API keys never auto-hard-fail).
-const codexAPIKey5xxCooldown = 45 * time.Second
-
-// cooldownCodexAPIKey briefly benches a Codex API-key credential after a
-// retryable upstream failure. 429s go through the pool's rate-limit path
-// (honouring any reset hint); every other status is a transient relay fault
-// (5xx, gateway HTML, missing usage) recorded as a failure + short quota
-// cooldown. Kept identical to hypitoken so the two forks bench a bad relay the
-// same way.
-func (s *Server) cooldownCodexAPIKey(a *auth.Auth, status int, resetAt time.Time) {
+// reportCodexAPIKeyFault records an upstream failure on a Codex API-key relay
+// so the pool stops selecting it while it is broken.
+//
+// This used to hand a 5xx to MarkFailure *plus* a fixed 45s MarkQuotaExceeded.
+// The quota call was a workaround, not an intent: MarkFailure alone could not
+// take an API key out of rotation (IsHealthy skipped the consecutive-failure
+// heuristic for KindAPIKey), and the quota cooldown was the only lever
+// IsHealthy honoured — at the cost of reporting an upstream 5xx to operators
+// as "quota exceeded", and of a flat interval that both over-reacted to a
+// one-off 502 and under-reacted to a permanently dead relay by re-probing it
+// every 45s forever.
+//
+// cc-core's API-key circuit breaker removes that constraint, so the classes
+// now map onto shared machinery:
+//
+//	429            → the pool's throttling path (Retry-After aware, growing
+//	                 backoff) — kept, because a rate limit is the one case
+//	                 where the upstream tells us how long to wait
+//	401/402/403    → MarkHardFailure: definitive, pauses on the first strike
+//	5xx/transport/ → MarkFailure: pauses after a few in a row, then backs off
+//	contract        exponentially and probes itself back in
+//
+// None of these retire the channel; every pause expires on its own.
+func (s *Server) reportCodexAPIKeyFault(a *auth.Auth, status int, resetAt time.Time) {
 	if status == http.StatusTooManyRequests {
 		s.pool.ReportUpstreamError(a, status, resetAt)
 		return
 	}
+	if classifyUpstreamStatus(status) == faultCredential {
+		a.MarkHardFailure(fmt.Sprintf("upstream %d", status))
+		return
+	}
 	a.MarkFailure(fmt.Sprintf("upstream %d", status))
-	a.MarkQuotaExceeded(time.Now().Add(codexAPIKey5xxCooldown))
 }
 
 // responseIsSSE reports whether a <400 response should be parsed as an SSE
