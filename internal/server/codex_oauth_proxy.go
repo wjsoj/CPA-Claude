@@ -174,6 +174,11 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 
 	var counts usage.Counts
 	var streamErr string
+	// Status recorded in the request log. Defaults to the upstream's, but a
+	// mid-stream client hang-up overrides it to 499 — the response was 200 on
+	// the wire, yet logging it as a success with an error attached hides it
+	// from every "client canceled" view.
+	logStatus := resp.StatusCode
 	if isCompactPath {
 		// /codex/responses/compact returns a single JSON object — no SSE.
 		// Read it once, extract usage, pass through verbatim. Matches sub2api's
@@ -232,14 +237,29 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 			return true, false
 		}
 		if !res.sawTerminal {
-			// Bytes already went downstream — can't restart cleanly. Record the
-			// truncation richly so it's visible in logs + the request log
-			// instead of looking like a clean stream end.
-			streamErr = fmt.Sprintf("stream truncated mid-flight after %d event(s)/%dB: %v", res.events, res.bytes, res.err)
+			// Bytes already went downstream — can't restart cleanly. Record what
+			// happened richly so it's visible in logs + the request log instead
+			// of looking like a clean stream end.
+			//
+			// Name the two causes apart. Codex CLI aborts the in-flight request
+			// on Ctrl-C / ESC, which cancels the context and reaches us as the
+			// same read error an upstream hang-up would — so labelling both
+			// "truncated" turns ordinary user behaviour into what reads as an
+			// upstream incident. In hypitoken's production logs that made ~90%
+			// of all recorded Codex errors cancellations in disguise, burying
+			// the ~0.05% of genuine h2 truncations.
 			if isClientDisconnect(ctx, res.err) {
+				streamErr = fmt.Sprintf("client canceled mid-stream after %d event(s)/%dB", res.events, res.bytes)
+				// 499 + MarkClientCancel match the two disconnect branches
+				// above, so a mid-stream hang-up lands in the same bucket as one
+				// a second earlier rather than as a 200 carrying an error.
+				// MarkClientCancel is health-neutral: the credential is fine.
+				logStatus = 499
+				a.MarkClientCancel(errString(res.err))
 				log.Infof("codex oauth: client disconnected mid-stream via %s (attempt %d, events=%d, bytes=%d, %s)",
 					a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond))
 			} else {
+				streamErr = fmt.Sprintf("stream truncated mid-flight after %d event(s)/%dB: %v", res.events, res.bytes, res.err)
 				log.Warnf("codex oauth: SSE truncated mid-stream via %s (attempt %d, events=%d, bytes=%d, %s): %v",
 					a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond), res.err)
 			}
@@ -320,7 +340,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		CostUSD:     costUSD,
 		BilledUSD:   billed,
 		Multiplier:  multiplier,
-		Status:      resp.StatusCode,
+		Status:      logStatus,
 		DurationMs:  time.Since(start).Milliseconds(),
 		Stream:      stream,
 		Path:        path,
