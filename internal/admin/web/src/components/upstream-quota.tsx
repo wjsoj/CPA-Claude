@@ -38,6 +38,23 @@ const WINDOW_KEYS: [WindowKey, string][] = [
   ["iguana_necktie", "iguana_necktie"],
 ];
 
+// fableLimitRow extracts fable's independent weekly allotment from the newer
+// `limits[]` structure (a weekly_scoped entry scoped to the Fable model) and
+// shapes it like a UsageWindow so it renders as one more row. Returns null when
+// the upstream doesn't surface it. `percent` is already 0-100.
+function fableLimitRow(body: UpstreamUsage["body"]): [string, UsageWindow] | null {
+  const limits = body?.limits;
+  if (!Array.isArray(limits)) return null;
+  const fable = limits.find(
+    (l) =>
+      (l?.scope?.model?.display_name || "").toLowerCase() === "fable" ||
+      (l?.kind === "weekly_scoped" && !!l?.scope?.model),
+  );
+  if (!fable) return null;
+  const label = `7-day ${fable.scope?.model?.display_name || "Fable"}`;
+  return [label, { utilization: fable.percent, resets_at: fable.resets_at || undefined }];
+}
+
 function pctAndColor(raw: number | undefined | null): { pct: number | null; color: string } {
   const pct = typeof raw === "number" ? Math.round(raw <= 1 ? raw * 100 : raw) : null;
   const color =
@@ -91,6 +108,8 @@ function renderWindows(usage: UpstreamUsage | undefined, tick: number) {
     string,
     UsageWindow,
   ][];
+  const fable = fableLimitRow(body);
+  if (fable) rows.push(fable);
   const extra = body.extra_usage;
   if (!rows.length && !extra) {
     return (

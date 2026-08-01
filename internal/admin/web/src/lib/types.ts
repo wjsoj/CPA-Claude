@@ -263,6 +263,10 @@ export interface UpstreamUsage {
     seven_day_sonnet?: UsageWindow;
     seven_day_cowork?: UsageWindow;
     iguana_necktie?: UsageWindow;
+    // Newer authoritative structure: per-scope limit entries. Fable's
+    // independent weekly allotment (~50% of weekly) is a weekly_scoped entry
+    // with scope.model.display_name === "Fable" — it is NOT a top-level window.
+    limits?: UsageLimit[];
     extra_usage?: {
       is_enabled?: boolean;
       utilization?: number;
@@ -275,6 +279,19 @@ export interface UpstreamUsage {
 export interface UsageWindow {
   utilization?: number;
   resets_at?: string;
+}
+
+export interface UsageLimit {
+  kind?: string; // e.g. "session" | "weekly_all" | "weekly_scoped"
+  group?: string;
+  percent?: number; // already 0-100
+  severity?: string;
+  resets_at?: string | null;
+  is_active?: boolean;
+  scope?: {
+    model?: { id?: string | null; display_name?: string | null };
+    surface?: string | null;
+  } | null;
 }
 
 export interface UpstreamProfile {
