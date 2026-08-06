@@ -71,13 +71,15 @@ type Handler struct {
 	// handler returns an empty payload when unset.
 	mon *monitor.Monitor
 
-	// Cache for the full-history log scan backing lifetime totals.
-	// Scanning every rotated file on each summary refresh would be
-	// wasteful; a short TTL keeps the UI snappy without serving data
-	// older than the refresh cadence.
-	lifetimeMu    sync.Mutex
-	lifetimeCache map[string]requestlog.Aggregate
-	lifetimeAt    time.Time
+	// Cache for the per-auth aggregates the summary renders, keyed by
+	// window ("lifetime" and the rolling 24h). Both used to re-scan the log
+	// archive on every refresh — the 24h one had no cache at all — so a
+	// polling panel meant a continuous stream of full-directory passes.
+	// A short TTL keeps the UI live; byAuthSF collapses concurrent misses
+	// into one pass.
+	lifetimeMu  sync.Mutex
+	byAuthCache map[string]byAuthCacheEntry
+	byAuthSF    singleflight.Group
 
 	// Cache for /api/requests responses. The overview dashboard polls
 	// every 10s and issues two filter shapes (14-day window + all-time);
@@ -113,6 +115,11 @@ type statusWindow24 struct {
 type reqCacheEntry struct {
 	at     time.Time
 	result *requestlog.Result
+}
+
+type byAuthCacheEntry struct {
+	at     time.Time
+	result map[string]requestlog.Aggregate
 }
 
 const lifetimeCacheTTL = 15 * time.Second
@@ -163,22 +170,61 @@ func (h *Handler) WithMonitor(m *monitor.Monitor) *Handler {
 }
 
 func (h *Handler) lifetimeByAuth() map[string]requestlog.Aggregate {
+	return h.cachedByAuth("lifetime", time.Time{}, time.Time{})
+}
+
+// cachedByAuth memoizes one AggregateByAuth window.
+//
+// The lock is released before the aggregate runs and reacquired to store the
+// result, and concurrent misses collapse through singleflight — the same
+// shape cachedQueryShared uses. Holding the mutex across the call instead
+// (which this did until the panel was profiled) meant a second caller waited
+// out the first one's entire scan rather than being deduplicated: two
+// requests arriving together turned one 17s aggregate into 17s + 18s.
+//
+// A stale entry is preferred to an error, so a transient failure keeps
+// rendering the last known totals.
+func (h *Handler) cachedByAuth(key string, from, to time.Time) map[string]requestlog.Aggregate {
 	h.lifetimeMu.Lock()
-	defer h.lifetimeMu.Unlock()
-	if h.lifetimeCache != nil && time.Since(h.lifetimeAt) < lifetimeCacheTTL {
-		return h.lifetimeCache
+	if ent, ok := h.byAuthCache[key]; ok && time.Since(ent.at) < lifetimeCacheTTL {
+		h.lifetimeMu.Unlock()
+		return ent.result
 	}
-	m, err := requestlog.AggregateByAuth(h.cfg.LogDir, time.Time{}, time.Time{})
+	h.lifetimeMu.Unlock()
+
+	v, err, _ := h.byAuthSF.Do(key, func() (any, error) {
+		// Re-check under singleflight: whoever queued behind the winner must
+		// not trigger a second pass.
+		h.lifetimeMu.Lock()
+		if ent, ok := h.byAuthCache[key]; ok && time.Since(ent.at) < lifetimeCacheTTL {
+			h.lifetimeMu.Unlock()
+			return ent.result, nil
+		}
+		h.lifetimeMu.Unlock()
+
+		m, err := requestlog.AggregateByAuth(h.cfg.LogDir, from, to)
+		if err != nil {
+			return nil, err
+		}
+		h.lifetimeMu.Lock()
+		if h.byAuthCache == nil {
+			h.byAuthCache = make(map[string]byAuthCacheEntry, 2)
+		}
+		h.byAuthCache[key] = byAuthCacheEntry{at: time.Now(), result: m}
+		h.lifetimeMu.Unlock()
+		return m, nil
+	})
 	if err != nil {
-		log.Warnf("admin: lifetime aggregate: %v", err)
-		if h.lifetimeCache != nil {
-			return h.lifetimeCache
+		log.Warnf("admin: %s aggregate: %v", key, err)
+		h.lifetimeMu.Lock()
+		ent, ok := h.byAuthCache[key]
+		h.lifetimeMu.Unlock()
+		if ok {
+			return ent.result
 		}
 		return map[string]requestlog.Aggregate{}
 	}
-	h.lifetimeCache = m
-	h.lifetimeAt = time.Now()
-	return m
+	return v.(map[string]requestlog.Aggregate)
 }
 
 func aggToCounts(a requestlog.Aggregate) usage.Counts {
@@ -433,11 +479,9 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	// rebuilds, so sums over it are the source of truth. The in-memory
 	// Daily buckets still drive per-auth 14-day sparklines.
 	lifetime := h.lifetimeByAuth()
-	last24h, err := requestlog.AggregateByAuth(h.cfg.LogDir, time.Now().Add(-24*time.Hour), time.Time{})
-	if err != nil {
-		log.Warnf("admin: 24h aggregate: %v", err)
-		last24h = map[string]requestlog.Aggregate{}
-	}
+	// Truncated to the minute so the cache key is stable across a polling
+	// panel's requests; a 24h window does not care about second-level drift.
+	last24h := h.cachedByAuth("24h", time.Now().Add(-24*time.Hour).Truncate(time.Minute), time.Time{})
 	rows := make([]authRow, 0, 16)
 	for _, st := range h.pool.Status() {
 		kind := "oauth"
@@ -1938,7 +1982,7 @@ func (h *Handler) handleResetToken(c *gin.Context) {
 			} else if n > 0 {
 				log.Infof("admin: reset reqlog rewrite %s→%s (%d records)", oldMask, newMask, n)
 				h.lifetimeMu.Lock()
-				h.lifetimeCache = nil
+				h.byAuthCache = nil
 				h.lifetimeMu.Unlock()
 				h.reqCacheMu.Lock()
 				h.reqCache = nil

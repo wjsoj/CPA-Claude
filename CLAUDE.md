@@ -81,6 +81,17 @@ The `advisor-tool-2026-03-01` beta lets Anthropic run a stronger model (typicall
 
 In real captures advisor sub-calls always run cache-cold (cache_read/cache_create = 0); the four-counter parsing is kept in case Anthropic enables advisor caching later. (The original `advisor-tool-2026-03-01` round-trip capture lives in git history under the old `crack/advisor/`.)
 
+### Admin panel reads go through the request-log index, not the JSONL
+
+`cmd/server/main.go` calls `requestlog.OpenStore(cfg.LogDir)` (skip with `log_index_disabled: true`), which builds `requests.db` beside the rotated JSONL and makes every admin aggregate a SQL query. It must be opened **after** `requestlog.SetBucketLocation` — the index materializes day labels in the display zone (default `Asia/Shanghai`), and a zone change forces a rebuild.
+
+The panel's cost is entirely in these aggregates, so the failure mode to watch for is a query that stops using the index and silently falls back to a full scan. Measured on production (980k records / 434MB): `/api/summary` was 15–18s and the pricing panel's unfiltered `/api/requests?limit=1` was 30s against a 15s cache TTL — a cache that could never be hit because the scan outlived it. Both are now tens of milliseconds.
+
+Two admin-layer traps that were part of the same problem:
+
+- `cachedByAuth` in `admin.go` memoizes the summary's per-auth windows (`lifetime` + `24h`) behind singleflight and **must not hold `lifetimeMu` across the aggregate call**. It used to, so two concurrent panel loads served 17s + 18s instead of deduplicating. The 24h window had no cache at all.
+- The SPA must issue **one** `/api/summary` per load. `App.tsx` previously fired a second one purely as a 401 probe; `Dashboard` already handles 401 → logout, and `login.tsx` verifies the token against a cheap endpoint instead.
+
 ### Sidecar (auxiliary traffic emulation) — `internal/server/sidecar.go`
 
 `sidecarMgr.Notify(a, clientToken)` is called from `doForward` after credential acquisition. First-touch of a `(account, clientToken)` pair starts three goroutines:

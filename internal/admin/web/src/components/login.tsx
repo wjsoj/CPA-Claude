@@ -16,7 +16,10 @@ export function Login({ onOk }: { onOk: () => void }) {
     setBusy(true);
     setToken(val.trim());
     try {
-      await api("/admin/api/summary");
+      // Any authenticated endpoint proves the token; use a cheap one.
+      // /summary aggregates the whole credential pool, so using it here made
+      // signing in wait on work the dashboard is about to redo anyway.
+      await api("/admin/api/workspaces");
       onOk();
     } catch (x: any) {
       setToken("");

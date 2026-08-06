@@ -131,12 +131,30 @@ func main() {
 	}
 
 	var reqLog *requestlog.Writer
+	var logIndex *requestlog.Store
 	if cfg.LogDir != "" {
 		reqLog, err = requestlog.Open(cfg.LogDir, cfg.LogRetentionDays)
 		if err != nil {
 			log.Fatalf("open request log: %v", err)
 		}
 		log.Infof("request log: writing to %s (retain %d days)", cfg.LogDir, cfg.LogRetentionDays)
+
+		// The index is what keeps the admin panel's aggregates cheap: without
+		// it every summary/pricing query re-parses the whole archive. It is
+		// derived state, so a failure here is logged and ignored — the query
+		// paths fall back to scanning JSONL on their own.
+		//
+		// Must come after SetBucketLocation above: the day labels the index
+		// materializes are computed in the display zone.
+		if !cfg.LogIndexDisabled {
+			if st, err := requestlog.OpenStore(cfg.LogDir); err != nil {
+				log.Warnf("request log: index unavailable (%v); queries fall back to scanning", err)
+			} else {
+				logIndex = st
+			}
+		} else {
+			log.Info("request log: index disabled by config (log_index_disabled)")
+		}
 	} else {
 		log.Info("request log: disabled (set log_dir in config to enable)")
 	}
@@ -198,6 +216,12 @@ func main() {
 		defer cancel()
 		_ = s.Shutdown(ctx)
 		store.Close()
+		// Stop the index before the writer: it tails the file the writer
+		// owns, so shutting it down first means no catch-up races the final
+		// flush.
+		if logIndex != nil {
+			logIndex.Close()
+		}
 		if reqLog != nil {
 			reqLog.Close()
 		}
