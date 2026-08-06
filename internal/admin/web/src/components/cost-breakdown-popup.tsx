@@ -107,7 +107,11 @@ export function CostBreakdownPopup({
 
   const computed = rows.reduce((s, r) => s + r.cost, 0);
   const diff = costUsd - computed;
-  const drift = price ? Math.abs(diff) > 0.0005 : false;
+  // The server rounds every charge to 8 decimals (pricing.QuantizeUSD), so a
+  // faithful client recompute now lands within IEEE-754 noise instead of
+  // needing the 5e-4 slack this used to carry — slack that was wider than a
+  // whole Codex request's charge and hid real mispricing.
+  const drift = price ? Math.abs(diff) > 1e-6 : false;
 
   return (
     <HoverCard openDelay={120} closeDelay={80}>

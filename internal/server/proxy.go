@@ -935,9 +935,18 @@ recoveredFromSignature:
 		authKind = "apikey"
 	}
 
+	// counts.Requests is left at ZERO here and set only where usage is actually
+	// observed (usageJSON.toCounts / mergeSSEUsage). It used to be hard-set to 1
+	// on this line, which quietly turned the downstream `counts.Requests > 0`
+	// billing gate into a tautology: a 200 that carried no usage at all still
+	// passed it, priced out to $0, and was served for free. A 2026-08 audit of
+	// the sibling deployment's request log found 3,808 such rows, concentrated
+	// in the most expensive models (opus-4-8, fable-5, opus-4-7).
+	//
+	// The auth-side ledger still counts every served request; see the `ledger`
+	// copy below, which restores Requests=1 for that purpose only.
 	var counts usage.Counts
 	var sub advisor.SubUsage
-	counts.Requests = 1
 
 	// When this credential rewrote the request's model name (relay vendors
 	// with vendor-prefixed names), rewrite it back in the response so the
@@ -986,7 +995,22 @@ recoveredFromSignature:
 		counts.Add(extractUsageFromJSON(respBody, &sub))
 	}
 	_ = resp.Body.Close()
-	s.usage.Record(a.ID, a.Label, counts)
+
+	// Auth-side ledger: every request this credential served counts toward its
+	// load, whether or not the upstream reported usage. Requests is restored on
+	// a copy so the billing gate below keeps reading the honest signal.
+	ledger := counts
+	ledger.Requests = 1
+	s.usage.Record(a.ID, a.Label, ledger)
+
+	// A 200 that reported no usage at all is an upstream accounting failure, not
+	// a free lunch. It cannot be billed — there is no observed quantity to price
+	// — but it must be visible rather than looking like an ordinary $0 row.
+	if resp.StatusCode < 400 && usage.MissingUsage(counts) {
+		log.Warnf("proxy: %s returned %d without usage accounting (model=%s stream=%v) — billing $0",
+			a.ID, resp.StatusCode, model, stream)
+	}
+
 	// Charge the client for the tokens they actually consumed.
 	var costUSD float64
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
@@ -1017,25 +1041,26 @@ recoveredFromSignature:
 			apiKeyPriceOverride(a), "request:"+a.ID)
 	}
 	s.emitLog(requestlog.Record{
-		Client:      clientName,
-		ClientToken: maskClientToken(clientToken),
-		Provider:    auth.NormalizeProvider(a.Provider),
-		AuthID:      a.ID,
-		AuthLabel:   a.Label,
-		AuthKind:    authKind,
-		Model:       model,
-		Input:       counts.InputTokens,
-		Output:      counts.OutputTokens,
-		CacheRead:   counts.CacheReadTokens,
-		CacheCreate: counts.CacheCreateTokens,
-		CostUSD:     costUSD,
-		BilledUSD:   billedMain,
-		Multiplier:  multiplier,
-		Status:      resp.StatusCode,
-		DurationMs:  time.Since(start).Milliseconds(),
-		Stream:      stream,
-		Path:        path,
-		Attempts:    attempts,
+		Client:        clientName,
+		ClientToken:   maskClientToken(clientToken),
+		Provider:      auth.NormalizeProvider(a.Provider),
+		AuthID:        a.ID,
+		AuthLabel:     a.Label,
+		AuthKind:      authKind,
+		Model:         model,
+		Input:         counts.InputTokens,
+		Output:        counts.OutputTokens,
+		CacheRead:     counts.CacheReadTokens,
+		CacheCreate:   counts.CacheCreateTokens,
+		CacheCreate1h: counts.CacheCreate1hTokens,
+		CostUSD:       costUSD,
+		BilledUSD:     billedMain,
+		Multiplier:    multiplier,
+		Status:        resp.StatusCode,
+		DurationMs:    time.Since(start).Milliseconds(),
+		Stream:        stream,
+		Path:          path,
+		Attempts:      attempts,
 	})
 	return false, true, nil
 }
@@ -1287,7 +1312,9 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		errSnippet = truncate(errBody, 500)
 		log.Warnf("proxy(apikey): %s returned %d — body=%s", a.ID, resp.StatusCode, errSnippet)
 	} else {
-		counts.Requests = 1
+		// counts.Requests stays zero until usage is actually observed — see the
+		// OAuth path above for why hard-setting it here made the billing gate a
+		// tautology.
 		// Dispatch on the client's stream flag + the actual bytes, not the
 		// upstream Content-Type alone: relays are known to stream the SSE
 		// back as text/plain, which under a header-only check fell through to
@@ -1317,7 +1344,13 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	var costUSD float64
 	var multiplier, billedMain float64 = 1, 0
 	if resp.StatusCode < 400 {
-		s.usage.Record(a.ID, a.Label, counts)
+		ledger := counts
+		ledger.Requests = 1
+		s.usage.Record(a.ID, a.Label, ledger)
+		if usage.MissingUsage(counts) {
+			log.Warnf("proxy(apikey): %s returned %d without usage accounting (model=%s stream=%v) — billing $0",
+				a.ID, resp.StatusCode, model, stream)
+		}
 		if counts.Requests > 0 && clientToken != "" {
 			costUSD = s.pricing.Cost(auth.NormalizeProvider(a.Provider), model, counts)
 		}
@@ -1339,26 +1372,27 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		errField = fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate([]byte(errSnippet), 200))
 	}
 	s.emitLog(requestlog.Record{
-		Client:      clientName,
-		ClientToken: maskClientToken(clientToken),
-		Provider:    auth.NormalizeProvider(a.Provider),
-		AuthID:      a.ID,
-		AuthLabel:   a.Label,
-		AuthKind:    "apikey",
-		Model:       model,
-		Input:       counts.InputTokens,
-		Output:      counts.OutputTokens,
-		CacheRead:   counts.CacheReadTokens,
-		CacheCreate: counts.CacheCreateTokens,
-		CostUSD:     costUSD,
-		BilledUSD:   billedMain,
-		Multiplier:  multiplier,
-		Status:      resp.StatusCode,
-		DurationMs:  time.Since(start).Milliseconds(),
-		Stream:      stream,
-		Path:        path,
-		Attempts:    attempts,
-		Error:       errField,
+		Client:        clientName,
+		ClientToken:   maskClientToken(clientToken),
+		Provider:      auth.NormalizeProvider(a.Provider),
+		AuthID:        a.ID,
+		AuthLabel:     a.Label,
+		AuthKind:      "apikey",
+		Model:         model,
+		Input:         counts.InputTokens,
+		Output:        counts.OutputTokens,
+		CacheRead:     counts.CacheReadTokens,
+		CacheCreate:   counts.CacheCreateTokens,
+		CacheCreate1h: counts.CacheCreate1hTokens,
+		CostUSD:       costUSD,
+		BilledUSD:     billedMain,
+		Multiplier:    multiplier,
+		Status:        resp.StatusCode,
+		DurationMs:    time.Since(start).Milliseconds(),
+		Stream:        stream,
+		Path:          path,
+		Attempts:      attempts,
+		Error:         errField,
 	})
 	return false, true, nil
 }
@@ -1515,15 +1549,44 @@ type usageJSON struct {
 	CacheCreationInputTokens int64                    `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int64                    `json:"cache_read_input_tokens"`
 	Iterations               []advisor.IterationUsage `json:"iterations,omitempty"`
+
+	// CacheCreation is Anthropic's per-TTL breakdown of the cache writes that
+	// CacheCreationInputTokens totals. Present since the extended-TTL beta; a
+	// response that omits it leaves the sub-counts at zero, which the pricing
+	// layer reads as "don't distinguish" and bills exactly as before.
+	//
+	// It matters because mimicry rewrites every cache breakpoint to ttl:"1h"
+	// (mimicry/body.go, ClaudeDefaultCacheTTL) and Anthropic prices a 1h write
+	// at 2x input against a 5m write's 1.25x. Without this field there is no
+	// way to tell after the fact which rate a request should have paid.
+	CacheCreation *struct {
+		Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation,omitempty"`
+}
+
+// observed reports whether this payload carried any billable quantity. Used to
+// derive Counts.Requests so "we saw usage" stays distinguishable from "the
+// request completed" - conflating them served requests free (see the callers).
+func (u usageJSON) observed() bool {
+	return u.InputTokens > 0 || u.OutputTokens > 0 ||
+		u.CacheCreationInputTokens > 0 || u.CacheReadInputTokens > 0
 }
 
 func (u usageJSON) toCounts() usage.Counts {
-	return usage.Counts{
+	c := usage.Counts{
 		InputTokens:       u.InputTokens,
 		OutputTokens:      u.OutputTokens,
 		CacheCreateTokens: u.CacheCreationInputTokens,
 		CacheReadTokens:   u.CacheReadInputTokens,
 	}
+	if u.CacheCreation != nil {
+		c.CacheCreate1hTokens = u.CacheCreation.Ephemeral1h
+	}
+	if u.observed() {
+		c.Requests = 1
+	}
+	return c
 }
 
 // allowAPIKeyFallback decides whether a request may fall back to (marked-up)
@@ -1680,6 +1743,14 @@ func mergeSSEUsage(dst *usage.Counts, sub *advisor.SubUsage, payload []byte) {
 	}
 	if u.CacheReadInputTokens > 0 {
 		dst.CacheReadTokens = u.CacheReadInputTokens
+	}
+	if u.CacheCreation != nil && u.CacheCreation.Ephemeral1h > 0 {
+		dst.CacheCreate1hTokens = u.CacheCreation.Ephemeral1h
+	}
+	// Requests marks "usage was observed at least once in this stream", so it
+	// latches on and is never cleared by a later event that omits the fields.
+	if u.observed() {
+		dst.Requests = 1
 	}
 	if sub != nil && len(u.Iterations) > 0 {
 		// message_delta.usage.iterations is cumulative — last non-empty
