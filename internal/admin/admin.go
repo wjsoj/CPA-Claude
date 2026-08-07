@@ -346,6 +346,17 @@ func serveAsset(c *gin.Context, root fs.FS, name string) {
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
+	// Everything under assets/ carries a content hash in its filename, so a
+	// given URL's bytes can never change — the build emits a new name
+	// instead. Serving those immutable lets a returning operator skip the
+	// whole bundle; without it the panel re-downloaded ~1MB on every visit.
+	// index.html has no hash and must stay revalidated, or a deploy would be
+	// invisible until the browser cache expired.
+	if strings.HasPrefix(name, "assets/") {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		c.Header("Cache-Control", "no-cache")
+	}
 	c.Data(http.StatusOK, guessMime(name), data)
 }
 

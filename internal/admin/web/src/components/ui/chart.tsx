@@ -1,5 +1,10 @@
 import * as React from "react";
-import * as RechartsPrimitive from "recharts";
+// Named rather than `import * as`, to match the sibling chart consumers.
+// This is style only: Rollup already tracks namespace member access, and
+// switching moved the recharts chunk by 0 bytes when measured. The chunk's
+// ~460KB is genuinely-reachable code (the four chart types this app renders,
+// plus d3-scale/shape/time and lodash), not un-shaken exports.
+import { Legend, ResponsiveContainer, Tooltip } from "recharts";
 import { cn } from "@/lib/utils";
 
 // Minimal shadcn-style Chart primitive. Consumers pass a ChartConfig that
@@ -50,7 +55,7 @@ export const ChartContainer = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<"div"> & {
     config: ChartConfig;
-    children: React.ComponentProps<typeof RechartsPrimitive.ResponsiveContainer>["children"];
+    children: React.ComponentProps<typeof ResponsiveContainer>["children"];
   }
 >(({ className, children, config, style, ...props }, ref) => {
   const isDark = useIsDark();
@@ -73,14 +78,14 @@ export const ChartContainer = React.forwardRef<
         )}
         {...props}
       >
-        <RechartsPrimitive.ResponsiveContainer>{children}</RechartsPrimitive.ResponsiveContainer>
+        <ResponsiveContainer>{children}</ResponsiveContainer>
       </div>
     </ChartContext.Provider>
   );
 });
 ChartContainer.displayName = "Chart";
 
-export const ChartTooltip = RechartsPrimitive.Tooltip;
+export const ChartTooltip = Tooltip;
 
 type TooltipEntry = {
   dataKey?: string | number;
@@ -176,7 +181,7 @@ export const ChartTooltipContent = React.forwardRef<
 );
 ChartTooltipContent.displayName = "ChartTooltip";
 
-export const ChartLegend = RechartsPrimitive.Legend;
+export const ChartLegend = Legend;
 
 export const ChartLegendContent = React.forwardRef<
   HTMLDivElement,

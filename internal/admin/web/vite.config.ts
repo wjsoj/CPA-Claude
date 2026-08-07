@@ -19,6 +19,21 @@ export default defineConfig({
     emptyOutDir: true,
     assetsDir: "assets",
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        // Only React is pinned to a chunk of its own. It is on the critical
+        // path for every view, so it can never be deferred — but it also
+        // changes only when the dependency is bumped, so isolating it means a
+        // routine app change no longer invalidates 130KB of cached vendor
+        // code. Everything else (recharts, radix, dnd-kit) is left to Rollup,
+        // which already places it correctly from the dynamic-import
+        // boundaries; naming those manually would only risk pulling a
+        // deferred library back onto the critical path.
+        manualChunks: {
+          react: ["react", "react-dom", "react/jsx-runtime"],
+        },
+      },
+    },
   },
   server: {
     port: 5173,

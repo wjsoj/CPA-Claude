@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Suspense, lazy } from "react";
 import { toast } from "sonner";
 import {
   LogOut,
@@ -14,24 +14,32 @@ import {
   Users,
 } from "lucide-react";
 import { api, setToken, ApiError } from "@/lib/api";
+import { lazyNamed } from "@/lib/lazy";
 import type { AuthRow, ClientRow, Provider, Summary } from "@/lib/types";
-import { OverviewPanel } from "./overview-panel";
-import { StatusMonitorPanel } from "./status-monitor-panel";
-import { CredentialsPanel } from "./credentials-panel";
-import { TokensPanel } from "./tokens-panel";
-import { RequestsExplorer } from "./requests-explorer";
-import { PricingStats } from "./pricing-stats";
-import { PaymentsPanel } from "./payments-panel";
-import { InvoicesPanel } from "./invoices-panel";
-import { InboxPanel } from "./inbox-panel";
-import { WorkspacesPanel } from "./workspaces-panel";
-import { EditAuthModal } from "./modals/edit-auth";
-import { UploadModal } from "./modals/upload";
-import { APIKeyModal } from "./modals/apikey";
-import { OAuthModal } from "./modals/oauth";
-import { SessionCookieModal } from "./modals/session-cookie";
-import { AddTokenModal } from "./modals/add-token";
-import { EditTokenModal } from "./modals/edit-token";
+// Tab panels are lazy: exactly one is mounted at a time, so shipping all ten
+// in the initial bundle meant downloading nine views nobody is looking at.
+// The Overview pair is the expensive one — it pulls in recharts and its d3
+// tree, which alone was a third of the bundle.
+const OverviewPanel = lazyNamed(() => import("./overview-panel"), "OverviewPanel");
+const StatusMonitorPanel = lazyNamed(() => import("./status-monitor-panel"), "StatusMonitorPanel");
+const CredentialsPanel = lazyNamed(() => import("./credentials-panel"), "CredentialsPanel");
+const TokensPanel = lazyNamed(() => import("./tokens-panel"), "TokensPanel");
+const RequestsExplorer = lazyNamed(() => import("./requests-explorer"), "RequestsExplorer");
+const PricingStats = lazyNamed(() => import("./pricing-stats"), "PricingStats");
+const PaymentsPanel = lazyNamed(() => import("./payments-panel"), "PaymentsPanel");
+const InvoicesPanel = lazyNamed(() => import("./invoices-panel"), "InvoicesPanel");
+const InboxPanel = lazyNamed(() => import("./inbox-panel"), "InboxPanel");
+const WorkspacesPanel = lazyNamed(() => import("./workspaces-panel"), "WorkspacesPanel");
+
+// Modals are opened by an explicit user action, so their code has no business
+// being in the first paint either.
+const EditAuthModal = lazyNamed(() => import("./modals/edit-auth"), "EditAuthModal");
+const UploadModal = lazyNamed(() => import("./modals/upload"), "UploadModal");
+const APIKeyModal = lazyNamed(() => import("./modals/apikey"), "APIKeyModal");
+const OAuthModal = lazyNamed(() => import("./modals/oauth"), "OAuthModal");
+const SessionCookieModal = lazyNamed(() => import("./modals/session-cookie"), "SessionCookieModal");
+const AddTokenModal = lazyNamed(() => import("./modals/add-token"), "AddTokenModal");
+const EditTokenModal = lazyNamed(() => import("./modals/edit-token"), "EditTokenModal");
 import { ThemeToggle } from "./theme-toggle";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/hooks/use-confirm";
@@ -391,8 +399,9 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
           </div>
         </nav>
 
-        {/* TAB PANELS */}
+        {/* TAB PANELS — each is a lazy chunk, so one boundary wraps them all. */}
         <div className="stagger pt-2 md:pt-4">
+          <Suspense fallback={<PanelSkeleton />}>
           {tab === "overview" && (
             <div className="space-y-6">
               <StatusMonitorPanel refreshTick={refreshTick} />
@@ -511,6 +520,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
               </div>
             </section>
           )}
+          </Suspense>
         </div>
 
         <footer className="pt-8 mt-6 border-t border-border eyebrow flex justify-between items-center flex-wrap gap-2">
@@ -519,6 +529,9 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         </footer>
       </div>
 
+      {/* Modals: fallback is null on purpose — nothing is on screen until the
+          user opens one, and a placeholder would flash behind the overlay. */}
+      <Suspense fallback={null}>
       {editing && (
         <EditAuthModal
           auth={editing}
@@ -587,6 +600,17 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
           }}
         />
       )}
+      </Suspense>
+    </div>
+  );
+}
+
+// PanelSkeleton holds the tab area's height while a panel chunk loads, so
+// switching tabs doesn't collapse the page and bounce the scroll position.
+function PanelSkeleton() {
+  return (
+    <div className="min-h-[420px] flex items-center justify-center">
+      <div className="h-5 w-5 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
     </div>
   );
 }
