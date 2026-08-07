@@ -124,6 +124,24 @@ export function fmtDate(s: string | Date | null | undefined): string {
   return diff < 0 ? `${rel} ago` : `in ${rel}`;
 }
 
+// fmtDay renders a calendar date with no time of day, for values whose
+// meaningful unit is the day: subscription terms, grace-period ends, account
+// creation. fmtDate is deliberately *relative* ("in 11d"), which is right for
+// a countdown but wrong here twice over — it reads as broken English after a
+// preposition ("until in 11d"), and it hides the date someone needs in order to
+// check the account against a bank statement.
+export function fmtDay(s: string | Date | null | undefined): string {
+  if (!s) return "—";
+  const d = typeof s === "string" ? new Date(s) : s;
+  if (isNaN(d.getTime())) return "—";
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: sameYear ? undefined : "numeric",
+  });
+}
+
 export function modelMapToText(m: Record<string, string> | null | undefined): string {
   if (!m) return "";
   return Object.keys(m)

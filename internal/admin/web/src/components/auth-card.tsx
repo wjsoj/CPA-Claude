@@ -2,14 +2,16 @@ import React from "react";
 import type { AuthRow } from "@/lib/types";
 import { Sparkline } from "./sparkline";
 import { CardUpstreamCodex, CardUpstreamQuota } from "./upstream-quota";
+import { CardCodexBilling } from "./codex-billing";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { GroupBadge } from "./group-badge";
-import { cn, fmtDate, fmtInt, fmtUSD } from "@/lib/utils";
+import { cn, fmtDate, fmtDay, fmtInt, fmtUSD } from "@/lib/utils";
 import {
   AlertTriangle,
   Ban,
   CheckCircle2,
+  CreditCard,
   Pencil,
   Power,
   RefreshCw,
@@ -130,6 +132,31 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
           title={a.failure_reason}
         >
           {a.failure_reason}
+        </AlertStrip>
+      )}
+      {/* A billing problem is invisible to every health signal we have: the
+          account keeps serving traffic normally until its grace period ends,
+          then stops. Surface it at the top of the card rather than only inside
+          the billing panel, which requires knowing to open it. */}
+      {a.codex_subscription?.at_risk && (
+        <AlertStrip
+          tone={a.codex_subscription.risk_reason === "delinquent" ? "error" : "warning"}
+          icon={<CreditCard className="h-3.5 w-3.5" />}
+          label={
+            a.codex_subscription.risk_reason === "delinquent" ? "Payment failed" : "Not renewing"
+          }
+        >
+          {a.codex_subscription.risk_reason === "delinquent"
+            ? `a renewal charge failed — this credential keeps working until ${
+                a.codex_subscription.risk_deadline
+                  ? `${fmtDay(a.codex_subscription.risk_deadline)} (${fmtDate(a.codex_subscription.risk_deadline)})`
+                  : "its grace period ends"
+              }, then loses entitlement.`
+            : `subscription is set not to renew and lapses on ${
+                a.codex_subscription.risk_deadline
+                  ? `${fmtDay(a.codex_subscription.risk_deadline)} (${fmtDate(a.codex_subscription.risk_deadline)})`
+                  : "its term end"
+              }.`}
         </AlertStrip>
       )}
       {recentCancel && (
@@ -274,6 +301,7 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
 
       {a.kind === "oauth" && a.provider === "anthropic" && <CardUpstreamQuota auth={a} />}
       {a.kind === "oauth" && a.provider === "openai" && <CardUpstreamCodex auth={a} />}
+      {a.kind === "oauth" && a.provider === "openai" && <CardCodexBilling auth={a} />}
       {a.kind === "oauth" && a.provider === "openai" && u && (
         <div className="px-5 py-3 border-t border-border bg-muted/20">
           <div className="flex items-center justify-between gap-2">
