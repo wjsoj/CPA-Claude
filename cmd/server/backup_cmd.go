@@ -230,10 +230,53 @@ func buildManifest(ctx context.Context, cfg *config.Config, configPath, tmpDir s
 	add("state.json", cfg.StateFile, 0o600)
 	add("monitor.json", filepath.Join(configDir, "monitor.json"), 0o600)
 
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("nothing to back up")
+	// Issued invoice PDFs. These are UPLOADED by an operator, not generated,
+	// so nothing can recreate them — losing the disk loses the documents a
+	// customer was given. Everything else in this archive is either derivable
+	// or re-issuable; this is not.
+	entries = append(entries, dirEntries(cfg.SaaS.Invoice.PDFDir, "invoices")...)
+
+	if err := assertManifestComplete(cfg, entries); err != nil {
+		return nil, err
 	}
 	return entries, nil
+}
+
+// assertManifestComplete fails the run when something the config says should
+// exist did not make it into the archive.
+//
+// The old guard was `len(entries) == 0`, which is close to no guard at all.
+// Point a config at the wrong directory and every collector silently skips:
+// the archive ships with one file, the upload logs "uploaded 1 files", and the
+// systemd oneshot goes green. That is strictly worse than a failed backup,
+// because a failed unit is visible and an empty archive is not — it encrypts,
+// uploads and restores cleanly, and you only find out it is empty when you
+// need it. Observed for real while drill-testing.
+func assertManifestComplete(cfg *config.Config, entries []backup.FileEntry) error {
+	have := make(map[string]bool, len(entries))
+	auths := 0
+	for _, e := range entries {
+		have[e.Name] = true
+		if strings.HasPrefix(e.Name, "auths/") {
+			auths++
+		}
+	}
+	var missing []string
+	if cfg.SaaS.Enabled && !have["saas.db"] {
+		missing = append(missing, "saas.db (saas.enabled is true)")
+	}
+	// Credentials are the only unrecoverable content in the archive.
+	if strings.TrimSpace(cfg.AuthDir) != "" && auths == 0 {
+		missing = append(missing, fmt.Sprintf("any credential from auth_dir %q", cfg.AuthDir))
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("refusing to ship an incomplete backup — missing %s; check the paths in this config resolve",
+			strings.Join(missing, ", "))
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("nothing to back up")
+	}
+	return nil
 }
 
 func dirEntries(dir, prefix string) []backup.FileEntry {
