@@ -42,6 +42,9 @@ func main() {
 		case "restore":
 			runRestoreCmd(os.Args[2:])
 			return
+		case "export-requests":
+			runExportRequestsCmd(os.Args[2:])
+			return
 		}
 	}
 
@@ -65,12 +68,8 @@ func main() {
 	// time zone so the panel's "today" matches wall-clock expectations
 	// instead of UTC midnight. Default Asia/Shanghai; "Local" follows the
 	// host TZ. Falls back to UTC if the zone can't be loaded (no tzdata).
-	tzName := strings.TrimSpace(cfg.DisplayTimezone)
-	if tzName == "" {
-		tzName = "Asia/Shanghai"
-	}
-	if loc, err := time.LoadLocation(tzName); err != nil {
-		log.Warnf("display_timezone %q could not be loaded (%v); buckets stay in UTC", tzName, err)
+	if loc := cfg.DisplayLocation(); loc == nil {
+		log.Warnf("display_timezone %q could not be loaded; buckets stay in UTC", cfg.DisplayTimezone)
 	} else {
 		usage.SetBucketLocation(loc)
 		requestlog.SetBucketLocation(loc)
@@ -133,16 +132,14 @@ func main() {
 	var reqLog *requestlog.Writer
 	var logIndex *requestlog.Store
 	if cfg.LogDir != "" {
-		reqLog, err = requestlog.Open(cfg.LogDir, cfg.LogRetentionDays)
-		if err != nil {
-			log.Fatalf("open request log: %v", err)
-		}
-		log.Infof("request log: writing to %s (retain %d days)", cfg.LogDir, cfg.LogRetentionDays)
-
+		// The index opens first because the writer may depend on it: with the
+		// JSONL archive off it is the only place a record can go, and
+		// OpenWithOptions refuses to start without it.
+		//
 		// The index is what keeps the admin panel's aggregates cheap: without
-		// it every summary/pricing query re-parses the whole archive. It is
-		// derived state, so a failure here is logged and ignored — the query
-		// paths fall back to scanning JSONL on their own.
+		// it every summary/pricing query re-parses the whole archive. While the
+		// archive is on it is derived state, so a failure here is logged and
+		// ignored — the query paths fall back to scanning JSONL on their own.
 		//
 		// Must come after SetBucketLocation above: the day labels the index
 		// materializes are computed in the display zone.
@@ -154,6 +151,19 @@ func main() {
 			}
 		} else {
 			log.Info("request log: index disabled by config (log_index_disabled)")
+		}
+
+		reqLog, err = requestlog.OpenWithOptions(cfg.LogDir, requestlog.Options{
+			RetentionDays: cfg.LogRetentionDays,
+			JSONLArchive:  !cfg.LogJSONLDisabled,
+		})
+		if err != nil {
+			log.Fatalf("open request log: %v", err)
+		}
+		if cfg.LogJSONLDisabled {
+			log.Infof("request log: index-only at %s (retain %d days, no .jsonl archive)", cfg.LogDir, cfg.LogRetentionDays)
+		} else {
+			log.Infof("request log: writing to %s (retain %d days)", cfg.LogDir, cfg.LogRetentionDays)
 		}
 	} else {
 		log.Info("request log: disabled (set log_dir in config to enable)")

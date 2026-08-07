@@ -60,7 +60,10 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
     a.last_client_cancel && Date.now() - new Date(a.last_client_cancel).getTime() < 3600 * 1000;
 
   return (
-    <article className="relative group bg-card border border-border-strong rounded-md overflow-hidden transition-all duration-300 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-primary/5 hover:border-primary/40">
+    // No overflow-hidden: the alert strips' hover panels extend past the card
+    // on short cards. Nothing needs the clip — the accent bar below is a
+    // gradient that already fades to transparent at both ends.
+    <article className="relative group bg-card border border-border-strong rounded-md transition-all duration-300 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-primary/5 hover:border-primary/40">
       {/* Thin accent bar that tinges on hover */}
       <div
         aria-hidden
@@ -382,19 +385,34 @@ function AlertStrip({
     error: "bg-destructive/10 text-destructive border-destructive/25",
     muted: "bg-muted text-muted-foreground border-border",
   };
+  // The body is clipped to one line so cards keep a uniform height, which
+  // means the tail of a long message — the part naming the failing model or
+  // the retry time — is otherwise unreachable. Show it in full on hover:
+  // an explicit `title` wins, otherwise reuse the body when it is plain text.
+  const full = title ?? (typeof children === "string" ? children : undefined);
   return (
     <div
       className={cn(
-        "px-5 py-2.5 border-b flex items-center gap-3 text-xs cursor-help",
+        "relative group/strip px-5 py-2.5 border-b flex items-center gap-3 text-xs",
+        full && "cursor-help",
         tones[tone],
       )}
-      title={title}
     >
       <span className="shrink-0">{icon}</span>
       <span className="eyebrow !tracking-wider">{label}</span>
       <span className="mono truncate text-[11px] opacity-90 ml-auto max-w-[60%] text-right">
         {children}
       </span>
+      {full && (
+        // Rendered inside the strip so moving the pointer down into the panel
+        // keeps the group hovered; that in turn lets the text stay selectable
+        // (pointer-events-none would make it uncopyable).
+        <div className="absolute left-0 right-0 top-full z-30 hidden group-hover/strip:block">
+          <div className="mx-3 mt-1 rounded-md border border-border-strong bg-popover text-foreground shadow-xl px-3 py-2 mono text-[11px] leading-relaxed whitespace-pre-wrap break-words max-h-48 overflow-auto">
+            {full}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

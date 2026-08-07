@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/wjsoj/cc-core/pricing"
 	"gopkg.in/yaml.v3"
@@ -182,6 +183,19 @@ type Config struct {
 	// Here as an escape hatch, not a tuning knob.
 	LogIndexDisabled bool `yaml:"log_index_disabled,omitempty"`
 
+	// Stop writing the daily-rotated requests-*.jsonl files and keep request
+	// history only in the index. Halves the disk the log costs and turns a
+	// token rename from a rewrite of every archived file into one UPDATE.
+	//
+	// The trade is real: while the archive exists the index can be deleted and
+	// rebuilt from it, and a failed insert is retried from the file on the next
+	// pass. With the archive off neither is true, and requests.db is not in the
+	// backup manifest — so an operator turning this on is choosing to hold
+	// request history in exactly one unbacked place. Off by default for that
+	// reason. Requires the index (mutually exclusive with log_index_disabled),
+	// and `cpa-claude export-requests` is the way back out to a .jsonl file.
+	LogJSONLDisabled bool `yaml:"log_jsonl_disabled,omitempty"`
+
 	// Pricing overrides (optional). Built-in defaults cover claude-haiku-4-5,
 	// claude-opus-4-6, claude-opus-4-7, claude-opus-4-8, and claude-sonnet-4-6.
 	Pricing pricing.Config `yaml:"pricing"`
@@ -330,6 +344,25 @@ type ExchangeConfig struct {
 	FallbackCNYPerUSD  float64 `yaml:"fallback_cny_per_usd,omitempty"`
 }
 
+// DisplayLocation resolves display_timezone to a *time.Location, defaulting to
+// Asia/Shanghai and returning nil when the zone can't be loaded (no tzdata),
+// which callers treat as "stay in UTC".
+//
+// Shared rather than inlined because the index materializes day labels in this
+// zone: a tool that resolves it differently from the server would read the
+// index as if every label were wrong and rebuild it.
+func (c *Config) DisplayLocation() *time.Location {
+	name := strings.TrimSpace(c.DisplayTimezone)
+	if name == "" {
+		name = "Asia/Shanghai"
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil
+	}
+	return loc
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -340,6 +373,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	applyDefaults(cfg, path)
+	// Turning off both the archive and the index would leave the request-log
+	// writer with nowhere to put a record. Refuse the combination rather than
+	// start up and silently discard request history.
+	if cfg.LogJSONLDisabled && cfg.LogIndexDisabled {
+		return nil, fmt.Errorf("config: log_jsonl_disabled requires the index; unset log_index_disabled")
+	}
 	return cfg, nil
 }
 
