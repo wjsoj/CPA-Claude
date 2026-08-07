@@ -1011,10 +1011,12 @@ recoveredFromSignature:
 			a.ID, resp.StatusCode, model, stream)
 	}
 
-	// Charge the client for the tokens they actually consumed.
+	// Charge the client for the tokens they actually consumed, priced on the
+	// model we actually bought upstream (see billingModelFor) rather than the
+	// name the client typed. Display stays on the client-facing name.
 	var costUSD float64
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
-		costUSD = s.pricing.Cost(auth.NormalizeProvider(a.Provider), model, counts)
+		costUSD = s.pricing.Cost(auth.NormalizeProvider(a.Provider), billingModelFor(a, model), counts)
 	}
 	// Advisor (server-side opus sub-call) is billed alongside the main
 	// request: same auth absorbs the load, same client is charged, but the
@@ -1063,6 +1065,36 @@ recoveredFromSignature:
 		Attempts:      attempts,
 	})
 	return false, true, nil
+}
+
+// billingModelFor returns the model name a request should be PRICED on, which
+// is not always the name the client asked for.
+//
+// On an Anthropic OAuth credential, cc-core's DefaultClaudeOAuthModelMap folds
+// retired generations onto the current model (claude-opus-4-7 → claude-opus-5,
+// claude-sonnet-4-6 → claude-sonnet-5). What we actually buy from Anthropic is
+// the resolved model, so that is what we cost. The client keeps seeing the name
+// it asked for everywhere else — the response model is rewritten back
+// (rewriteClientModel), the request log records the client-facing name, and the
+// wallet ledger note quotes it — so this changes the amount, never the label.
+// For Opus the two are identical anyway (same price card); for Sonnet the
+// resolved name is cheaper until the sonnet-5 introductory rate lapses on
+// 2026-08-31, and the customer gets that difference.
+//
+// API-key credentials are deliberately excluded. Their model_map is a relay
+// vendor's naming convention, not a model substitution: it rewrites to names
+// like "[0.1]a/claude-sonnet-4-6" that match no price card, so pricing them on
+// the upstream name would silently drop every such request onto the provider
+// default. Those credentials price on the client name and adjust with
+// apiKeyPriceOverride.
+func billingModelFor(a *auth.Auth, clientModel string) string {
+	if a == nil || a.Kind != auth.KindOAuth {
+		return clientModel
+	}
+	if upstream, ok := a.ResolveUpstreamModel(clientModel); ok && upstream != "" {
+		return upstream
+	}
+	return clientModel
 }
 
 // doForwardAnthropicAPIKey is the API-key passthrough for Anthropic-shaped
