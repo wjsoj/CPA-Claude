@@ -52,17 +52,15 @@ func runExportRequestsCmd(args []string) {
 		requestlog.SetBucketLocation(loc)
 	}
 
-	st, err := requestlog.OpenStore(cfg.LogDir)
+	// Read-only, and deliberately so: this normally runs on a box where the
+	// server has the same database open, and the read-write OpenStore would
+	// start a second ingest loop competing with it.
+	st, err := requestlog.OpenStoreForRead(cfg.LogDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "export-requests: open index: %v\n", err)
 		os.Exit(1)
 	}
 	defer st.Close()
-	// OpenStore returns before the first pass finishes; exporting early would
-	// silently emit a partial archive.
-	for !st.Ready() {
-		time.Sleep(100 * time.Millisecond)
-	}
 
 	w := os.Stdout
 	if *out != "-" {
@@ -75,7 +73,7 @@ func runExportRequestsCmd(args []string) {
 		w = f
 	}
 	bw := bufio.NewWriterSize(w, 256*1024)
-	n, err := requestlog.Export(cfg.LogDir, *from, *to, bw)
+	n, err := st.Export(*from, *to, bw)
 	if flushErr := bw.Flush(); err == nil {
 		err = flushErr
 	}
