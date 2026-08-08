@@ -13,31 +13,35 @@ import (
 // the message must survive so the user still sees why the turn failed.
 func TestCodexWSClientFrameDemotesCapacityCodes(t *testing.T) {
 	cases := []struct {
-		name     string
-		in       string
-		wantShed bool
-		wantCode string // "" means the frame must come back byte-identical
+		name         string
+		in           string
+		wantShed     bool
+		wantCapacity bool
+		wantCode     string // "" means the frame must come back byte-identical
 	}{
 		{
-			name:     "error event: overloaded is demoted",
-			in:       `{"type":"error","error":{"code":"server_is_overloaded","message":"The selected model is at capacity."}}`,
-			wantShed: true,
-			wantCode: "server_error",
+			name:         "error event: overloaded is demoted",
+			in:           `{"type":"error","error":{"code":"server_is_overloaded","message":"The selected model is at capacity."}}`,
+			wantShed:     true,
+			wantCapacity: true,
+			wantCode:     "server_error",
 		},
 		{
-			name:     "response.failed: slow_down is demoted",
-			in:       `{"type":"response.failed","response":{"error":{"code":"slow_down","message":"Slow down."}}}`,
-			wantShed: true,
-			wantCode: "server_error",
+			name:         "response.failed: slow_down is demoted",
+			in:           `{"type":"response.failed","response":{"error":{"code":"slow_down","message":"Slow down."}}}`,
+			wantShed:     true,
+			wantCapacity: true,
+			wantCode:     "server_error",
 		},
 		{
 			name: "quota is a shed signal but keeps its own code",
 			// The CLI has a non-terminal arm of its own for quota; demoting
 			// would only hide why the turn failed. It still counts as a shed so
-			// the session unsticks off this credential.
-			in:       `{"type":"error","error":{"code":"insufficient_quota","message":"Out of credits."}}`,
-			wantShed: true,
-			wantCode: "insufficient_quota",
+			// the session unsticks off this credential — that one IS account-scoped.
+			in:           `{"type":"error","error":{"code":"insufficient_quota","message":"Out of credits."}}`,
+			wantShed:     true,
+			wantCapacity: false,
+			wantCode:     "insufficient_quota",
 		},
 		{
 			name:     "fatal frame is forwarded verbatim",
@@ -58,9 +62,14 @@ func TestCodexWSClientFrameDemotesCapacityCodes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out, shed := codexWSClientFrame([]byte(tc.in))
+			out, shed, capacity := codexWSClientFrame([]byte(tc.in))
 			if shed != tc.wantShed {
 				t.Fatalf("shed = %t, want %t", shed, tc.wantShed)
+			}
+			// capacity is what decides whether the credential is blamed: a
+			// capacity shed must leave the session's assignment alone.
+			if capacity != tc.wantCapacity {
+				t.Fatalf("capacity = %t, want %t", capacity, tc.wantCapacity)
 			}
 			if tc.wantCode == "" {
 				if string(out) != tc.in {

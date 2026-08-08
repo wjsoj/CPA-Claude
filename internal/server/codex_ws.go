@@ -334,14 +334,13 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 			s.billCodexWSTurn(c, a, model, clientToken, clientName, tb.turn, tb.dur)
 		}
 	}
-	// A capacity/quota shed observed on this socket says the credential we are
-	// pinned to is a bad bet for the *next* dial too. The socket itself can't be
-	// re-homed mid-session (frames for this turn are already committed to the
-	// client), so the best available move is to break the sticky assignment:
-	// whatever the CLI retries onto lands on a different credential. Health is
-	// deliberately untouched — capacity belongs to the model and the moment, and
-	// cooling the account would take its other models offline too. Fires once
-	// per session; the pool's own scheduler decides the replacement.
+	// An account-scoped shed (quota / rate limit — NOT capacity, see
+	// codexWSClientFrame) says the credential we are pinned to is a bad bet for
+	// the next dial too. The socket can't be re-homed mid-session, so the move
+	// available is to break the sticky assignment: whatever the CLI retries onto
+	// lands elsewhere. Health is deliberately untouched — the pool's own quota
+	// bookkeeping already handles the credential; cooling it here would take its
+	// other models offline too. Fires once per session.
 	var unstuck sync.Once
 	onShed := func() {
 		unstuck.Do(func() { s.pool.Unstick(provider, clientToken, slotID) })
@@ -439,11 +438,11 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 				}
 				counts.Add(extractCodexBackendUsageFromJSON(data))
 
-				var shed bool
-				if out, shed = codexWSClientFrame(data); shed {
-					log.Warnf("codex ws: %s shed a turn for capacity/quota (midTurn=%t): %s",
-						a.ID, midTurn, truncate(data, 200))
-					if onShed != nil {
+				var shed, capacity bool
+				if out, shed, capacity = codexWSClientFrame(data); shed {
+					log.Warnf("codex ws: %s shed a turn (capacity=%t, midTurn=%t): %s",
+						a.ID, capacity, midTurn, truncate(data, 200))
+					if !capacity && onShed != nil {
 						onShed()
 					}
 				}
@@ -534,15 +533,19 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 // untouched, so the user still sees the real reason. Fatal frames (content
 // policy, invalid request, anything unrecognised) are forwarded verbatim.
 //
-// The returned shed flag covers quota codes too, which are NOT demoted (the CLI
-// has its own non-terminal handling for those) but are still a signal that this
-// credential is the wrong one to retry onto.
-func codexWSClientFrame(data []byte) (out []byte, shed bool) {
+// capacity separates the two halves of ClassRetryable, and the split decides
+// who is to blame. server_is_overloaded / slow_down are a property of the model
+// and the moment — the same request would shed on any account — so nothing about
+// the credential should change. Quota and rate codes ARE account-scoped, and are
+// the only ones worth moving the session off this credential for. (Quota codes
+// are never demoted: the CLI has its own non-terminal handling for them, and the
+// original code is what carries the retry delay.)
+func codexWSClientFrame(data []byte) (out []byte, shed, capacity bool) {
 	if codexerr.Classify(data) != codexerr.ClassRetryable {
-		return data, false
+		return data, false, false
 	}
-	demoted, _ := codexerr.DemoteCapacityCode(data)
-	return demoted, true
+	demoted, isCapacity := codexerr.DemoteCapacityCode(data)
+	return demoted, true, isCapacity
 }
 
 // codexTurnDelta returns the tokens consumed since the last settled turn —
