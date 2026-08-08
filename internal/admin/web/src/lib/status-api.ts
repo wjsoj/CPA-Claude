@@ -429,11 +429,91 @@ export function loadInvoiceTitles(token: string, q?: string): Promise<{ titles: 
   return authedJSON<{ titles: InvoiceTitle[] }>(path, token);
 }
 
-export function suggestInvoiceTitles(token: string, q: string): Promise<{ titles: InvoiceTitle[] }> {
-  return authedJSON<{ titles: InvoiceTitle[] }>(
-    `/api/wallet/invoice/title-suggest?q=${encodeURIComponent(q)}`,
-    token,
-  );
+// COMPANY_SUGGEST_URL is the public company-name suggest endpoint. The server
+// proxies it too (see internal/saas/billing/invoices.go), but that path is dead
+// in production: the provider blocks by geography and this service runs
+// offshore, answering every lookup with
+// {"errorCode":301000,"message":"bannedLocation"}. Our customers are mostly
+// mainland-based, so their browsers can reach what our backend cannot.
+//
+// Verified against the live endpoint from the production origin: it answers
+// preflight with `Access-Control-Allow-Origin: <request origin>` and
+// `Access-Control-Allow-Headers: content-type`, so this cross-origin POST is
+// allowed.
+const COMPANY_SUGGEST_URL = "https://capi.tianyancha.com/cloud-tempest/search/suggest/v3";
+const COMPANY_SUGGEST_TIMEOUT_MS = 4000;
+
+/** Matched substrings come back wrapped in <em>; strip it for display. */
+function stripSuggestHighlight(s: string): string {
+  return s.replace(/<\/?em>/g, "").trim();
+}
+
+/** Direct browser lookup. Returns null on any failure so the caller keeps
+ *  whatever the server gave it. */
+async function suggestDirect(q: string): Promise<InvoiceTitle[] | null> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), COMPANY_SUGGEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(COMPANY_SUGGEST_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keyword: q }),
+      signal: ctl.signal,
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as {
+      state?: string;
+      errorCode?: number;
+      data?: Array<{ comName?: string; name?: string; entName?: string; taxCode?: string; creditCode?: string }>;
+    };
+    // The geo-block and the rate-limit both arrive as HTTP 200 with an error
+    // code in the body, so the status line proves nothing on its own.
+    if (j.errorCode !== 0 || j.state !== "ok" || !Array.isArray(j.data)) return null;
+    return j.data
+      .map((r) => ({
+        name: stripSuggestHighlight(r.comName ?? r.name ?? r.entName ?? ""),
+        tax_no: r.taxCode ?? r.creditCode ?? "",
+        source: "remote" as const,
+      }))
+      .filter((t) => t.name !== "");
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Merges the operator's saved titles (server, authoritative — these carry
+ * address / bank details the remote lookup never returns) with live
+ * company-name matches from the browser.
+ *
+ * The server call is what must not be dropped: local history is the half that
+ * actually works offshore. The direct call only adds remote suggestions the
+ * backend can no longer fetch.
+ */
+export async function suggestInvoiceTitles(
+  token: string,
+  q: string,
+): Promise<{ titles: InvoiceTitle[] }> {
+  const [server, direct] = await Promise.all([
+    authedJSON<{ titles: InvoiceTitle[] }>(
+      `/api/wallet/invoice/title-suggest?q=${encodeURIComponent(q)}`,
+      token,
+    ).catch(() => ({ titles: [] as InvoiceTitle[] })),
+    suggestDirect(q),
+  ]);
+
+  const titles = [...(server.titles ?? [])];
+  const seen = new Set(titles.map((t) => t.name.toLowerCase()));
+  for (const t of direct ?? []) {
+    const key = t.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    titles.push(t);
+    if (titles.length >= 20) break;
+  }
+  return { titles };
 }
 
 export function saveInvoiceTitle(token: string, body: InvoiceTitle): Promise<{ status: string }> {

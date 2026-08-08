@@ -236,7 +236,12 @@ func (h *InvoiceHandler) titleSuggest(c *gin.Context) {
 				}
 			}
 		} else {
-			log.Debugf("invoice: title-suggest remote failed: %v", err)
+			// Warn, not Debug: this fails permanently in production (the
+			// provider geo-blocks our offshore IP with errorCode 301000), and at
+			// Debug the operator had no way to see why the picker went quiet.
+			// The browser-side lookup in status-api.ts is what actually answers
+			// now; this path still serves saved titles.
+			log.Warnf("invoice: title-suggest remote failed: %v", err)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"titles": out})
