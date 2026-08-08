@@ -129,3 +129,98 @@ func TestStreamSSECodexBackendCompleted(t *testing.T) {
 		t.Errorf("usage must be extracted from response.completed, got in=%d out=%d", counts.InputTokens, counts.OutputTokens)
 	}
 }
+
+// Capacity shed arrives as an in-band `error` frame followed by
+// `response.failed`, inside an otherwise-200 stream. If the error frame is
+// forwarded it (a) commits the response, foreclosing failover, and (b) reaches
+// the CLI as ApiError::ServerOverloaded, which is terminal for the session
+// ("Selected model is at capacity"). Withhold the whole stream instead.
+func TestStreamSSECodexBackendShedsCapacityBeforeOutput(t *testing.T) {
+	for _, code := range []string{"server_is_overloaded", "slow_down", "rate_limit_exceeded"} {
+		t.Run(code, func(t *testing.T) {
+			c, w := newCodexStreamCtx()
+			body := "event: error\n" +
+				`data: {"type":"error","error":{"code":"` + code + `","message":"nope"}}` + "\n\n" +
+				"event: response.failed\n" +
+				`data: {"type":"response.failed","response":{"error":{"code":"` + code + `"}}}` + "\n\n"
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+
+			committed := false
+			var counts usage.Counts
+			res := streamSSECodexBackend(c, resp, &counts, func() { committed = true })
+
+			if committed {
+				t.Error("commit() must not run — the response must stay uncommitted so failover works")
+			}
+			if res.wroteAny {
+				t.Error("wroteAny must be false so the caller's pre-output failover fires")
+			}
+			if res.sawTerminal {
+				t.Error("sawTerminal must be false — the withheld response.failed must not look like a clean end")
+			}
+			if res.shed == "" {
+				t.Error("shed must carry the withheld frame for diagnostics")
+			}
+			if got := w.Body.String(); got != "" {
+				t.Errorf("nothing may reach the client, got %q", got)
+			}
+		})
+	}
+}
+
+// Once output has started there is no failover left, so the frame must be
+// forwarded — but demoted out of the CLI's session-ending code set so it
+// retries instead of giving up. The human-readable message must survive.
+func TestStreamSSECodexBackendDemotesCapacityAfterOutput(t *testing.T) {
+	c, w := newCodexStreamCtx()
+	body := "event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":"partial"}` + "\n\n" +
+		"event: error\n" +
+		`data: {"type":"error","error":{"code":"server_is_overloaded","message":"we are full"}}` + "\n\n"
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+
+	var counts usage.Counts
+	res := streamSSECodexBackend(c, resp, &counts, func() {})
+
+	if !res.wroteAny {
+		t.Fatal("wroteAny must be true — output already started")
+	}
+	if res.shed != "" {
+		t.Error("must not report a shed once output has started")
+	}
+	out := w.Body.String()
+	if strings.Contains(out, "server_is_overloaded") {
+		t.Errorf("the session-ending code must be demoted, got %q", out)
+	}
+	if !strings.Contains(out, "server_error") {
+		t.Errorf("expected the demoted code in the output, got %q", out)
+	}
+	if !strings.Contains(out, "we are full") {
+		t.Errorf("the upstream message must survive verbatim, got %q", out)
+	}
+	if !strings.Contains(out, "partial") {
+		t.Errorf("earlier output must still be present, got %q", out)
+	}
+}
+
+// A fatal error (the request's own fault) must reach the client untouched —
+// retrying it on another credential would fail identically.
+func TestStreamSSECodexBackendForwardsFatalErrorVerbatim(t *testing.T) {
+	c, w := newCodexStreamCtx()
+	frame := `{"type":"error","error":{"type":"invalid_request_error","code":"content_policy_violation","message":"blocked"}}`
+	body := "event: error\ndata: " + frame + "\n\n"
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+
+	var counts usage.Counts
+	res := streamSSECodexBackend(c, resp, &counts, func() {})
+
+	if res.shed != "" {
+		t.Error("a fatal error must not be shed")
+	}
+	if !res.wroteAny {
+		t.Error("a fatal error must reach the client")
+	}
+	if out := w.Body.String(); !strings.Contains(out, frame) {
+		t.Errorf("fatal frame must be forwarded verbatim, got %q", out)
+	}
+}

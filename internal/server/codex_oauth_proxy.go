@@ -16,6 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/codexerr"
 	"github.com/wjsoj/cc-core/mimicry"
 	"github.com/wjsoj/cc-core/requestlog"
 	ccstream "github.com/wjsoj/cc-core/stream"
@@ -24,9 +25,10 @@ import (
 
 // The ChatGPT Codex backend expects the OpenAI /v1/responses schema with a
 // handful of upstream-private fields stripped. The upstream request headers
-// (Originator / User-Agent / Version / OpenAI-Beta / Chatgpt-Account-Id) are
-// applied by mimicry.ApplyCodexCLIHeaders, pinned to codex-tui/0.135.0 — see
-// cc-core/crack/codex/SPEC.md and cc-core/mimicry/codex.go.
+// (Originator / User-Agent / Version / Chatgpt-Account-Id / x-codex-routing-hint)
+// are applied by mimicry.ApplyCodexCLIHeaders — see cc-core/crack/codex/SPEC.md
+// and cc-core/mimicry/codex.go. Note there is deliberately no OpenAI-Beta on
+// this path: real Codex sets it only on the WS handshake.
 
 // doForwardCodexOAuth forwards the client's /v1/responses request to the
 // ChatGPT backend. Behavior matches the vendor Codex CLI: Bearer auth from
@@ -71,11 +73,16 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	accessToken, _ := a.Credentials()
 	accountID, _ := a.CodexIdentity()
 	isCompactPath := path == "/v1/responses/compact"
-	// Apply the Codex CLI fingerprint — codex-tui/0.135.0 identity (Originator /
-	// User-Agent / Version) over the legacy HTTP POST /codex/responses{,/compact}
+	// Apply the Codex CLI fingerprint — codex-tui identity (Originator /
+	// User-Agent / Version) over the HTTP POST /codex/responses{,/compact}
 	// path. Centralized in cc-core (mimicry.ApplyCodexCLIHeaders) so every relay
 	// stays in lockstep when the version target is bumped. See cc-core/crack/codex/SPEC.md.
-	mimicry.ApplyCodexCLIHeaders(upReq, accessToken, accountID, isCompactPath)
+	//
+	// The routing hint is derived from upstreamBody — the bytes actually going
+	// out, after sanitization — so the header can never name a different model
+	// than the body does.
+	routingModel, routingTier := mimicry.CodexModelAndTier(upstreamBody)
+	mimicry.ApplyCodexCLIHeaders(upReq, accessToken, accountID, isCompactPath, routingModel, routingTier)
 
 	// Shared pooled transport (per proxyURL). Reusing HTTP/2 connections is
 	// critical here: chatgpt.com's CF edge rate-limits new TCP/TLS connections
@@ -221,6 +228,18 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 			// there's nobody to retry for; otherwise transparently fail over to
 			// another credential (same contract as the pre-response path above).
 			_ = resp.Body.Close()
+			if res.shed != "" {
+				// Upstream shed this request for capacity/quota inside an
+				// otherwise-200 stream. Nothing was forwarded, so failover is
+				// clean. Credential health is deliberately NOT touched — this
+				// is the same signal as the 429 capacity branch above, which
+				// also rotates without cooling: capacity is a property of the
+				// model and the moment, and cooling the account would take all
+				// of its other models offline too.
+				log.Warnf("codex oauth: %s shed the request mid-stream (attempt %d, %s): %s — retrying on another credential",
+					a.ID, attempts, time.Since(start).Round(time.Millisecond), res.shed)
+				return true, false
+			}
 			if isClientDisconnect(ctx, res.err) {
 				a.MarkClientCancel(errString(res.err))
 				s.emitLog(requestlog.Record{
@@ -485,25 +504,102 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 	flusher, _ := c.Writer.(http.Flusher)
 	reader := newLineReader(resp.Body)
 	events := 0
+	shed := ""
 
 	// next supplies framing (raw lines) + usage + terminal detection to the
 	// shared relay; cc-core/stream.Relay owns keepalive + lazy commit + locking.
+	// shedding latches once a capacity/quota error frame is seen before any
+	// output has reached the client. From that point the rest of the stream is
+	// withheld — including the response.failed that follows — so Relay ends with
+	// SawTerminal=false and WroteAny=false and the caller's pre-output failover
+	// fires. Without this the error frame itself counts as the first output and
+	// permanently forecloses failover; see cc-core/codexerr.
+	shedding := false
+	sentAny := false // whether we've handed Relay any bytes yet
+	// An SSE event is "event: X\ndata: {…}\n\n", and the verdict lives in the
+	// data line — but the event line arrives first. Releasing it immediately
+	// would commit the response before we know whether the frame is one we mean
+	// to withhold, so an event line is held until its data line is classified
+	// and then emitted together with it.
+	var held []byte
 	next := func() (out []byte, terminal bool, err error) {
-		line, rerr := reader.readLine()
-		if len(line) > 0 {
-			trim := bytes.TrimRight(line, "\r\n")
-			if bytes.HasPrefix(trim, []byte("data:")) {
-				payload := bytes.TrimSpace(trim[5:])
-				if len(payload) > 0 && payload[0] == '{' {
-					events++
-					counts.Add(extractCodexBackendUsageFromJSON(payload))
-					if codexTerminalEvent(payload) {
-						terminal = true
+		for {
+			line, rerr := reader.readLine()
+			if len(line) > 0 {
+				trim := bytes.TrimRight(line, "\r\n")
+				switch {
+				case bytes.HasPrefix(trim, []byte("event:")):
+					if !shedding {
+						held = append(held[:0], line...)
+					}
+					line = nil
+
+				case bytes.HasPrefix(trim, []byte("data:")):
+					payload := bytes.TrimSpace(trim[5:])
+					if len(payload) > 0 && payload[0] == '{' {
+						events++
+						counts.Add(extractCodexBackendUsageFromJSON(payload))
+
+						if codexerr.Classify(payload) == codexerr.ClassRetryable {
+							if !sentAny {
+								// Failover is still possible — withhold this
+								// frame and everything after it, including the
+								// held event line and the response.failed that
+								// follows, so nothing commits the response.
+								shedding = true
+								shed = truncate(payload, 200)
+								held = nil
+								line = nil
+							} else if demoted, ok := codexerr.DemoteCapacityCode(payload); ok {
+								// Output already started, so the client must be
+								// told something. Demote the two session-ending
+								// capacity codes to one the CLI retries; the
+								// message is left untouched.
+								tail := line[len(trim):]
+								rebuilt := make([]byte, 0, len("data: ")+len(demoted)+len(tail))
+								rebuilt = append(rebuilt, []byte("data: ")...)
+								rebuilt = append(rebuilt, demoted...)
+								rebuilt = append(rebuilt, tail...)
+								line = rebuilt
+							}
+						}
+						// ClassFatal frames are forwarded verbatim: retrying
+						// them elsewhere would fail identically, and the client
+						// needs the real reason.
+
+						if codexTerminalEvent(payload) && !shedding {
+							terminal = true
+						}
 					}
 				}
 			}
+
+			if shedding {
+				line = nil
+				held = nil
+				terminal = false
+			}
+
+			// Emit the held event line together with the line that resolved it.
+			if len(line) > 0 && len(held) > 0 {
+				out = append(append(make([]byte, 0, len(held)+len(line)), held...), line...)
+				held = nil
+			} else if len(line) > 0 {
+				out = line
+			} else if rerr != nil && len(held) > 0 && !shedding {
+				// Stream ended with an unresolved event line — release it so
+				// nothing is silently dropped.
+				out, held = held, nil
+			}
+
+			if len(out) > 0 {
+				sentAny = true
+			}
+			if len(out) > 0 || rerr != nil {
+				return out, terminal, rerr
+			}
+			// Nothing to emit yet (a held event line) — keep reading.
 		}
-		return line, terminal, rerr
 	}
 
 	// Keepalive: an SSE comment line (":\n\n", ignored by SSE clients) keeps the
@@ -518,18 +614,19 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 		KeepalivePayload: []byte(":\n\n"),
 		Next:             next,
 	})
-	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err}
+	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed}
 }
 
 // codexStreamResult reports the outcome of a Codex backend SSE relay so the
 // caller can choose between a transparent retry (nothing reached the client yet)
 // and a logged give-up (bytes already committed downstream — uninterruptible).
 type codexStreamResult struct {
-	sawTerminal bool  // a response.{completed,failed,...} event was relayed
-	wroteAny    bool  // at least one byte was committed to the client
-	events      int   // data: events relayed (diagnostics)
-	bytes       int64 // bytes written downstream (diagnostics)
-	err         error // underlying read error when the stream broke early
+	sawTerminal bool   // a response.{completed,failed,...} event was relayed
+	wroteAny    bool   // at least one byte was committed to the client
+	events      int    // data: events relayed (diagnostics)
+	bytes       int64  // bytes written downstream (diagnostics)
+	err         error  // underlying read error when the stream broke early
+	shed        string // non-empty when a pre-output capacity/quota frame was withheld
 }
 
 // errString renders an error for a log/record field, tolerating nil.
