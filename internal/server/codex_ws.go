@@ -15,6 +15,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/codexerr"
 	"github.com/wjsoj/cc-core/codexws"
 	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/cc-core/usage"
@@ -333,7 +334,19 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 			s.billCodexWSTurn(c, a, model, clientToken, clientName, tb.turn, tb.dur)
 		}
 	}
-	s.pumpCodexWS(c.Request.Context(), clientConn, up, a, clientGroup, &counts, billTurn)
+	// A capacity/quota shed observed on this socket says the credential we are
+	// pinned to is a bad bet for the *next* dial too. The socket itself can't be
+	// re-homed mid-session (frames for this turn are already committed to the
+	// client), so the best available move is to break the sticky assignment:
+	// whatever the CLI retries onto lands on a different credential. Health is
+	// deliberately untouched — capacity belongs to the model and the moment, and
+	// cooling the account would take its other models offline too. Fires once
+	// per session; the pool's own scheduler decides the replacement.
+	var unstuck sync.Once
+	onShed := func() {
+		unstuck.Do(func() { s.pool.Unstick(provider, clientToken, slotID) })
+	}
+	s.pumpCodexWS(c.Request.Context(), clientConn, up, a, clientGroup, &counts, billTurn, onShed)
 	close(billCh)
 	billWG.Wait() // drain every queued turn before the request returns
 
@@ -360,7 +373,9 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 // that turn's usage, so cost/client-billing/request-log settle in real time
 // instead of being deferred to the end of a session that may last an hour or
 // die mid-flight — see the caller.
-func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up codexws.Conn, a *auth.Auth, group string, counts *usage.Counts, onTurn func(turn usage.Counts, dur time.Duration)) {
+// onShed is invoked when upstream sheds a turn for capacity/quota inside the
+// otherwise-healthy socket (see the capacity handling in the relay below).
+func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up codexws.Conn, a *auth.Auth, group string, counts *usage.Counts, onTurn func(turn usage.Counts, dur time.Duration), onShed func()) {
 	done := make(chan struct{})
 	var once sync.Once
 	// stop tears the session down. closeCode/closeReason describe why, so the
@@ -414,11 +429,25 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 				stop(gorillaws.CloseTryAgainLater, "upstream connection lost")
 				return
 			}
+			// out is what the client sees; data stays the upstream original so
+			// classification, usage extraction and terminal detection all read
+			// what upstream actually said.
+			out := data
 			if mt == codexws.TextMessage && len(data) > 0 {
 				if rid := codexResponseID(data); rid != "" {
 					s.codexRespAccount.Bind(group, rid, a.ID)
 				}
 				counts.Add(extractCodexBackendUsageFromJSON(data))
+
+				var shed bool
+				if out, shed = codexWSClientFrame(data); shed {
+					log.Warnf("codex ws: %s shed a turn for capacity/quota (midTurn=%t): %s",
+						a.ID, midTurn, truncate(data, 200))
+					if onShed != nil {
+						onShed()
+					}
+				}
+
 				if codexTerminalEvent(data) {
 					counts.Requests++
 					midTurn = false
@@ -433,7 +462,7 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 				}
 			}
 			_ = client.SetWriteDeadline(time.Now().Add(codexWSWriteDeadline))
-			if err := client.WriteMessage(gorillaws.TextMessage, data); err != nil {
+			if err := client.WriteMessage(gorillaws.TextMessage, out); err != nil {
 				// The client is gone; there is nobody left to send a frame to.
 				log.Infof("codex ws: client write via %s failed (midTurn=%t): %v", a.ID, midTurn, err)
 				stop(gorillaws.CloseNormalClosure, "")
@@ -488,6 +517,32 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 	}()
 
 	wg.Wait()
+}
+
+// codexWSClientFrame decides what one upstream frame should look like by the
+// time it reaches the client, and reports whether upstream shed the turn for
+// capacity/quota.
+//
+// Unlike the HTTP path there is no failover left to withhold a shed frame for —
+// the socket is already established and this turn's earlier frames are
+// committed — so the frame is forwarded with only the two session-ending
+// capacity codes demoted. Left verbatim, codex-rs maps server_is_overloaded /
+// slow_down to ApiError::ServerOverloaded, which is terminal for the session:
+// the CLI stops with "Selected model is at capacity. Please try a different
+// model." Demoted, the identical failure lands in its Retryable arm and it backs
+// off and retries — what an unproxied client gets. The human-readable message is
+// untouched, so the user still sees the real reason. Fatal frames (content
+// policy, invalid request, anything unrecognised) are forwarded verbatim.
+//
+// The returned shed flag covers quota codes too, which are NOT demoted (the CLI
+// has its own non-terminal handling for those) but are still a signal that this
+// credential is the wrong one to retry onto.
+func codexWSClientFrame(data []byte) (out []byte, shed bool) {
+	if codexerr.Classify(data) != codexerr.ClassRetryable {
+		return data, false
+	}
+	demoted, _ := codexerr.DemoteCapacityCode(data)
+	return demoted, true
 }
 
 // codexTurnDelta returns the tokens consumed since the last settled turn —
