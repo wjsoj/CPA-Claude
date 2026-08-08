@@ -335,7 +335,7 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 		}
 	}
 	// An account-scoped shed (quota / rate limit — NOT capacity, see
-	// codexWSClientFrame) says the credential we are pinned to is a bad bet for
+	// codexerr.ClientFrame) says the credential we are pinned to is a bad bet for
 	// the next dial too. The socket can't be re-homed mid-session, so the move
 	// available is to break the sticky assignment: whatever the CLI retries onto
 	// lands elsewhere. Health is deliberately untouched — the pool's own quota
@@ -439,7 +439,7 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 				counts.Add(extractCodexBackendUsageFromJSON(data))
 
 				var shed, capacity bool
-				if out, shed, capacity = codexWSClientFrame(data); shed {
+				if out, shed, capacity = codexerr.ClientFrame(data); shed {
 					log.Warnf("codex ws: %s shed a turn (capacity=%t, midTurn=%t): %s",
 						a.ID, capacity, midTurn, truncate(data, 200))
 					if !capacity && onShed != nil {
@@ -516,36 +516,6 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 	}()
 
 	wg.Wait()
-}
-
-// codexWSClientFrame decides what one upstream frame should look like by the
-// time it reaches the client, and reports whether upstream shed the turn for
-// capacity/quota.
-//
-// Unlike the HTTP path there is no failover left to withhold a shed frame for —
-// the socket is already established and this turn's earlier frames are
-// committed — so the frame is forwarded with only the two session-ending
-// capacity codes demoted. Left verbatim, codex-rs maps server_is_overloaded /
-// slow_down to ApiError::ServerOverloaded, which is terminal for the session:
-// the CLI stops with "Selected model is at capacity. Please try a different
-// model." Demoted, the identical failure lands in its Retryable arm and it backs
-// off and retries — what an unproxied client gets. The human-readable message is
-// untouched, so the user still sees the real reason. Fatal frames (content
-// policy, invalid request, anything unrecognised) are forwarded verbatim.
-//
-// capacity separates the two halves of ClassRetryable, and the split decides
-// who is to blame. server_is_overloaded / slow_down are a property of the model
-// and the moment — the same request would shed on any account — so nothing about
-// the credential should change. Quota and rate codes ARE account-scoped, and are
-// the only ones worth moving the session off this credential for. (Quota codes
-// are never demoted: the CLI has its own non-terminal handling for them, and the
-// original code is what carries the retry delay.)
-func codexWSClientFrame(data []byte) (out []byte, shed, capacity bool) {
-	if codexerr.Classify(data) != codexerr.ClassRetryable {
-		return data, false, false
-	}
-	demoted, isCapacity := codexerr.DemoteCapacityCode(data)
-	return demoted, true, isCapacity
 }
 
 // codexTurnDelta returns the tokens consumed since the last settled turn —
