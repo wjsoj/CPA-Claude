@@ -11,6 +11,7 @@ import {
   AlertTriangle,
   Ban,
   CheckCircle2,
+  ChevronRight,
   CreditCard,
   Pencil,
   Power,
@@ -56,6 +57,13 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
       ? Math.min(100, Math.round((a.active_clients / a.max_concurrent) * 100))
       : 0;
   const status = statusMeta(a);
+  // The model map can hold dozens of entries; fully expanded it dwarfs the rest
+  // of the card, so it stays folded until asked for.
+  const [mapOpen, setMapOpen] = React.useState(false);
+  const mapKeys = React.useMemo(
+    () => (a.model_map ? Object.keys(a.model_map).sort() : []),
+    [a.model_map],
+  );
   const u = a.usage;
   const kindLabel = a.kind === "apikey" ? "API key" : "OAuth";
   const recentCancel =
@@ -237,13 +245,27 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
             </dd>
           </div>
         )}
-        {a.model_map && Object.keys(a.model_map).length > 0 && (
+        {mapKeys.length > 0 && (
           <div className="col-span-2">
-            <dt className="eyebrow mb-1.5">Model map ({Object.keys(a.model_map).length})</dt>
-            <dd className="mt-1 space-y-0.5">
-              {Object.keys(a.model_map)
-                .sort()
-                .map((k) => (
+            <dt>
+              <button
+                type="button"
+                onClick={() => setMapOpen((v) => !v)}
+                aria-expanded={mapOpen}
+                className="eyebrow flex w-full items-center gap-1 hover:text-foreground transition-colors"
+              >
+                <ChevronRight
+                  className={cn(
+                    "h-3 w-3 shrink-0 transition-transform",
+                    mapOpen && "rotate-90",
+                  )}
+                />
+                <span>Model map ({mapKeys.length})</span>
+              </button>
+            </dt>
+            {mapOpen && (
+              <dd className="mt-1.5 space-y-0.5 pl-4">
+                {mapKeys.map((k) => (
                   <div key={k} className="mono text-[11px] break-all leading-relaxed">
                     <span>{k}</span>
                     {a.model_map![k] ? (
@@ -256,7 +278,8 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
                     )}
                   </div>
                 ))}
-            </dd>
+              </dd>
+            )}
           </div>
         )}
       </dl>
