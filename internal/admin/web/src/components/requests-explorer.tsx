@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
-import type { Pricing, RequestEntry, RequestsResp } from "@/lib/types";
+import type { Pricing, RequestAgg, RequestEntry, RequestsResp } from "@/lib/types";
 import { lookupPrice as lookupPriceShared } from "@/lib/pricing";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,80 @@ const localDate = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
 const cost = (v: number | undefined | null) => "$" + (v || 0).toFixed(4);
+
+// TopTable renders a cost-ranked breakdown truncated to its top `limit` rows.
+//
+// The remainder is not simply hidden: a collapsed table still shows what the
+// hidden rows add up to, so the visible costs always reconcile with the
+// "Total $" tile above. A breakdown that quietly omits spend is worse than
+// no breakdown, because it reads as complete.
+function TopTable({
+  title,
+  rows,
+  limit,
+  expanded,
+  onToggle,
+  renderKey,
+  keyClassName,
+}: {
+  title: string;
+  rows: [string, RequestAgg][];
+  limit: number;
+  expanded: boolean;
+  onToggle: () => void;
+  renderKey: (k: string) => React.ReactNode;
+  keyClassName?: string;
+}) {
+  const shown = expanded ? rows : rows.slice(0, limit);
+  const hidden = rows.slice(shown.length);
+  const hiddenCost = hidden.reduce((s, [, a]) => s + a.cost_usd, 0);
+  const hiddenCount = hidden.reduce((s, [, a]) => s + a.count, 0);
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <div className="text-base font-medium">{title}</div>
+        {rows.length > limit && (
+          <button
+            type="button"
+            onClick={onToggle}
+            className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+          >
+            {expanded ? `Top ${limit}` : `All ${fmtInt(rows.length)}`}
+          </button>
+        )}
+      </div>
+      {rows.length === 0 ? (
+        <div className="text-sm text-muted-foreground">—</div>
+      ) : (
+        <table className="w-full text-sm">
+          <tbody>
+            {shown.map(([k, a]) => (
+              <tr key={k} className="border-b">
+                <td className={cn("py-1.5 pr-3", keyClassName)}>{renderKey(k)}</td>
+                <td className="py-1.5 mono text-right">{cost(a.cost_usd)}</td>
+                <td className="py-1.5 mono text-right text-muted-foreground w-20">
+                  {fmtInt(a.count)} req
+                </td>
+              </tr>
+            ))}
+            {hidden.length > 0 && (
+              <tr className="border-b text-muted-foreground">
+                <td className="py-1.5 pr-3">
+                  <button type="button" onClick={onToggle} className="hover:text-foreground">
+                    + {fmtInt(hidden.length)} more
+                  </button>
+                </td>
+                <td className="py-1.5 mono text-right">{cost(hiddenCost)}</td>
+                <td className="py-1.5 mono text-right w-20">{fmtInt(hiddenCount)} req</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
 
 export function RequestsExplorer({ refreshTick, pricing }: Props) {
   const costBreakdown = (r: RequestEntry) => {
@@ -110,6 +184,15 @@ export function RequestsExplorer({ refreshTick, pricing }: Props) {
   const sortedByDay = data ? Object.entries(data.by_day).sort(([a], [b]) => a.localeCompare(b)) : [];
 
   const modelsList = data ? Object.keys(data.by_model).sort() : [];
+
+  // A wide window can hold hundreds of clients and dozens of models, and the
+  // full list pushes the entry table — the thing this page is for — off the
+  // screen. Ten is enough to see who the spend belongs to; the rest is behind
+  // a toggle rather than dropped, since "who else is on here" is occasionally
+  // the actual question.
+  const TOP_N = 10;
+  const [showAllClients, setShowAllClients] = useState(false);
+  const [showAllModels, setShowAllModels] = useState(false);
   const maxDayCost = Math.max(1e-9, ...sortedByDay.map(([, a]) => a.cost_usd));
 
   return (
@@ -227,48 +310,24 @@ export function RequestsExplorer({ refreshTick, pricing }: Props) {
 
         {data && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 border-b">
-            <div>
-              <div className="text-base font-medium mb-2">By client</div>
-              {sortedByClient.length === 0 ? (
-                <div className="text-sm text-muted-foreground">—</div>
-              ) : (
-                <table className="w-full text-sm">
-                  <tbody>
-                    {sortedByClient.map(([k, a]) => (
-                      <tr key={k} className="border-b">
-                        <td className="py-1.5 pr-3 font-medium">
-                          {k || <span className="text-muted-foreground">(unnamed)</span>}
-                        </td>
-                        <td className="py-1.5 mono text-right">{cost(a.cost_usd)}</td>
-                        <td className="py-1.5 mono text-right text-muted-foreground w-20">
-                          {fmtInt(a.count)} req
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-            <div>
-              <div className="text-base font-medium mb-2">By model</div>
-              {sortedByModel.length === 0 ? (
-                <div className="text-sm text-muted-foreground">—</div>
-              ) : (
-                <table className="w-full text-sm">
-                  <tbody>
-                    {sortedByModel.map(([k, a]) => (
-                      <tr key={k} className="border-b">
-                        <td className="py-1.5 pr-3 mono">{k}</td>
-                        <td className="py-1.5 mono text-right">{cost(a.cost_usd)}</td>
-                        <td className="py-1.5 mono text-right text-muted-foreground w-20">
-                          {fmtInt(a.count)} req
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
+            <TopTable
+              title="By client"
+              rows={sortedByClient}
+              limit={TOP_N}
+              expanded={showAllClients}
+              onToggle={() => setShowAllClients((v) => !v)}
+              renderKey={(k) => k || <span className="text-muted-foreground">(unnamed)</span>}
+              keyClassName="font-medium"
+            />
+            <TopTable
+              title="By model"
+              rows={sortedByModel}
+              limit={TOP_N}
+              expanded={showAllModels}
+              onToggle={() => setShowAllModels((v) => !v)}
+              renderKey={(k) => k}
+              keyClassName="mono"
+            />
           </div>
         )}
 

@@ -723,16 +723,7 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 	}
 
 	f := requestlog.Filter{Dir: h.cfg.LogDir, Limit: 100000}
-	if body.From != "" {
-		if t, err := parseDateBound(body.From, false); err == nil {
-			f.From = t
-		}
-	}
-	if body.To != "" {
-		if t, err := parseDateBound(body.To, true); err == nil {
-			f.To = t
-		}
-	}
+	applyDateBounds(&f, body.From, body.To)
 	// Shared read-only cache: the lookup pager re-issues the same filter
 	// for every page flip; without caching each flip re-scans the archive.
 	// User-supplied bounds are day-granular (parseDateBound), so keys stay
