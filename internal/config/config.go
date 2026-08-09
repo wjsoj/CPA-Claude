@@ -189,11 +189,13 @@ type Config struct {
 	//
 	// The trade is real: while the archive exists the index can be deleted and
 	// rebuilt from it, and a failed insert is retried from the file on the next
-	// pass. With the archive off neither is true, and requests.db is not in the
-	// backup manifest — so an operator turning this on is choosing to hold
-	// request history in exactly one unbacked place. Off by default for that
-	// reason. Requires the index (mutually exclusive with log_index_disabled),
-	// and `cpa-claude export-requests` is the way back out to a .jsonl file.
+	// pass. With the archive off neither is true — a failed insert is a lost
+	// record, and requests.db is the only copy on the box. The daily off-host
+	// backup does carry it (buildManifest snapshots it, and refuses to ship an
+	// archive without it while this is on), so the exposure is bounded by the
+	// backup interval rather than open-ended. Requires the index (mutually
+	// exclusive with log_index_disabled), and `cpa-claude export-requests` is
+	// the way back out to a .jsonl file.
 	LogJSONLDisabled bool `yaml:"log_jsonl_disabled,omitempty"`
 
 	// Pricing overrides (optional). Built-in defaults cover claude-haiku-4-5,

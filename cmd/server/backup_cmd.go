@@ -13,6 +13,7 @@ import (
 
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/cc-core/backup"
+	"github.com/wjsoj/cc-core/requestlog"
 )
 
 // defaultBackupPrefix namespaces this app's objects inside the shared bucket.
@@ -212,6 +213,20 @@ func buildManifest(ctx context.Context, cfg *config.Config, configPath, tmpDir s
 		add("saas.db.jwt_secret", cfg.SaaS.DBPath+".jwt_secret", 0o600)
 	}
 
+	// Request history. With log_jsonl_disabled this database is the ONLY copy:
+	// there is no requests-*.jsonl left to rebuild it from, so a disk loss
+	// would take the whole retention window of billing and audit history with
+	// it. It goes in either way — while the archive exists the .jsonl files
+	// are not backed up either, so the index is the only form of that history
+	// this archive can carry.
+	//
+	// Snapshotted, not copied: the server holds it open in WAL mode, and a raw
+	// copy without the -wal sibling is a torn read. VACUUM INTO also compacts,
+	// so the snapshot tracks live rows rather than the file's high-water mark.
+	if err := addRequestLogDB(ctx, cfg, tmpDir, &entries); err != nil {
+		return nil, err
+	}
+
 	// Identity + config (the critical assets for CPA-Claude).
 	tokensPath := filepath.Join(filepath.Dir(cfg.StateFile), "tokens.json")
 	if fileExists(tokensPath) {
@@ -242,6 +257,29 @@ func buildManifest(ctx context.Context, cfg *config.Config, configPath, tmpDir s
 	return entries, nil
 }
 
+// addRequestLogDB appends a snapshot of the request-log index, if there is one.
+//
+// A missing file is not an error: log_dir may be unset, or the index may be
+// disabled, or the server may simply not have created it yet. What IS an error
+// is failing to snapshot a database that exists — see assertManifestComplete
+// for the case where its absence is fatal.
+func addRequestLogDB(ctx context.Context, cfg *config.Config, tmpDir string, entries *[]backup.FileEntry) error {
+	dir := strings.TrimSpace(cfg.LogDir)
+	if dir == "" {
+		return nil
+	}
+	src := filepath.Join(dir, requestlog.IndexFileName)
+	if !fileExists(src) {
+		return nil
+	}
+	snap := filepath.Join(tmpDir, requestlog.IndexFileName)
+	if err := backup.SnapshotSQLite(ctx, src, snap); err != nil {
+		return fmt.Errorf("snapshot %s: %w", requestlog.IndexFileName, err)
+	}
+	*entries = append(*entries, backup.FileEntry{Name: requestlog.IndexFileName, SourcePath: snap, Mode: 0o600})
+	return nil
+}
+
 // assertManifestComplete fails the run when something the config says should
 // exist did not make it into the archive.
 //
@@ -264,6 +302,14 @@ func assertManifestComplete(cfg *config.Config, entries []backup.FileEntry) erro
 	var missing []string
 	if cfg.SaaS.Enabled && !have["saas.db"] {
 		missing = append(missing, "saas.db (saas.enabled is true)")
+	}
+	// With the JSONL archive off the index is request history's only copy, so
+	// shipping without it is exactly the silent-empty-archive failure this
+	// function exists to prevent. While the archive is on its absence is
+	// tolerable: the .jsonl files on disk can still rebuild it.
+	if cfg.LogDir != "" && cfg.LogJSONLDisabled && !have[requestlog.IndexFileName] {
+		missing = append(missing, fmt.Sprintf("%s (log_jsonl_disabled is true, so it is the only copy of request history)",
+			requestlog.IndexFileName))
 	}
 	// Credentials are the only unrecoverable content in the archive.
 	if strings.TrimSpace(cfg.AuthDir) != "" && auths == 0 {
