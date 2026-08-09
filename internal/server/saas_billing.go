@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -12,6 +13,7 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/CPA-Claude/internal/saas/resend"
+	"github.com/wjsoj/cc-core/auth"
 )
 
 // buildPaymentGateway picks a Z-Pay or MockGateway based on whether the
@@ -118,8 +120,8 @@ func (s *Server) mountBillingRoutes(engine *gin.Engine) {
 				"id":                gg.ID,
 				"name":              gg.Name,
 				"description":       gg.Description,
-				"codex_multiplier":  gg.CodexMultiplier,
-				"claude_multiplier": gg.ClaudeMultiplier,
+				"codex_multiplier":  s.displayMultiplier(auth.ProviderOpenAI, gg.CodexMultiplier),
+				"claude_multiplier": s.displayMultiplier(auth.ProviderAnthropic, gg.ClaudeMultiplier),
 				"is_default":        gg.IsDefault,
 			})
 		}
@@ -185,6 +187,30 @@ func (s *Server) makeBearerAuth() billing.TokenAuthFunc {
 // operator has SaaS disabled in config.yaml.
 type saasBilling struct {
 	db *saasdb.DB
+	// promos are the time-boxed price cuts from config. Held here rather than
+	// read off the Server so the billing path has one source of truth for what
+	// a request costs, and so it is testable without a whole Server.
+	promos []config.PricingPromotion
+}
+
+// effectiveMultiplier resolves what a request is actually billed at, and says
+// why, so the reason can be written into the ledger note.
+//
+// Precedence is promotion > per-key override > pricing group. The promotion
+// outranking the per-key override is the expensive part and it is deliberate:
+// during a promotion, traffic served by a marked-up upstream key is sold below
+// what it cost us. The alternative is worse for the user, who cannot see which
+// credential served them and would otherwise find one model billed at two very
+// different rates inside a single session.
+func (b *saasBilling) effectiveMultiplier(g *saasdb.PricingGroup, provider, model string, overrideMult float64) (float64, string) {
+	if mult, ok := promoFor(b.promos, provider, time.Now()); ok {
+		return mult, fmt.Sprintf("%s/%s × %.4f (promo)", provider, model, mult)
+	}
+	if overrideMult > 0 {
+		return overrideMult, fmt.Sprintf("%s/%s × %.4f (upstream key)", provider, model, overrideMult)
+	}
+	mult := g.MultiplierFor(provider)
+	return mult, fmt.Sprintf("%s/%s × %.4f", provider, model, mult)
 }
 
 // buildInvoiceHandler returns the per-deploy invoice handler when SaaS is
@@ -270,12 +296,7 @@ func (b *saasBilling) SettleCharge(ctx context.Context, token, provider, model s
 		log.Warnf("saas: settle charge: group %d lookup failed: %v", w.GroupID, err)
 		return 1, 0
 	}
-	mult := g.MultiplierFor(provider)
-	note := fmt.Sprintf("%s/%s × %.4f", provider, model, mult)
-	if overrideMult > 0 {
-		mult = overrideMult
-		note = fmt.Sprintf("%s/%s × %.4f (upstream key)", provider, model, mult)
-	}
+	mult, note := b.effectiveMultiplier(g, provider, model, overrideMult)
 	cost := billing.ChargeFromOfficial(officialUSD, mult)
 	if cost <= 0 {
 		return mult, 0

@@ -9,6 +9,8 @@ import (
 
 	"github.com/wjsoj/cc-core/pricing"
 	"gopkg.in/yaml.v3"
+
+	"github.com/wjsoj/cc-core/auth"
 )
 
 // CodexWSConfig configures the Codex WebSocket transport. WebSocket carries
@@ -304,6 +306,55 @@ type SaaSConfig struct {
 	// (the user can still apply, the admin can still upload — only the
 	// auto-email step degrades).
 	Invoice InvoiceConfig `yaml:"invoice"`
+
+	// Promotions are time-boxed price cuts. Each entry replaces the
+	// multiplier its provider's traffic would otherwise be billed at, for as
+	// long as its window is open — including the per-key override that
+	// upstream API-key capacity carries, so a user never sees the same model
+	// billed at two rates depending on which credential happened to serve it.
+	// That makes a promotion genuinely expensive on API-key traffic; it is a
+	// pricing decision, not an oversight.
+	//
+	// The window is wall-clock, so a promotion ends on its own with nothing to
+	// deploy — the usual way a hand-rolled promotion goes wrong is that
+	// somebody forgets to turn it off.
+	Promotions []PricingPromotion `yaml:"promotions,omitempty"`
+}
+
+// PricingPromotion is one time-boxed price cut for a provider.
+type PricingPromotion struct {
+	// Name is operator-facing only; it appears in logs and the request-log
+	// note so a surprising charge can be traced back to the promotion.
+	Name string `yaml:"name,omitempty"`
+
+	// Provider is the cc-core canonical provider ("anthropic" / "openai") or
+	// a friendly alias ("claude" / "codex"), normalized on load.
+	Provider string `yaml:"provider"`
+
+	// Multiplier is what official cost is charged at while the window is
+	// open, replacing the pricing-group and per-key values. Must be > 0;
+	// entries with a non-positive multiplier are dropped on load rather than
+	// silently billing at zero.
+	Multiplier float64 `yaml:"multiplier"`
+
+	// Start and End bound the window. Both are required and are parsed with
+	// their offset, so a config written in +08:00 means what it says
+	// regardless of the server's zone.
+	Start time.Time `yaml:"start"`
+	End   time.Time `yaml:"end"`
+}
+
+// Covers reports whether this promotion applies to a provider at time now.
+// The window is inclusive of Start and exclusive of End, so two back-to-back
+// promotions cannot both claim the instant between them.
+func (p PricingPromotion) Covers(provider string, now time.Time) bool {
+	if p.Provider != provider || p.Multiplier <= 0 {
+		return false
+	}
+	if p.Start.IsZero() || p.End.IsZero() || !p.End.After(p.Start) {
+		return false
+	}
+	return !now.Before(p.Start) && now.Before(p.End)
 }
 
 // InvoiceConfig — fapiao + transactional email config. All optional.
@@ -381,7 +432,42 @@ func Load(path string) (*Config, error) {
 	if cfg.LogJSONLDisabled && cfg.LogIndexDisabled {
 		return nil, fmt.Errorf("config: log_jsonl_disabled requires the index; unset log_index_disabled")
 	}
+	if err := normalizePromotions(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+// normalizePromotions canonicalizes provider aliases and rejects entries that
+// could not price anything correctly.
+//
+// A malformed promotion is refused at startup rather than skipped at runtime.
+// Skipping it would mean an operator announces a discount, the server quietly
+// declines to apply it, and the first evidence is a customer comparing their
+// bill against the announcement — whereas a server that will not start is
+// noticed immediately, while nobody has been overcharged yet.
+func normalizePromotions(c *Config) error {
+	for i := range c.SaaS.Promotions {
+		p := &c.SaaS.Promotions[i]
+		label := p.Name
+		if label == "" {
+			label = fmt.Sprintf("#%d", i+1)
+		}
+		p.Provider = auth.NormalizeProvider(strings.TrimSpace(p.Provider))
+		if p.Provider == "" {
+			return fmt.Errorf("config: promotion %s: provider is required", label)
+		}
+		if p.Multiplier <= 0 {
+			return fmt.Errorf("config: promotion %s: multiplier must be > 0 (got %v); a zero multiplier would serve the provider for free", label, p.Multiplier)
+		}
+		if p.Start.IsZero() || p.End.IsZero() {
+			return fmt.Errorf("config: promotion %s: start and end are both required", label)
+		}
+		if !p.End.After(p.Start) {
+			return fmt.Errorf("config: promotion %s: end (%s) must be after start (%s)", label, p.End.Format(time.RFC3339), p.Start.Format(time.RFC3339))
+		}
+	}
+	return nil
 }
 
 // DefaultCodexConcurrencyMultiplier is the fallback for

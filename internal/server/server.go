@@ -121,7 +121,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 			log.Errorf("saas: failed to open %s — billing disabled: %v", cfg.SaaS.DBPath, err)
 		} else {
 			s.saasDB = ddb
-			s.saas = &saasBilling{db: ddb}
+			s.saas = &saasBilling{db: ddb, promos: cfg.SaaS.Promotions}
 			rate := billing.NewRate("", cfg.SaaS.Exchange.FallbackCNYPerUSD)
 			if u := cfg.SaaS.Exchange.URL; u != "" {
 				rate = billing.NewRate(u, cfg.SaaS.Exchange.FallbackCNYPerUSD)
@@ -129,6 +129,10 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 			gw := buildPaymentGateway(cfg)
 			authFn := s.makeBearerAuth()
 			bh := billing.NewHandler(ddb, rate, gw, cfg.SaaS.Site, authFn)
+			// Quote what the caller is actually charged, not what the group
+			// stores — during a promotion those differ, and this is the number
+			// a user reads before deciding to spend.
+			bh.EffectiveMultiplier = s.displayMultiplier
 			s.billing = bh
 			s.invoice = buildInvoiceHandler(s, cfg)
 			s.inbox = buildInboxHandler(s, cfg)

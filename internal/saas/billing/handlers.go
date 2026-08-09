@@ -76,6 +76,17 @@ type Handler struct {
 	OrderTTL          time.Duration
 	MaxPendingPerUser int
 
+	// EffectiveMultiplier, when set, replaces a group's stored multiplier with
+	// what the caller is actually charged right now — today that means an
+	// active promotion. Optional: nil means "the stored value is the truth",
+	// which is what a deploy without promotions wants.
+	//
+	// It exists because this is the number the user reads before deciding to
+	// spend. Quoting the stored 0.02 during a ×0.001 promotion would hide the
+	// discount from exactly the people it was announced to, and quoting a
+	// discount after it lapsed would be worse.
+	EffectiveMultiplier func(provider string, stored float64) float64
+
 	mu        sync.Mutex
 	createdAt map[string][]time.Time // per-token sliding 1h window
 }
@@ -152,10 +163,18 @@ func (h *Handler) balance(c *gin.Context) {
 	}
 	if g != nil {
 		resp["group_name"] = g.Name
-		resp["claude_multiplier"] = g.ClaudeMultiplier
-		resp["codex_multiplier"] = g.CodexMultiplier
+		resp["claude_multiplier"] = h.effective("anthropic", g.ClaudeMultiplier)
+		resp["codex_multiplier"] = h.effective("openai", g.CodexMultiplier)
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// effective applies the EffectiveMultiplier hook when one is installed.
+func (h *Handler) effective(provider string, stored float64) float64 {
+	if h.EffectiveMultiplier == nil {
+		return stored
+	}
+	return h.EffectiveMultiplier(provider, stored)
 }
 
 func (h *Handler) exchangeRate(c *gin.Context) {
