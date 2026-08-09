@@ -89,6 +89,27 @@ func TestClientSuppliedRelayHeadersNeverSurvive(t *testing.T) {
 	}
 }
 
+// The live relay is the Codex endpoint (apikey-self.json → api.novadiffusion.com),
+// where the CLI names its session in Session_id rather than the Claude header.
+// Stamping must read the same header clientSlotID does, or Codex traffic would
+// arrive at the peer with a per-user but session-less identity.
+func TestRelayIdentityUsesCodexSessionHeader(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req.Header.Set("Session_id", "codex-window-7")
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+
+	h := http.Header{}
+	applyRelayIdentity(h, &auth.Auth{Kind: auth.KindAPIKey, RelayPeer: true}, c, "sk-downstream")
+	id, ok := relay.Read(h)
+	if !ok {
+		t.Fatal("no identity stamped for a Codex request")
+	}
+	if id.Session != "codex-window-7" {
+		t.Fatalf("session = %q, want the Session_id value", id.Session)
+	}
+}
+
 // Two downstream users, and one user's two CLI windows, must reach the peer as
 // distinct slots — that is the entire point of the hop.
 func TestRelayIdentityDistinguishesCallers(t *testing.T) {
