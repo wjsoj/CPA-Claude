@@ -290,6 +290,12 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 	// Per-token opt-in: whether the OAuth-exhausted path may fall back to
 	// upstream API keys. Stable for the whole request, computed once.
 	allowFallback := s.allowAPIKeyFallback(clientToken)
+	// Set when OAuth preparation failed: a local identity-binding judgement,
+	// not a credential fault, so we stop trying OAuth credentials (they would
+	// all fail the same way) and go straight to an API key with the untouched
+	// body. Deliberately does NOT mark the credential unhealthy.
+	apiKeyOnly := false
+	preparationFallbackPending := false
 
 	// surfaceDeferred replays a withheld upstream error to the client once no
 	// healthy credential remains — preferable to a synthetic 503 because the
@@ -312,6 +318,7 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 		}
 		a := s.pool.AcquireWithOptions(c.Request.Context(), provider, clientToken, clientGroup, model, slotID, auth.AcquireOptions{
 			AllowAPIKeyFallback: allowFallback,
+			APIKeyOnly:          apiKeyOnly,
 			ExcludeIDs:          excludeIDs,
 		})
 		if a == nil {
@@ -323,7 +330,9 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 				return
 			}
 			msg, retryAfter := s.poolUnavailable(provider, allowFallback)
-			if len(tried) > 0 {
+			if preparationFallbackPending {
+				msg = "claude request preparation failed and no API-key fallback was available"
+			} else if len(tried) > 0 {
 				// We did get credentials, tried them all, and every one bounced.
 				msg = fmt.Sprintf("tried all %d available %s credentials for this request and none could serve it; %s",
 					len(tried), auth.NormalizeProvider(provider), msg)
@@ -342,6 +351,34 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 		tried[a.ID] = true
 		attempts++
 
+		// Validate OAuth preparation before anything reaches Anthropic — the
+		// sidecar bootstrap included. It is entirely local and deterministic,
+		// so a failure says nothing about the credential: don't mark it, switch
+		// to an API key and send the untouched original body instead.
+		var preflightPrepared mimicry.BodyTransformResult
+		if auth.NormalizeProvider(a.Provider) == auth.ProviderAnthropic && a.Kind == auth.KindOAuth && path == "/v1/messages" {
+			prepErr := s.preflightClaudeOAuth(c, a, body, model, clientToken, stream, &preflightPrepared)
+			if prepErr != nil {
+				reason := claudePreparationFailureReason(prepErr)
+				log.Errorf("proxy: Claude preparation failed before upstream (auth=%s model=%s reason=%s fallback=apikey): %v",
+					a.ID, model, reason, prepErr)
+				s.emitLog(requestlog.Record{
+					Client: clientName, ClientToken: maskClientToken(clientToken), Provider: provider,
+					AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
+					Stream: stream, Path: path, Attempts: attempts, DurationMs: time.Since(start).Milliseconds(),
+					Error: "claude request preparation failed (" + reason + "); fallback=apikey", AttemptOnly: true,
+				})
+				apiKeyOnly = true
+				preparationFallbackPending = true
+				lastDeferred = nil
+				continue
+			}
+		}
+		if preparationFallbackPending && a.Kind == auth.KindAPIKey {
+			log.Warnf("proxy: Claude preparation fallback selected API-key credential %s", a.ID)
+			preparationFallbackPending = false
+		}
+
 		var retry, done bool
 		var deferred *deferredResponse
 		switch auth.NormalizeProvider(a.Provider) {
@@ -350,7 +387,7 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 		default:
 			// attempt > 0 ⇒ transparent retry; doForward skips the blocking
 			// bootstrap-wait so the credential switch stays fast.
-			retry, done, deferred = s.doForward(c, a, path, body, stream, model, clientToken, slotID, clientName, start, attempts, attempt > 0)
+			retry, done, deferred = s.doForward(c, a, path, body, stream, model, clientToken, slotID, clientName, start, attempts, attempt > 0, preflightPrepared)
 		}
 		if done {
 			s.pool.Release(provider, clientToken, slotID)
@@ -567,7 +604,13 @@ func replayDeferred(c *gin.Context, d *deferredResponse) {
 // isRetry is true on the 2nd+ attempt of a request; it suppresses the
 // blocking bootstrap-wait gate so a transparent credential switch doesn't
 // re-stack the sidecar wait on every alternate credential.
-func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, slotID, clientName string, start time.Time, attempts int, isRetry bool) (retry bool, done bool, deferred *deferredResponse) {
+// preflightPrepared is the result forwardWithFailover already validated for
+// this credential, or a zero value when it had none (a direct call, or a body
+// this function is about to change). It is reused only when the bytes still
+// match, so the request that goes out is exactly the one that was checked.
+func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, slotID, clientName string, start time.Time, attempts int, isRetry bool, preflightPrepared mimicry.BodyTransformResult) (retry bool, done bool, deferred *deferredResponse) {
+	originalBody := body
+
 	// Mid-conversation account switch: drop prior `thinking` block
 	// signatures before forwarding. Both OAuth and API-key paths bind
 	// thinking signatures to the issuing account, so this runs ahead
@@ -603,32 +646,53 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	url := baseURL + path + "?beta=true"
 	isAnthropicBase := strings.HasPrefix(strings.ToLower(baseURL), "https://api.anthropic.com")
 
-	// Per-credential model rewrite (API-key only, e.g. third-party relays
-	// that require a vendor-prefixed model name like "[0.1]a/claude-sonnet-4-6").
-	// Routing already filtered to credentials that accept this model; here we
-	// just substitute the body's "model" field if the map says so. The
-	// client-facing model string used for usage/pricing stays unchanged.
-	upstreamBody := body
-	if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
-		if rewritten, err := rewriteModelField(body, upstreamModel); err == nil {
-			upstreamBody = rewritten
-		} else {
-			log.Warnf("proxy: model rewrite (%s -> %s) failed via %s: %v", model, upstreamModel, a.ID, err)
-		}
-	}
-
-	// Body-layer Claude Code mimicry: rebuild system to match the real CC
-	// 4-block layout (billing block + "You are Claude Code..." + original
-	// system prompt with cache_control), inject metadata.user_id with a
-	// per-account device_id and a per-(account, clientToken, conversation)
-	// session_id, sign the cch billing hash. The client's prompt is
-	// preserved verbatim — only the surrounding wrapper is normalized.
-	// Only runs on /v1/messages (count_tokens isn't billed and shouldn't
-	// be modified). Haiku requests skip mimicry inside the function.
 	id := mimicry.SimIdentity{
 		AccountKey:  a.AccountKey(),
 		AccountUUID: a.AccountUUIDValue(),
 		ClientToken: clientToken,
+	}
+
+	// The prepared pipeline owns /v1/messages on OAuth: it rebinds the
+	// downstream identity to this account, pins the version, repairs the beta
+	// vector and cache breakpoints, and refuses to emit a partially rewritten
+	// body. The model rewrite and dateline scrub happen inside it, before the
+	// body digest is taken — see claude_prepared.go.
+	//
+	// Other paths (notably /v1/messages/count_tokens) keep the plain header
+	// layer: real CC treats count_tokens as its own request class, and the
+	// prepared pipeline has no capture backing it there.
+	upstreamBody := body
+	preparedPath := path == "/v1/messages"
+	var prepared mimicry.BodyTransformResult
+	if preparedPath {
+		if preflightPrepared.IsValid() && bytes.Equal(body, originalBody) {
+			// Reuse the preflight result: identical bytes, same credential, and
+			// re-preparing would only risk diverging from what was validated.
+			prepared = preflightPrepared
+		} else {
+			var err error
+			prepared, err = prepareClaudeOAuthBody(body, model, a, id)
+			if err != nil {
+				// forwardWithFailover preflights this so it can fall back to an
+				// API key. Reaching here means a direct call or a body that
+				// changed under us; fail closed rather than forwarding an
+				// unbound identity.
+				log.Errorf("proxy: prepare Claude request via %s: %v (reason=%s)", a.ID, err, claudePreparationFailureReason(err))
+				c.AbortWithStatusJSON(500, gin.H{"error": "the request could not be prepared"})
+				return false, true, nil
+			}
+		}
+		upstreamBody = prepared.Body()
+	} else if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
+		// Non-prepared paths (count_tokens) still need the per-credential model
+		// map — notably DefaultClaudeOAuthModelMap, which folds retired Opus and
+		// Sonnet generations onto the current ones. Skipping it here would send
+		// upstream a model name it no longer serves.
+		if rewritten, err := rewriteModelField(upstreamBody, upstreamModel); err == nil {
+			upstreamBody = rewritten
+		} else {
+			log.Warnf("proxy: model rewrite (%s -> %s) failed via %s: %v", model, upstreamModel, a.ID, err)
+		}
 	}
 
 	// Sidecar: dispatch the per-session bootstrap+quota_probe the first
@@ -642,17 +706,6 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	// gate the first business request on it, capped at sidecar.BootstrapWaitCap
 	// so a stuck sidecar can't hang user traffic.
 	bootstrapReady := s.sidecar.Notify(a, clientToken)
-	if path == "/v1/messages" {
-		upstreamBody = mimicry.ApplyClaudeCodeBodyMimicry(upstreamBody, model, id)
-		// Erase the client "Today's date is …" steganography beacon (3 bits:
-		// known-gateway / lab-keyword / China-timezone) real CC embeds once it
-		// detects our non-official base URL. Runs even for real-CC passthrough
-		// (which the body mimicry above skips) — the beacon rides the client's
-		// own body straight to Anthropic. See cc-core crack/cc2197/SPEC.md §6.
-		if normalized, changed := mimicry.NormalizeDateline(upstreamBody); changed {
-			upstreamBody = normalized
-		}
-	}
 
 	ctx := c.Request.Context()
 	// Skip the blocking bootstrap-wait on retries: a transparent credential
@@ -679,9 +732,21 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 	copyForwardableHeaders(c.Request.Header, upReq.Header)
 	stripIngressHeaders(upReq.Header)
 
-	// Anthropic auth + Claude Code fingerprint headers. Pass the same
-	// SimIdentity so X-Claude-Code-Session-Id matches metadata.user_id.session_id.
-	applyAnthropicHeaders(upReq, a, stream, isAnthropicBase, id, upstreamBody)
+	// Anthropic auth + Claude Code fingerprint headers. On the prepared path
+	// body and headers must come from the SAME opaque result — the apply step
+	// re-validates the credential binding and the body digest, so a header set
+	// can never be installed over a body it wasn't prepared for.
+	if preparedPath {
+		if err := applyAnthropicPreparedHeaders(upReq, a, stream, isAnthropicBase, prepared); err != nil {
+			log.Errorf("proxy: prepare Claude headers via %s: %v (reason=%s)", a.ID, err, claudePreparationFailureReason(err))
+			c.AbortWithStatusJSON(500, gin.H{"error": "the request could not be prepared"})
+			return false, true, nil
+		}
+	} else {
+		// Pass the same SimIdentity so X-Claude-Code-Session-Id matches
+		// metadata.user_id.session_id.
+		applyAnthropicHeaders(upReq, a, stream, isAnthropicBase, id, upstreamBody)
+	}
 
 	client := auth.ClientFor(a.ProxyURL, s.cfg.UseUTLS)
 	resp, err := client.Do(upReq)

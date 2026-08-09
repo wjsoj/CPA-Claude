@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/mimicry"
 	"github.com/wjsoj/cc-core/thinkingsig"
 
 	"github.com/wjsoj/CPA-Claude/internal/config"
@@ -49,8 +50,11 @@ func newMessagesContext(t *testing.T, body []byte) (*gin.Context, *httptest.Resp
 	return c, w
 }
 
-// Haiku body skips Claude Code mimicry, keeping the request untouched — the
-// failover decision under test is independent of body shaping.
+// A plain non-Claude-Code body. It classifies as generic and is synthesized
+// into Claude Code shape by the prepared pipeline — the legacy body mimicry it
+// replaced used to skip Haiku entirely, but the prepared path does not look at
+// the model, matching hypitoken. The failover decisions under test are
+// independent of body shaping either way.
 var haikuBody = []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":"hi"}]}`)
 
 // TestForwardWithFailoverSwitchesCredentialOnQuota is the core money-path
@@ -152,8 +156,11 @@ func TestDoForwardWithholdsRetryableCredentialError(t *testing.T) {
 	s := newDoForwardTestServer(t, upstream.URL, cred)
 	c, w := newMessagesContext(t, haikuBody)
 
+	// Zero prepared result: this is a direct call, so doForward prepares the
+	// body itself rather than reusing a preflight.
 	retry, done, deferred := s.doForward(c, cred, "/v1/messages", haikuBody, false,
-		"claude-haiku-4-5-20251001", "tok-abcdef123456", "slot-1", "client", time.Now(), 1, false)
+		"claude-haiku-4-5-20251001", "tok-abcdef123456", "slot-1", "client", time.Now(), 1, false,
+		mimicry.BodyTransformResult{})
 
 	if !retry || done {
 		t.Fatalf("retryable 429 should yield (retry=true, done=false); got retry=%v done=%v", retry, done)
