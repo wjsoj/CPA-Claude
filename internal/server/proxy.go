@@ -19,6 +19,7 @@ import (
 	"github.com/wjsoj/cc-core/advisor"
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/mimicry"
+	"github.com/wjsoj/cc-core/relay"
 	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/cc-core/sidecar"
 	ccstream "github.com/wjsoj/cc-core/stream"
@@ -477,6 +478,29 @@ func clientSlotID(c *gin.Context) string {
 		return v
 	}
 	return ""
+}
+
+// RelayPeerName identifies this proxy in the relay headers it stamps. main sets
+// it to include the build version; the receiver treats it as informational
+// only — trust comes from authenticating the token, never from this string.
+var RelayPeerName = "cpa-claude"
+
+// applyRelayIdentity tells a cooperating peer who is actually calling.
+//
+// Without it, everything this proxy forwards over one API key looks to the peer
+// like a single client, so its scheduler pins every one of our users onto one
+// of its credentials while the rest of its pool sits idle. With it, each of our
+// users presents the slot they would have presented had they connected to the
+// peer directly.
+//
+// Only credentials explicitly marked relay_peer get this. To a vendor or a
+// third-party relay our users' identity is not useful, and shipping it would
+// leak the shape of our client base into someone else's logs.
+func applyRelayIdentity(h http.Header, a *auth.Auth, c *gin.Context, clientToken string) {
+	if a == nil || a.Kind != auth.KindAPIKey || !a.RelayPeer {
+		return // stripIngressHeaders already cleared anything inbound
+	}
+	relay.Apply(h, RelayPeerName, clientToken, clientSlotID(c))
 }
 
 func maskClientToken(t string) string {
@@ -1161,6 +1185,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	}
 	copyForwardableHeaders(c.Request.Header, upReq.Header)
 	stripIngressHeaders(upReq.Header)
+	applyRelayIdentity(upReq.Header, a, c, clientToken)
 	token, _ := a.Credentials()
 	upReq.Header.Set("x-api-key", token)
 
@@ -1436,6 +1461,12 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 // behind CF — seeing those headers triggers CF's loop-prevention WAF and
 // returns 403 HTML. Prefix match so future CF additions are covered.
 func stripIngressHeaders(h http.Header) {
+	// A downstream caller must never be able to stamp its own relay identity:
+	// these headers are only meaningful when WE assert them, and forwarding a
+	// client-supplied one would both forge an identity at the peer and put an
+	// unexplained header on requests to Anthropic. Stamping (for credentials
+	// that are our own peers) happens after this, in applyRelayIdentity.
+	relay.Strip(h)
 	for k := range h {
 		lower := strings.ToLower(k)
 		if strings.HasPrefix(lower, "cf-") || strings.HasPrefix(lower, "cdn-") ||

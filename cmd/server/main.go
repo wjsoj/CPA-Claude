@@ -57,6 +57,11 @@ func main() {
 		return
 	}
 
+	// Name this build in the relay headers stamped for cooperating peers, so a
+	// peer's logs say which proxy — and which version of it — asserted an
+	// identity. Informational only; the peer's trust comes from the token.
+	server.RelayPeerName = "cpa-claude/" + version
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
