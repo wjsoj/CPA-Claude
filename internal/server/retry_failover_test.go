@@ -132,8 +132,21 @@ func TestForwardWithFailoverSurfacesRealErrorWhenExhausted(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("exhausted pool must surface the real upstream 429, not a synthetic 503; got %d", w.Code)
 	}
-	if w.Header().Get("Anthropic-Ratelimit-Unified-Status") != "rejected" {
-		t.Fatal("surfaced 429 should carry the upstream rate-limit headers so the client backs off correctly")
+	// The client still backs off — Retry-After is synthesized from the upstream
+	// reset timestamps (3h away here, so capped at an hour) before they are
+	// dropped. What it no longer learns is which of our accounts was serving it
+	// and how much of that account's window is left.
+	if got := w.Header().Get("Retry-After"); got != "3600" {
+		t.Errorf("surfaced 429 must carry a Retry-After so the client backs off; got %q", got)
+	}
+	for _, leaked := range []string{
+		"Anthropic-Ratelimit-Unified-Status",
+		"Anthropic-Ratelimit-Unified-Reset",
+		"Anthropic-Organization-Id",
+	} {
+		if got := w.Header().Get(leaked); got != "" {
+			t.Errorf("%s reached the client with %q", leaked, got)
+		}
 	}
 }
 

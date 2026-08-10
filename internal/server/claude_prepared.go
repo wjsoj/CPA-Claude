@@ -1,9 +1,6 @@
 package server
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -109,7 +106,7 @@ func claudeRequestPolicy(requestClass mimicry.RequestClass) (mimicry.RequestPoli
 func prepareClaudePreparedBody(body []byte, model string, a *auth.Auth, id mimicry.SimIdentity, policy mimicry.RequestPolicy) (mimicry.BodyTransformResult, error) {
 	working := body
 	if upstreamModel, ok := a.ResolveUpstreamModel(model); ok && upstreamModel != model && upstreamModel != "" {
-		rewritten, err := rewriteModelFieldPreservingBytes(working, upstreamModel)
+		rewritten, err := mimicry.RewriteModelFieldPreservingBytes(working, upstreamModel)
 		if err != nil {
 			return mimicry.BodyTransformResult{}, fmt.Errorf("model rewrite (%s -> %s): %w", model, upstreamModel, err)
 		}
@@ -150,93 +147,4 @@ func claudePreparationFailureReason(err error) string {
 	default:
 		return "request_preparation_failed"
 	}
-}
-
-// rewriteModelFieldPreservingBytes sets the top-level "model" string without
-// disturbing any other byte.
-//
-// rewriteModelField (the map round-trip below in proxy.go) reorders every
-// top-level key alphabetically, which turns the captured Claude Code key order
-// into one no real client emits. That is tolerable on the API-key relay path it
-// serves; it is not on a body we are about to forward on an OAuth credential.
-//
-// Duplicated from hypitoken for now. cc-core ships this as
-// mimicry.RewriteModelFieldPreservingBytes — collapse both copies onto it at
-// the next dependency bump.
-func rewriteModelFieldPreservingBytes(body []byte, upstream string) ([]byte, error) {
-	span, err := requireTopLevelJSONFieldSpan(body, "model")
-	if err != nil {
-		return nil, err
-	}
-	var current string
-	if err = json.Unmarshal(body[span.start:span.end], &current); err != nil {
-		return nil, errors.New("top-level model is not a JSON string")
-	}
-	mb, err := json.Marshal(upstream)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]byte, 0, len(body)-span.end+span.start+len(mb))
-	out = append(out, body[:span.start]...)
-	out = append(out, mb...)
-	out = append(out, body[span.end:]...)
-	return out, nil
-}
-
-type jsonFieldSpan struct {
-	start int
-	end   int
-}
-
-func requireTopLevelJSONFieldSpan(body []byte, name string) (jsonFieldSpan, error) {
-	if !json.Valid(body) {
-		return jsonFieldSpan{}, errors.New("request body is not valid JSON")
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	opening, err := dec.Token()
-	if err != nil || opening != json.Delim('{') {
-		return jsonFieldSpan{}, errors.New("request body is not a JSON object")
-	}
-
-	var found jsonFieldSpan
-	count := 0
-	for dec.More() {
-		keyToken, tokenErr := dec.Token()
-		if tokenErr != nil {
-			return jsonFieldSpan{}, tokenErr
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return jsonFieldSpan{}, errors.New("JSON object key is not a string")
-		}
-
-		before := int(dec.InputOffset())
-		var raw json.RawMessage
-		if decodeErr := dec.Decode(&raw); decodeErr != nil {
-			return jsonFieldSpan{}, decodeErr
-		}
-		after := int(dec.InputOffset())
-		if before < 0 || after < before || after > len(body) || len(raw) == 0 {
-			return jsonFieldSpan{}, errors.New("invalid JSON decoder offsets")
-		}
-		relativeStart := bytes.LastIndex(body[before:after], raw)
-		if relativeStart < 0 {
-			return jsonFieldSpan{}, errors.New("could not locate raw JSON value")
-		}
-		if key == name {
-			count++
-			start := before + relativeStart
-			found = jsonFieldSpan{start: start, end: start + len(raw)}
-		}
-	}
-	if _, err = dec.Token(); err != nil {
-		return jsonFieldSpan{}, err
-	}
-	if count == 0 {
-		return jsonFieldSpan{}, fmt.Errorf("JSON object has no %q field", name)
-	}
-	if count != 1 {
-		return jsonFieldSpan{}, fmt.Errorf("JSON object has duplicate %q fields", name)
-	}
-	return found, nil
 }

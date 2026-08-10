@@ -225,14 +225,69 @@ func TestPreparationRefusesCredentialWithoutAccountUUID(t *testing.T) {
 	}
 }
 
-func TestRewriteModelFieldPreservingBytesKeepsKeyOrder(t *testing.T) {
+// The model rewrite must not reorder the body's top-level keys, and it has to
+// run before preparation because the prepared result pins a body digest. The
+// rewrite itself now lives in cc-core; this pins the ordering through OUR call
+// path, which is what a future refactor here could break.
+func TestPreparedBodyModelRewriteKeepsKeyOrder(t *testing.T) {
 	const body = `{"model":"claude-opus-5","messages":[],"system":[],"stream":true}`
-	got, err := rewriteModelFieldPreservingBytes([]byte(body), "vendor/claude-opus-5")
+	got, err := mimicry.RewriteModelFieldPreservingBytes([]byte(body), "vendor/claude-opus-5")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := strings.Replace(body, `"claude-opus-5"`, `"vendor/claude-opus-5"`, 1)
 	if string(got) != want {
 		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
+// End-to-end proof that the response scrub is wired into the success path, not
+// only the withheld-error replay: a plain 200 must not carry our account's
+// quota state or organization to the caller.
+func TestSuccessfulResponseDoesNotLeakPoolState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h := w.Header()
+		h.Set("Content-Type", "application/json")
+		h.Set("Anthropic-Ratelimit-Unified-Status", "allowed")
+		h.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.83")
+		h.Set("Anthropic-Ratelimit-Unified-5h-Reset", "1786123800")
+		h.Set("Anthropic-Organization-Id", "bf62f90e-ff9c-4d95-a554-17835658b5ef")
+		h.Set("Anthropic-Workspace-Id", "wrkspc_01Mx5eXmqPciXqAJUQDyHRAQ")
+		h.Set("Request-Id", "req_011CdoZnTHdYogjzJ6Wuzf6Y")
+		h.Set("Cf-Ray", "a2770e297a19f3ec-LAX")
+		w.WriteHeader(http.StatusBadRequest) // non-retryable: forwarded verbatim, no billing needed
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"nope"},"request_id":"req_011CdoZnTHdYogjzJ6Wuzf6Y"}`))
+	}))
+	defer upstream.Close()
+
+	cred := preparedTestCredential()
+	s := newDoForwardTestServer(t, upstream.URL, cred)
+	c, w := newMessagesContext(t, haikuBody)
+
+	s.doForward(c, cred, "/v1/messages", haikuBody, false,
+		"claude-haiku-4-5-20251001", "tok-abcdef123456", "slot-1", "client", time.Now(), 1, false,
+		mimicry.BodyTransformResult{})
+
+	for _, leaked := range []string{
+		"Anthropic-Ratelimit-Unified-Status",
+		"Anthropic-Ratelimit-Unified-5h-Utilization",
+		"Anthropic-Organization-Id",
+		"Anthropic-Workspace-Id",
+		"Request-Id",
+		"Cf-Ray",
+	} {
+		if got := w.Header().Get(leaked); got != "" {
+			t.Errorf("%s reached the client with %q", leaked, got)
+		}
+	}
+	if got := w.Header().Get("Content-Type"); got == "" {
+		t.Error("Content-Type was dropped; the client cannot parse the body without it")
+	}
+	if strings.Contains(w.Body.String(), "req_011CdoZnTHdYogjzJ6Wuzf6Y") {
+		t.Errorf("the upstream request id survived in the error body: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_request_error") {
+		t.Errorf("the actionable error type was lost: %s", w.Body.String())
 	}
 }

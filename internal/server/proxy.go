@@ -18,6 +18,7 @@ import (
 
 	"github.com/wjsoj/cc-core/advisor"
 	"github.com/wjsoj/cc-core/auth"
+	"github.com/wjsoj/cc-core/downstream"
 	"github.com/wjsoj/cc-core/mimicry"
 	"github.com/wjsoj/cc-core/relay"
 	"github.com/wjsoj/cc-core/requestlog"
@@ -578,16 +579,15 @@ type deferredResponse struct {
 // replayDeferred writes a withheld upstream error response to the client,
 // honouring the same hop-by-hop header filter as writeResponseHeaders.
 func replayDeferred(c *gin.Context, d *deferredResponse) {
-	for k, vs := range d.header {
-		if hopHeaders[http.CanonicalHeaderKey(k)] {
-			continue
-		}
-		for _, v := range vs {
-			c.Writer.Header().Add(k, v)
-		}
-	}
+	// Same allowlist as writeResponseHeaders. This is the path that replays a
+	// withheld upstream 429, so it is the one where dropping the unified
+	// rate-limit headers matters most — Retry-After survives (synthesized from
+	// their reset timestamps if upstream sent none), which is the part the
+	// client actually backs off on.
+	downstream.CopyResponseHeaders(c.Writer.Header(), d.header, time.Now())
 	c.Writer.WriteHeader(d.status)
-	_, _ = c.Writer.Write(d.body)
+	body, _ := downstream.ScrubErrorPayload(d.body)
+	_, _ = c.Writer.Write(body)
 }
 
 // doForward sends the request with one credential. Returns (retry, done, deferred):
@@ -1013,7 +1013,9 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		})
 
 		writeResponseHeaders(c, resp)
-		c.Writer.Write(errBody)
+		// A forwarded upstream error still carries the request_id of OUR call.
+		scrubbedErr, _ := downstream.ScrubErrorPayload(errBody)
+		c.Writer.Write(scrubbedErr)
 		return false, true, nil
 	}
 
@@ -1430,7 +1432,11 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		// up — and operators have no signal whether the relay rejected
 		// the model, exhausted the key's quota, IP-banned us, etc.
 		errBody, _ := io.ReadAll(resp.Body)
-		c.Writer.Write(errBody)
+		// The relay's own correlators are no more the caller's than Anthropic's
+		// are. errSnippet keeps the unscrubbed text — it goes to our log, which
+		// is exactly where an operator needs the upstream id to trace a failure.
+		scrubbedErr, _ := downstream.ScrubErrorPayload(errBody)
+		c.Writer.Write(scrubbedErr)
 		errSnippet = truncate(errBody, 500)
 		log.Warnf("proxy(apikey): %s returned %d — body=%s", a.ID, resp.StatusCode, errSnippet)
 	} else {
@@ -1559,15 +1565,23 @@ func copyForwardableHeaders(src, dst http.Header) {
 	}
 }
 
+// writeResponseHeaders forwards the upstream response headers the client is
+// allowed to see.
+//
+// The allowlist lives in cc-core/downstream. Copying verbatim used to hand the
+// caller our pool's operational state: the twelve anthropic-ratelimit-unified-*
+// headers (the serving account's tier, its 5h/7d utilisation, its overage
+// status and exact reset timestamps), anthropic-organization-id,
+// anthropic-workspace-id, the upstream request-id and cf-ray.
+//
+// Safe by capture, not by hope: a real third-party gateway returns none of them
+// and Claude Code works against it unchanged (cc-core crack/thirdparty/SPEC.md
+// §4). Retry-After is preserved, and synthesized from the reset timestamps when
+// upstream sent none, so client backoff is unaffected.
+//
+// Called after the retry loop has already read those headers for scheduling.
 func writeResponseHeaders(c *gin.Context, resp *http.Response) {
-	for k, vs := range resp.Header {
-		if hopHeaders[http.CanonicalHeaderKey(k)] {
-			continue
-		}
-		for _, v := range vs {
-			c.Writer.Header().Add(k, v)
-		}
-	}
+	downstream.CopyResponseHeaders(c.Writer.Header(), resp.Header, time.Now())
 	c.Writer.WriteHeader(resp.StatusCode)
 }
 
@@ -1639,6 +1653,12 @@ func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, sub *a
 				events++
 			case "message_stop", "error":
 				terminal = true
+			}
+			// Strip the upstream request id out of error frames. Gated on the
+			// event name inside cc-core, so the thousands of delta frames in a
+			// response cost one string compare and are never parsed.
+			if scrubbed, changed := downstream.ScrubSSELine(sc.Event(), outLine); changed {
+				outLine = scrubbed
 			}
 		}
 		return outLine, terminal, nil
