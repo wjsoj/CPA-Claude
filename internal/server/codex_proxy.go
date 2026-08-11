@@ -448,8 +448,14 @@ func responseIsSSE(h http.Header, br *bufio.Reader) bool {
 }
 
 // looksLikeSSE peeks the first chunk of a buffered reader and reports whether
-// it begins with an SSE field line (`data:` / `event:`), tolerating leading
-// blank lines. Non-consuming.
+// it begins with an SSE line, tolerating leading blank lines. Non-consuming.
+//
+// Every SSE line counts, not just `data:` / `event:`. A comment (`: …`) is the
+// one an upstream sends FIRST: OpenAI emits comment keepalives while a request
+// is queued, and hypitoken relays them verbatim. Treating those as "not a
+// stream" sent the whole SSE body through the JSON parse, which found no usage
+// and failed the request closed with a 502 — on 2026-08-11 that hit 44 requests
+// the peer had already served and billed as clean 200s.
 func looksLikeSSE(br *bufio.Reader) bool {
 	peek, _ := br.Peek(512)
 	for len(peek) > 0 {
@@ -466,7 +472,11 @@ func looksLikeSSE(br *bufio.Reader) bool {
 		if len(line) == 0 {
 			continue // skip leading blank lines
 		}
-		return bytes.HasPrefix(line, []byte("data:")) || bytes.HasPrefix(line, []byte("event:"))
+		return bytes.HasPrefix(line, []byte("data:")) ||
+			bytes.HasPrefix(line, []byte("event:")) ||
+			bytes.HasPrefix(line, []byte("id:")) ||
+			bytes.HasPrefix(line, []byte("retry:")) ||
+			bytes.HasPrefix(line, []byte(":"))
 	}
 	return false
 }

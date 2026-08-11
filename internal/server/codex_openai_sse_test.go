@@ -26,6 +26,11 @@ func TestResponseIsSSE(t *testing.T) {
 		{"event-stream header", "text/event-stream", sse, true},
 		{"text/plain SSE (relay)", "text/plain; charset=utf-8", sse, true},
 		{"text/plain SSE leading blank lines", "text/plain", "\n\n" + sse, true},
+		// The ChatGPT backend opens a queued turn with SSE comment keepalives,
+		// which hypitoken relays verbatim ahead of the first event. Reading
+		// those as "not a stream" failed the whole turn closed with a 502.
+		{"text/plain SSE behind a comment keepalive", "text/plain", ": queued\n\n" + sse, true},
+		{"text/plain SSE behind id/retry lines", "text/plain", "retry: 3000\nid: 1\n" + sse, true},
 		{"plain json", "application/json", `{"id":"x","usage":{"input_tokens":1}}`, false},
 		{"empty", "text/plain", "", false},
 	}
