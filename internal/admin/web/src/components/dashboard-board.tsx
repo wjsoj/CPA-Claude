@@ -14,7 +14,7 @@ import {
 } from "recharts";
 import { Info } from "lucide-react";
 import type { HourBucket, Pricing, RequestAgg } from "@/lib/types";
-import { lookupPriceAnyProvider } from "@/lib/pricing";
+import { cacheSavings } from "@/lib/pricing";
 import {
   ChartContainer,
   ChartLegend,
@@ -141,48 +141,27 @@ export function DashboardBoard({
   busy = false,
   clientsAnonymized = false,
 }: DashboardBoardProps) {
-  // by_model is keyed by bare model name (no provider prefix), so use the
-  // any-provider lookup which scans the catalog by suffix-after-"/" with the
-  // same prefix-fallback rule as the server.
-  const lookupPrice = (model: string) => lookupPriceAnyProvider(pricing, model);
-
   const cacheStats = (() => {
     if (!lifetimeData) return null;
     const s = lifetimeData.summary;
+    const cache = cacheSavings(pricing, lifetimeData.by_model);
     const input = s.input_tokens || 0;
+    const output = s.output_tokens || 0;
     const cacheRead = s.cache_read_tokens || 0;
     const cacheCreate = s.cache_create_tokens || 0;
     const denom = input + cacheRead + cacheCreate;
-    const hitRate = denom > 0 ? cacheRead / denom : 0;
-    const actualCost = s.cost_usd || 0;
-    let noCacheCost = 0;
-    if (pricing) {
-      for (const [name, a] of Object.entries(lifetimeData.by_model)) {
-        const p = lookupPrice(name);
-        if (!p) continue;
-        const ain = a.input_tokens || 0;
-        const acr = a.cache_read_tokens || 0;
-        const acw = a.cache_create_tokens || 0;
-        const aout = a.output_tokens || 0;
-        noCacheCost += ((ain + acr + acw) * p.input_per_1m) / 1e6;
-        noCacheCost += (aout * p.output_per_1m) / 1e6;
-      }
-    }
-    const output = s.output_tokens || 0;
     const totalTokens = input + output + cacheRead + cacheCreate;
-    const tokensPerDollar = actualCost > 0 ? totalTokens / actualCost : 0;
+    const actualCost = s.cost_usd || 0;
     return {
-      hitRate,
-      actualCost,
-      noCacheCost,
-      savings: Math.max(0, noCacheCost - actualCost),
+      hitRate: denom > 0 ? cacheRead / denom : 0,
+      cache,
       input,
       output,
       cacheRead,
       cacheCreate,
       totalTokens,
-      tokensPerDollar,
-      hasPricing: !!pricing,
+      actualCost,
+      tokensPerDollar: actualCost > 0 ? totalTokens / actualCost : 0,
     };
   })();
 
@@ -355,19 +334,19 @@ export function DashboardBoard({
           <CacheCard
             label="Saved by caching"
             value={
-              cacheStats && cacheStats.hasPricing
-                ? "$" + cacheStats.savings.toFixed(2)
-                : cacheStats && !cacheStats.hasPricing
+              cacheStats?.cache
+                ? "$" + cacheStats.cache.savings.toFixed(2)
+                : cacheStats
                   ? "pricing unavailable"
                   : busy
                     ? "…"
                     : "—"
             }
             foot={
-              cacheStats && cacheStats.hasPricing ? (
+              cacheStats?.cache ? (
                 <span className="mono tabular">
-                  no-cache ${cacheStats.noCacheCost.toFixed(2)} − actual $
-                  {cacheStats.actualCost.toFixed(2)}
+                  no-cache ${cacheStats.cache.noCacheCost.toFixed(2)} − with-cache $
+                  {cacheStats.cache.cachedCost.toFixed(2)}
                 </span>
               ) : null
             }
