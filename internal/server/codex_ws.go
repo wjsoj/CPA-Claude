@@ -17,6 +17,8 @@ import (
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/codexerr"
 	"github.com/wjsoj/cc-core/codexws"
+	"github.com/wjsoj/cc-core/mimicry"
+	"github.com/wjsoj/cc-core/relay"
 	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/cc-core/usage"
 )
@@ -104,10 +106,9 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 	if s.saas != nil && clientToken != "" {
 		bal, err := s.saas.PrecheckBalance(c.Request.Context(), clientToken)
 		if err != nil {
-			c.AbortWithStatusJSON(500, gin.H{"error": "wallet lookup failed: " + err.Error()})
-			return
-		}
-		if bal <= 0 {
+			// Fail open — see the same branch in forward().
+			log.Errorf("saas: wallet pre-check failed for %s on the WS path, serving anyway: %v", maskClientToken(clientToken), err)
+		} else if bal <= 0 {
 			c.Header("Retry-After", "60")
 			c.AbortWithStatusJSON(402, gin.H{"error": "insufficient balance", "balance_usd": bal})
 			return
@@ -213,9 +214,11 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 	if s.cfg.CodexWS.BetaVersion == "v1" {
 		betaValue = codexws.CodexOpenAIBetaWSV1
 	}
-	wsURL := codexWSUpstreamURL(s.cfg.ChatGPTBackendBaseURL)
-
-	// Acquire an OAuth credential, retrying dial-time failures on another one.
+	// Acquire a credential, retrying dial-time failures on another one. OAuth
+	// dials chatgpt.com directly; a relay-peer API key dials the peer's own WS
+	// ingress (see codexWSDialTarget), so an exhausted OAuth fleet degrades to
+	// the relay instead of dropping the session.
+	allowFallback := s.allowAPIKeyFallback(c.Request.Context(), provider, clientToken)
 	tried := map[string]bool{}
 	var up codexws.Conn
 	var a *auth.Auth
@@ -224,32 +227,21 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 		for id := range tried {
 			exclude = append(exclude, id)
 		}
-		// The ChatGPT WS backend only speaks OAuth — API-key relays are
-		// rejected below — so never let the pool fall back to one here.
 		cand := s.pool.AcquireWithOptions(c.Request.Context(), provider, clientToken, clientGroup, model, slotID, auth.AcquireOptions{
-			AllowAPIKeyFallback: false,
+			AllowAPIKeyFallback: allowFallback,
 			ExcludeIDs:          exclude,
 		})
 		if cand == nil {
 			break
 		}
 		tried[cand.ID] = true
-		if cand.Kind != auth.KindOAuth {
-			// API-key relays can't speak the ChatGPT WS backend.
+		target, ok := s.codexWSDialTarget(cand, clientToken, slotID, betaValue, routingModel, routingTier)
+		if !ok {
+			// A plain vendor API key speaks HTTP only — nothing to dial.
 			s.pool.Release(provider, clientToken, slotID)
 			continue
 		}
-		snap := cand.Snapshot()
-		accessToken, _ := cand.Credentials()
-		accountID, _ := cand.CodexIdentity()
-		header := codexws.BuildUpstreamHeaders(accessToken, accountID, slotID, betaValue, routingModel, routingTier)
-		conn, resp, derr := codexws.Dial(c.Request.Context(), codexws.DialConfig{
-			URL:       wsURL,
-			Header:    header,
-			ProxyURL:  snap.ProxyURL,
-			UseUTLS:   s.cfg.UseUTLS,
-			ReadLimit: s.cfg.CodexWS.ReadLimitBytes,
-		})
+		conn, resp, derr := codexws.Dial(c.Request.Context(), target)
 		// On a non-101 the body carries the upstream error; on success gorilla
 		// hands back a NopCloser over leftover bytes (the live conn lives on
 		// `conn`, not resp.Body), so closing here is safe either way. Headers
@@ -268,12 +260,8 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 			// frame when ALPN mis-negotiates), which gorilla renders as a long
 			// \x-escaped string. Cap it so a binary reply can't dump a screenful.
 			log.Warnf("codex ws: upstream dial via %s failed (status=%d): %s", cand.ID, status, truncate([]byte(derr.Error()), 200))
-			switch status {
-			case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
-				s.pool.ReportUpstreamError(cand, status, retryAfter)
+			if s.reportCodexWSDialFault(cand, status, retryAfter, derr) {
 				s.pool.Unstick(provider, clientToken, slotID)
-			default:
-				cand.MarkFailure(derr.Error())
 			}
 			s.pool.Release(provider, clientToken, slotID)
 			continue
@@ -283,11 +271,19 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 		break
 	}
 	if up == nil || a == nil {
-		closeCodexWS(clientConn, gorillaws.CloseTryAgainLater, "no upstream credential available")
+		// A close frame is all we have left — the upgrade is long done — so the
+		// reason has to carry the actionable part itself. Keep it under
+		// gorilla's 123-byte control-frame limit.
+		reason, logErr := "no upstream credential available", "ws: no upstream credential"
+		if !allowFallback && s.pool.HasAPIKeyFor(provider, clientGroup, model) {
+			reason = "no upstream credential at your rate; enable the upstream fallback in wallet settings to use pricier ones"
+			logErr = "ws: no upstream credential (token opted out of the pricier API-key channels still available)"
+		}
+		closeCodexWS(clientConn, gorillaws.CloseTryAgainLater, reason)
 		s.emitLog(requestlog.Record{
 			Client: clientName, ClientToken: maskClientToken(clientToken), Provider: provider, Model: model,
 			Stream: true, Path: "/v1/responses", Status: 503, DurationMs: time.Since(start).Milliseconds(),
-			Error: "ws: no upstream credential",
+			Error: logErr,
 		})
 		return
 	}
@@ -541,6 +537,16 @@ func codexTurnDelta(cur, billed usage.Counts) usage.Counts {
 // so the admin panel shows each turn's real cost as it happens rather than a
 // single hour-long row at the end.
 func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToken, clientName string, turn usage.Counts, dur time.Duration) {
+	// A WS session can also be served by a relay peer once the OAuth fleet is
+	// exhausted, and that credential carries its own markup — so the kind has to
+	// be read off the auth rather than assumed, both for the charge's source tag
+	// and for the row the admin panel groups by.
+	kind := "oauth"
+	source := "codex-oauth-ws:"
+	if a.Kind == auth.KindAPIKey {
+		kind = "apikey"
+		source = "codex-ws:"
+	}
 	var costUSD float64
 	var multiplier, billed float64 = 1, 0
 	if turn.Requests > 0 && clientToken != "" {
@@ -549,7 +555,7 @@ func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToke
 		if s.saas != nil {
 			multiplier, billed = s.saas.SettleCharge(context.WithoutCancel(c.Request.Context()),
 				clientToken, auth.ProviderOpenAI, model, costUSD,
-				apiKeyPriceOverride(a), "codex-oauth-ws:"+a.ID)
+				apiKeyPriceOverride(a), source+a.ID)
 		}
 	}
 	s.emitLog(requestlog.Record{
@@ -558,7 +564,7 @@ func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToke
 		Provider:    auth.ProviderOpenAI,
 		AuthID:      a.ID,
 		AuthLabel:   a.Label,
-		AuthKind:    "oauth",
+		AuthKind:    kind,
 		Model:       model,
 		Input:       turn.InputTokens,
 		Output:      turn.OutputTokens,
@@ -592,10 +598,123 @@ func closeCodexWS(conn *gorillaws.Conn, code int, reason string) {
 		time.Now().Add(2*time.Second))
 }
 
+// codexWSDialTarget builds the upstream WebSocket handshake for one credential,
+// or reports !ok when the credential cannot serve a WS session at all.
+//
+// Two kinds of upstream speak this protocol:
+//
+//   - OAuth (ChatGPT Plus/Pro/Team) — dials chatgpt.com's Codex WS backend with
+//     the codex-tui fingerprint, under the Chrome uTLS ClientHello.
+//   - A relay peer (an API key flagged relay_peer, i.e. a cooperating proxy
+//     running this same cc-core stack) — dials THAT proxy's own /v1/responses WS
+//     ingress with the API key as the client bearer token. This is what keeps WS
+//     sessions alive once the OAuth fleet is quota-exhausted: without it the
+//     handshake is already complete when the pool comes back empty, so there is
+//     no HTTP status left to send and the CLI just sees the socket close.
+//     Identity is stamped with cc-core/relay exactly as the HTTP path does
+//     (applyRelayIdentity), so the peer schedules each of our users onto its own
+//     slot instead of collapsing them onto one credential.
+//
+// A plain vendor API key gets !ok: third-party OpenAI-compatible relays serve
+// HTTP POST only, and dialing them would spend the handshake budget to collect a
+// 404 that also has to be kept off the credential's health record.
+func (s *Server) codexWSDialTarget(a *auth.Auth, clientToken, slotID, betaValue, routingModel, routingTier string) (codexws.DialConfig, bool) {
+	snap := a.Snapshot()
+	accessToken, _ := a.Credentials()
+
+	if a.Kind == auth.KindOAuth {
+		accountID, _ := a.CodexIdentity()
+		// Per-credential base URL override is allowed for vendor-relay setups,
+		// matching doForwardCodexOAuth.
+		base := s.cfg.ChatGPTBackendBaseURL
+		if snap.BaseURL != "" {
+			base = strings.TrimSuffix(strings.TrimRight(snap.BaseURL, "/"), "/codex")
+		}
+		return codexws.DialConfig{
+			URL:       codexWSUpstreamURL(base),
+			Header:    codexws.BuildUpstreamHeaders(accessToken, accountID, slotID, betaValue, routingModel, routingTier),
+			ProxyURL:  snap.ProxyURL,
+			UseUTLS:   s.cfg.UseUTLS,
+			ReadLimit: s.cfg.CodexWS.ReadLimitBytes,
+		}, true
+	}
+
+	if !a.RelayPeer {
+		return codexws.DialConfig{}, false
+	}
+	baseURL := strings.TrimRight(snap.BaseURL, "/")
+	if baseURL == "" {
+		baseURL = strings.TrimRight(s.cfg.OpenAIBaseURL, "/")
+	}
+	if baseURL == "" {
+		return codexws.DialConfig{}, false
+	}
+	// accountID is empty: Chatgpt-Account-Id names an upstream ChatGPT account,
+	// which is the peer's business to choose, not ours to assert.
+	header := codexws.BuildUpstreamHeaders(accessToken, "", slotID, betaValue, routingModel, routingTier)
+	relay.Apply(header, RelayPeerName, clientToken, slotID)
+	return codexws.DialConfig{
+		URL:      codexWSRelayURL(baseURL),
+		Header:   header,
+		ProxyURL: snap.ProxyURL,
+		// The peer is a cooperating proxy, not a Cloudflare-fronted vendor: the
+		// HTTP relay path dials it without uTLS too.
+		UseUTLS:   false,
+		ReadLimit: s.cfg.CodexWS.ReadLimitBytes,
+	}, true
+}
+
+// reportCodexWSDialFault records a failed WS handshake on the credential that
+// served it and reports whether the sticky assignment should be broken.
+//
+// The classification mirrors the HTTP paths rather than inventing a third one:
+// an API-key relay goes through reportCodexAPIKeyFault (breaker ladder,
+// Retry-After aware on 429), an OAuth credential through the pool's
+// ReportUpstreamError for the credential-scoped statuses. A status the shared
+// classifier calls the client's own fault — most usefully a 404/426 from a peer
+// whose WS ingress is disabled — touches no health state at all: the credential
+// is fine, it simply has no socket to offer, and quarantining it would take its
+// HTTP traffic down with it.
+func (s *Server) reportCodexWSDialFault(a *auth.Auth, status int, retryAfter time.Time, derr error) (unstick bool) {
+	if status != 0 && !classifyUpstreamStatus(status).retryable() {
+		log.Warnf("codex ws: %s answered the handshake with %d — not a credential fault, leaving health untouched", a.ID, status)
+		return false
+	}
+	if a.Kind == auth.KindAPIKey {
+		if status == 0 {
+			status = http.StatusBadGateway // transport failure: same class as a gateway error
+		}
+		s.reportCodexAPIKeyFault(a, status, retryAfter)
+		return true
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		s.pool.ReportUpstreamError(a, status, retryAfter)
+		return true
+	default:
+		a.MarkFailure(derr.Error())
+		return false
+	}
+}
+
+// codexWSRelayURL turns a relay peer's HTTP base URL into its Codex responses
+// WebSocket URL. The path join is the shared API-key rule
+// (mimicry.JoinCodexAPIKeyUpstreamURL), so a bare-origin peer keeps /v1 and one
+// configured with a path stays authoritative — exactly as on the HTTP path, so
+// a peer that works for POST /v1/responses works for the WS upgrade too.
+func codexWSRelayURL(base string) string {
+	return httpToWSURL(mimicry.JoinCodexAPIKeyUpstreamURL(base, "/v1/responses"))
+}
+
 // codexWSUpstreamURL turns the configured ChatGPT backend base (https://...
 // /backend-api) into the Codex responses WebSocket URL (wss://.../codex/responses).
 func codexWSUpstreamURL(base string) string {
-	u := strings.TrimRight(base, "/") + "/codex/responses"
+	return httpToWSURL(strings.TrimRight(base, "/") + "/codex/responses")
+}
+
+// httpToWSURL swaps an http(s) scheme for its WebSocket equivalent, leaving a
+// URL that already names one (or names none) alone.
+func httpToWSURL(u string) string {
 	switch {
 	case strings.HasPrefix(u, "https://"):
 		return "wss://" + strings.TrimPrefix(u, "https://")
