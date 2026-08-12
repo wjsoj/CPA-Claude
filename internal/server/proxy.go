@@ -147,16 +147,22 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 	if s.saas != nil && clientToken != "" {
 		bal, err := s.saas.PrecheckBalance(c.Request.Context(), clientToken)
 		if err != nil {
-			c.AbortWithStatusJSON(500, gin.H{"error": "wallet lookup failed: " + err.Error()})
+			// Fail open. This read is an optimisation — the authoritative debit
+			// happens at SettleCharge, which runs on its own connection after the
+			// response — so a transient SQLite contention on the way in must not
+			// cost a paying customer their request. It used to answer 500, which
+			// in the last 24h took three requests down for a lookup that would
+			// have succeeded on the retry the customer had to make by hand.
+			// Logged at error level because a *persistent* failure here means
+			// depleted wallets are being served, and that has to be visible.
+			log.Errorf("saas: wallet pre-check failed for %s, serving anyway: %v", maskClientToken(clientToken), err)
 			s.emitLog(requestlog.Record{
 				Client: clientName, ClientToken: maskClientToken(clientToken),
 				Provider: provider, Model: model, Stream: peek.Stream, Path: path,
-				Status: 500, DurationMs: time.Since(start).Milliseconds(),
-				Error: "wallet lookup failed",
+				DurationMs: time.Since(start).Milliseconds(), AttemptOnly: true,
+				Error: "wallet pre-check failed, served anyway: " + err.Error(),
 			})
-			return
-		}
-		if bal <= 0 {
+		} else if bal <= 0 {
 			c.Header("Retry-After", "60")
 			c.AbortWithStatusJSON(402, gin.H{
 				"error":       "insufficient balance",
@@ -180,8 +186,17 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 	// misleading 503 "all upstream credentials exhausted". If no API-key
 	// credential of this provider can serve the requested model, tell the
 	// client directly what's wrong.
-	if auth.NormalizeProvider(provider) == auth.ProviderOpenAI && path == "/v1/chat/completions" && !s.pool.HasAPIKeyFor(provider, clientGroup, model) {
+	//
+	// The token's own fallback opt-out lands here too: with it off, no API key
+	// is reachable however healthy the fleet is, so the request is just as
+	// unservable — and saying so up front beats cycling every OAuth credential
+	// to arrive at a 503 that never mentions the switch.
+	if auth.NormalizeProvider(provider) == auth.ProviderOpenAI && path == "/v1/chat/completions" &&
+		(!s.pool.HasAPIKeyFor(provider, clientGroup, model) || !s.allowAPIKeyFallback(c.Request.Context(), provider, clientToken)) {
 		msg := fmt.Sprintf("model %q is only available via /v1/responses on this server (no OpenAI-compatible API-key credential is configured for it); retry with the /v1/responses endpoint", model)
+		if !s.allowAPIKeyFallback(c.Request.Context(), provider, clientToken) && s.pool.HasAPIKeyFor(provider, clientGroup, model) {
+			msg = fmt.Sprintf("model %q is only reachable over /v1/chat/completions through upstream API keys that charge above your current rate, and this API key has opted out of those; either enable the upstream fallback in your wallet settings or use the /v1/responses endpoint", model)
+		}
 		c.AbortWithStatusJSON(400, gin.H{"error": msg})
 		s.emitLog(requestlog.Record{
 			Client: clientName, ClientToken: maskClientToken(clientToken), Provider: provider, Model: model,
@@ -290,7 +305,7 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 	var lastDeferred *deferredResponse
 	// Per-token opt-in: whether the OAuth-exhausted path may fall back to
 	// upstream API keys. Stable for the whole request, computed once.
-	allowFallback := s.allowAPIKeyFallback(clientToken)
+	allowFallback := s.allowAPIKeyFallback(c.Request.Context(), provider, clientToken)
 	// Set when OAuth preparation failed: a local identity-binding judgement,
 	// not a credential fault, so we stop trying OAuth credentials (they would
 	// all fail the same way) and go straight to an API key with the untouched
@@ -331,6 +346,14 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 				return
 			}
 			msg, retryAfter := s.poolUnavailable(provider, allowFallback)
+			// The most actionable failure of all: every remaining channel is one
+			// this token declined on price. Say so — and say what it would cost —
+			// or the user reads "all N credentials are out of quota" and waits for
+			// an operator who has nothing to fix. (A channel at or below their own
+			// rate is never withheld; see allowAPIKeyFallback.)
+			if !allowFallback && s.pool.HasAPIKeyFor(provider, clientGroup, model) {
+				msg += "; the only channels still available charge above your current rate, and this API key has opted out of those — enable the upstream fallback in your wallet settings to use them"
+			}
 			if preparationFallbackPending {
 				msg = "claude request preparation failed and no API-key fallback was available"
 			} else if len(tried) > 0 {
@@ -426,6 +449,11 @@ func (s *Server) emitLog(r requestlog.Record) {
 	s.reqLog.Log(r)
 }
 
+// poolRetryAfterCapSeconds bounds the Retry-After we hand a client when the
+// pool is empty. See the cooling branch in poolUnavailable for why an honest
+// quota-reset deadline is the wrong thing to put on the wire.
+const poolRetryAfterCapSeconds = 300
+
 // poolUnavailable explains why Acquire came back empty for this provider, so a
 // client sees what is actually wrong (and whether waiting will help) instead of
 // an opaque "no upstream credentials available".
@@ -486,6 +514,16 @@ func (s *Server) poolUnavailable(provider string, allowFallback bool) (string, i
 		wait := int(time.Until(soonest).Seconds()) + 1
 		if wait < 1 {
 			wait = 1
+		}
+		// The quota reset is the LAST way the pool recovers, not the first: a
+		// degraded credential re-probes itself, a saturated one frees a slot, and
+		// an operator can add or re-enable an account at any moment. A Codex
+		// weekly limit is ~5 days out, and handing that to a client as
+		// `Retry-After: 495000` tells it to stop trying for the rest of the week
+		// over a pool that is usually back within minutes. Cap the hint; the
+		// message still carries the honest reset time for a human to read.
+		if wait > poolRetryAfterCapSeconds {
+			wait = poolRetryAfterCapSeconds
 		}
 		return fmt.Sprintf("all %d %s credentials are rate-limited or out of quota; the earliest resets in %s",
 			total, want, time.Until(soonest).Round(time.Second)), wait
@@ -1737,22 +1775,79 @@ func (u usageJSON) toCounts() usage.Counts {
 	return c
 }
 
-// allowAPIKeyFallback decides whether a request may fall back to (marked-up)
-// upstream API keys once the self-run OAuth pool is exhausted. In non-SaaS
-// operator mode (billing disabled) the legacy always-fall-back behaviour is
-// kept. In SaaS mode it defaults ON for every token (stability first) and a
-// user may opt out per-token via the self-service Wallet setting — see
-// clienttoken.Token.UpstreamFallbackEnabled (nil = default on).
-func (s *Server) allowAPIKeyFallback(clientToken string) bool {
+// allowAPIKeyFallback decides whether a request may fall back to upstream API
+// keys once the self-run OAuth pool is exhausted. In non-SaaS operator mode
+// (billing disabled) the legacy always-fall-back behaviour is kept. In SaaS mode
+// it defaults ON for every token and a user may opt out per-token via the
+// self-service Wallet setting (clienttoken.Token.UpstreamFallbackEnabled, nil =
+// default on).
+//
+// What the opt-out means is narrower than it looks, and deliberately so: it says
+// "don't serve me from a channel that charges me MORE than I pay now", not
+// "leave me with nothing". Falling back to a channel billed at the user's own
+// group rate costs them exactly what the OAuth pool costs them, so refusing it
+// buys them nothing and hands them a 503 instead — which is precisely what
+// happened on 2026-08-12, when two users who had opted out (to avoid the 6×
+// anthropic relays) also lost the Codex relay that bills at parity, and took
+// 375 of the day's 494 Codex 503s between them.
+//
+// So an opted-out token still falls back whenever no reachable API key for this
+// provider would cost it more. With the switch ON nothing changes: every
+// channel, marked-up ones included, stays available.
+func (s *Server) allowAPIKeyFallback(ctx context.Context, provider, clientToken string) bool {
 	if s.billing == nil {
 		return true
 	}
-	if tok, ok := s.tokens.Lookup(clientToken); ok {
-		return tok.UpstreamFallbackEnabled()
+	tok, ok := s.tokens.Lookup(clientToken)
+	if !ok {
+		// Unknown token never reaches here in practice (auth gate runs first);
+		// be conservative and allow, matching the default-on policy.
+		return true
 	}
-	// Unknown token never reaches here in practice (auth gate runs first); be
-	// conservative and allow, matching the default-on policy.
-	return true
+	if tok.UpstreamFallbackEnabled() {
+		return true
+	}
+	return !s.apiKeyFallbackWouldCostMore(ctx, provider, clientToken)
+}
+
+// apiKeyFallbackWouldCostMore reports whether any API-key credential the pool
+// could pick for this provider would bill the user above their own group rate.
+//
+// It asks about the whole reachable set rather than one credential because the
+// gate the answer feeds (auth.AcquireOptions.AllowAPIKeyFallback) is a single
+// bool: the pool picks the key itself, so "cheap enough" has to hold for every
+// key it might land on. Disabled keys are skipped — they can never be picked —
+// and an unreadable wallet answers true, because the safe direction when the
+// price is unknown is to honour the user's opt-out rather than spend their money.
+func (s *Server) apiKeyFallbackWouldCostMore(ctx context.Context, provider, clientToken string) bool {
+	if s.saas == nil {
+		return false // no billing at all: nothing can cost more
+	}
+	groupMult, promoActive, ok := s.saas.GroupRate(ctx, clientToken, provider)
+	if !ok {
+		return true
+	}
+	if promoActive {
+		// A promotion outranks per-key overrides, so every channel bills the
+		// same and none of them can be the expensive one.
+		return false
+	}
+	want := auth.NormalizeProvider(provider)
+	for _, st := range s.pool.Status() {
+		if auth.NormalizeProvider(st.Auth.Provider) != want || st.Auth.Kind != auth.KindAPIKey || st.Auth.Disabled {
+			continue
+		}
+		live := s.pool.FindByID(st.Auth.ID)
+		if live == nil {
+			continue
+		}
+		// PriceMultiplierValue() == 0 means "no override" — the key bills at the
+		// user's own group rate, i.e. parity with the OAuth pool.
+		if m := live.PriceMultiplierValue(); m > 0 && m > groupMult {
+			return true
+		}
+	}
+	return false
 }
 
 // apiKeyPriceOverride returns the per-credential billing multiplier to pass to

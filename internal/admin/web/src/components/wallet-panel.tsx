@@ -343,8 +343,8 @@ function UpstreamFallbackCard({ token }: { token: string }) {
       setOn(s.upstream_fallback);
       toast.success(
         s.upstream_fallback
-          ? "已开启上游号池保底"
-          : "已关闭上游号池保底",
+          ? "已开启：故障时任何上游通道都可保底"
+          : "已关闭：故障时只用不比你现价更贵的通道保底",
       );
     } catch (e: any) {
       setOn(!next); // revert
@@ -366,13 +366,14 @@ function UpstreamFallbackCard({ token }: { token: string }) {
           />
           <div className="min-w-0">
             <div className="font-display text-base tracking-tight">
-              故障时使用上游号池（加价保底）
+              故障时使用加价的上游号池
             </div>
             <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
               <span className="text-foreground/80">默认开启</span>：当我们自营的订阅号池全部不可用时，你的请求会自动改用上游
               API key 继续服务，保证可用性（部分上游 key 会
               <span className="text-foreground/80">按更高倍率计费</span>）。
-              如果你不希望在故障时产生加价费用，可关闭——届时遇到号池故障会直接返回错误。
+              关闭后只是<span className="text-foreground/80">拒绝那些比你当前单价更贵的通道</span>；
+              与你现价持平或更便宜的备用通道仍会照常保底，不会因此白白报错。
             </p>
           </div>
         </div>

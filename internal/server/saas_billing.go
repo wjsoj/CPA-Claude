@@ -213,6 +213,37 @@ func (b *saasBilling) effectiveMultiplier(g *saasdb.PricingGroup, provider, mode
 	return mult, fmt.Sprintf("%s/%s × %.4f", provider, model, mult)
 }
 
+// GroupRate reports what this token pays when the serving credential carries no
+// per-key override — i.e. the price it is already paying on the OAuth pool —
+// and whether a promotion is in force.
+//
+// It exists so the router can answer one question before it gives up on a
+// request: would falling back to an upstream API key actually cost this user
+// more than what they are paying now? A promotion outranks per-key overrides
+// (see effectiveMultiplier), so while one is running every channel bills the
+// same and the question answers itself.
+//
+// ok=false means the wallet or group could not be read. Callers must treat that
+// as "assume it would cost more" — guessing cheap here would spend a user's
+// money on an assumption.
+func (b *saasBilling) GroupRate(ctx context.Context, token, provider string) (mult float64, promoActive, ok bool) {
+	if b == nil || b.db == nil {
+		return 0, false, false
+	}
+	if _, hit := promoFor(b.promos, provider, time.Now()); hit {
+		return 0, true, true
+	}
+	w, err := b.db.GetWallet(ctx, token)
+	if err != nil {
+		return 0, false, false
+	}
+	g, err := b.db.GetGroup(ctx, w.GroupID)
+	if err != nil {
+		return 0, false, false
+	}
+	return g.MultiplierFor(provider), false, true
+}
+
 // buildInvoiceHandler returns the per-deploy invoice handler when SaaS is
 // enabled, or nil when it isn't. Encapsulates the cfg.SaaS.Invoice →
 // runtime-deps wiring so server.New stays linear.

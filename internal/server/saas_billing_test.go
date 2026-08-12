@@ -7,10 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/wjsoj/CPA-Claude/internal/config"
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
+	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/clienttoken"
 )
 
@@ -48,8 +51,11 @@ func TestSettleChargeOverride(t *testing.T) {
 	}
 }
 
-// TestAllowAPIKeyFallback verifies the per-token gate: non-SaaS always allows
-// (legacy operator behaviour), SaaS defaults off and honours the opt-in.
+// TestAllowAPIKeyFallback verifies the per-token gate. Non-SaaS always allows
+// (legacy operator behaviour); under SaaS the switch defaults ON, and when a
+// user turns it OFF it only withholds channels that would charge them MORE than
+// their own group rate — a parity-priced channel still serves them, because
+// refusing it costs them a request and saves them nothing.
 func TestAllowAPIKeyFallback(t *testing.T) {
 	optOut := false
 	optIn := true
@@ -66,23 +72,82 @@ func TestAllowAPIKeyFallback(t *testing.T) {
 
 	// SaaS disabled (billing == nil) → always allowed.
 	off := &Server{tokens: store}
-	if !off.allowAPIKeyFallback("t1") {
+	if !off.allowAPIKeyFallback(context.Background(), auth.ProviderAnthropic, "t1") {
 		t.Fatal("non-SaaS mode must keep legacy always-fall-back")
 	}
 
-	// SaaS enabled → default ON, explicit opt-out respected.
-	on := &Server{tokens: store, billing: &billing.Handler{}}
-	if !on.allowAPIKeyFallback("t1") {
-		t.Fatal("unset token must default to fall-back ON")
+	db, err := saasdb.Open(filepath.Join(t.TempDir(), "fallback.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
 	}
-	if on.allowAPIKeyFallback("t2") {
-		t.Fatal("opted-out token must NOT fall back")
+	ctx := context.Background()
+	for _, tok := range []string{"t1", "t2", "t3"} {
+		if _, err := db.EnsureWallet(ctx, tok); err != nil {
+			t.Fatalf("ensure wallet %s: %v", tok, err)
+		}
 	}
-	if !on.allowAPIKeyFallback("t3") {
-		t.Fatal("opted-in token must fall back")
+	// A marked-up relay (0.12) next to a parity one (no override), mirroring
+	// production: anthropic has both, and the group rate is 0.05.
+	marked := &auth.Auth{ID: "apikey-marked", Kind: auth.KindAPIKey, Provider: auth.ProviderAnthropic, PriceMultiplier: 0.12}
+	parity := &auth.Auth{ID: "apikey-parity", Kind: auth.KindAPIKey, Provider: auth.ProviderOpenAI}
+
+	on := &Server{
+		tokens:  store,
+		billing: &billing.Handler{},
+		saas:    &saasBilling{db: db},
+		pool:    auth.NewPool(nil, []*auth.Auth{marked, parity}, 10*time.Minute, false, ""),
 	}
-	if !on.allowAPIKeyFallback("unknown") {
-		t.Fatal("unknown token defaults to fall-back ON")
+
+	if !on.allowAPIKeyFallback(ctx, auth.ProviderAnthropic, "t1") {
+		t.Error("unset token must default to fall-back ON")
+	}
+	if !on.allowAPIKeyFallback(ctx, auth.ProviderAnthropic, "t3") {
+		t.Error("opted-in token must fall back — including to the marked-up channel")
+	}
+	if !on.allowAPIKeyFallback(ctx, auth.ProviderAnthropic, "unknown") {
+		t.Error("unknown token defaults to fall-back ON")
+	}
+
+	// The opt-out, per provider.
+	if on.allowAPIKeyFallback(ctx, auth.ProviderAnthropic, "t2") {
+		t.Error("opted-out token must NOT be served by a channel billed above its group rate (0.12 > 0.05)")
+	}
+	if !on.allowAPIKeyFallback(ctx, auth.ProviderOpenAI, "t2") {
+		t.Error("opted-out token MUST still fall back to a parity-priced channel: " +
+			"withholding it costs the user a 503 and saves them nothing — this is the 2026-08-12 regression")
+	}
+}
+
+// A promotion outranks per-key overrides, so while one runs every channel bills
+// the same and even a marked-up one cannot be the expensive choice.
+func TestAllowAPIKeyFallbackDuringPromotion(t *testing.T) {
+	optOut := false
+	store := clienttoken.OpenInMemory()
+	if err := store.Add(clienttoken.Token{Token: "t2", UpstreamFallback: &optOut}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := saasdb.Open(filepath.Join(t.TempDir(), "promo.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := db.EnsureWallet(ctx, "t2"); err != nil {
+		t.Fatal(err)
+	}
+	marked := &auth.Auth{ID: "apikey-marked", Kind: auth.KindAPIKey, Provider: auth.ProviderAnthropic, PriceMultiplier: 0.12}
+	s := &Server{
+		tokens:  store,
+		billing: &billing.Handler{},
+		saas: &saasBilling{db: db, promos: []config.PricingPromotion{{
+			Provider:   "anthropic",
+			Multiplier: 0.001,
+			Start:      time.Now().Add(-time.Hour),
+			End:        time.Now().Add(time.Hour),
+		}}},
+		pool: auth.NewPool(nil, []*auth.Auth{marked}, 10*time.Minute, false, ""),
+	}
+	if !s.allowAPIKeyFallback(ctx, auth.ProviderAnthropic, "t2") {
+		t.Error("during a promotion every channel bills the same, so the opt-out has nothing to protect against")
 	}
 }
 
