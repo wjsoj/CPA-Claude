@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { cn, copyToClipboard } from "@/lib/utils";
-import { DOCS, DOC_GROUPS, docsAsMarkdown, findDoc, type DocSection } from "@/lib/docs";
+import { DOCS, DOC_GROUPS, docAsMarkdown, findDoc, type DocSection } from "@/lib/docs";
 
 // CopyButton is used for the whole-page and whole-set actions as well as for
 // every fenced code block, so the "copied" acknowledgement lives here rather
@@ -174,7 +174,6 @@ export function StatusDocsPanel() {
   }, [slug]);
 
   const doc = useMemo(() => findDoc(slug) ?? DOCS[0], [slug]);
-  const allMarkdown = useMemo(() => docsAsMarkdown(), []);
 
   const select = useCallback((s: string) => {
     setSlug(s);
@@ -232,17 +231,6 @@ export function StatusDocsPanel() {
               </div>
             ))}
           </div>
-          <div className="mt-3 border-t border-border/60 pt-3">
-            <CopyButton
-              text={allMarkdown}
-              label="复制全部文档"
-              done="全文已复制"
-              className="w-full"
-            />
-            <p className="mt-2 px-1 text-[11px] leading-snug text-muted-foreground">
-              复制后粘贴给 Claude Code / Codex，让它照着帮你完成配置。
-            </p>
-          </div>
         </Card>
       </nav>
 
@@ -260,7 +248,10 @@ export function StatusDocsPanel() {
                 <p className="mt-1.5 text-sm text-muted-foreground max-w-2xl">{doc.intro}</p>
               )}
             </div>
-            <CopyButton text={doc.body} label="复制本页" done="本页已复制" />
+            <div className="shrink-0 text-right">
+              <CopyButton text={docAsMarkdown(doc)} label="复制本页全文" done="已复制" />
+              <p className="mt-1.5 text-[11px] text-muted-foreground">粘贴给 Claude Code / Codex</p>
+            </div>
           </div>
         </header>
         <DocBody doc={doc} />
