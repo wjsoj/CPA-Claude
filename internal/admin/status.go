@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/wjsoj/CPA-Claude/internal/monitor"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/requestlog"
@@ -117,17 +118,168 @@ func anonymizeByClient(in map[string]requestlog.Aggregate) map[string]requestlog
 	return out
 }
 
-// ---- /status/api/dashboard ----
+// ---- shared credential-health serialization ----
 
-type statusDashboardPool struct {
+// authHealth is the per-credential health block. It is embedded verbatim into
+// every credential object we publish (the admin summary's rows and the public
+// overview's), so the panel and the status page parse one shape.
+//
+// The legacy booleans (healthy / disabled / quota_exceeded / hard_failure) are
+// kept alongside it on those structs for backwards compatibility, but `state`
+// is the field to read: seven situations do not fit in one bool, and collapsing
+// them is what let a channel be painted green the instant its circuit-breaker
+// deadline elapsed — before anything had confirmed it recovered.
+type authHealth struct {
+	// State is one of healthy | half_open | degraded | quota | cooling |
+	// hard_failed | disabled.
+	State string `json:"state"`
+	// Serving is whether the router will offer this credential traffic right
+	// now. It is NOT State == healthy: degraded and half-open both serve.
+	Serving bool `json:"serving"`
+	// Reason is human-facing, non-empty whenever State is not healthy.
+	Reason string `json:"reason,omitempty"`
+	// RetryAfterSeconds is when this credential is expected back, when that is
+	// knowable (cooling / quota). Absent or 0 = unknown.
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+	// ConsecutiveFailures is the raw counter feeding the degraded/hard-fail
+	// ladder. Published so the panel can show deterioration as a number rather
+	// than only as a colour.
+	ConsecutiveFailures int `json:"consecutive_failures"`
+	// QuarantineStrikes is the API-key circuit-breaker backoff step. It
+	// survives an expired deadline (that is exactly what makes a credential
+	// half-open), so a non-zero value with no quarantined_until is meaningful.
+	QuarantineStrikes int        `json:"quarantine_strikes"`
+	QuarantinedUntil  *time.Time `json:"quarantined_until,omitempty"`
+	LastSuccessAt     *time.Time `json:"last_success_at,omitempty"`
+}
+
+func newAuthHealth(r auth.HealthReport) authHealth {
+	v := authHealth{
+		State:               string(r.State),
+		Serving:             r.Serving,
+		Reason:              r.Reason,
+		ConsecutiveFailures: r.ConsecutiveFailures,
+		QuarantineStrikes:   r.QuarantineStrikes,
+	}
+	if v.State == "" {
+		v.State = string(auth.HealthHealthy)
+	}
+	if r.RetryAfter > 0 {
+		// Round up: a client that retries at the truncated second is early.
+		secs := int((r.RetryAfter + time.Second - 1) / time.Second)
+		v.RetryAfterSeconds = secs
+	}
+	if !r.QuarantineUntil.IsZero() {
+		t := r.QuarantineUntil
+		v.QuarantinedUntil = &t
+	}
+	if !r.LastSuccess.IsZero() {
+		t := r.LastSuccess
+		v.LastSuccessAt = &t
+	}
+	return v
+}
+
+// statusCounts is the pool-wide credential census, published on both the public
+// overview and the public dashboard.
+//
+// The seven state buckets partition the pool exactly: healthy + half_open +
+// degraded + quota + cooling + unhealthy + disabled == total. `unhealthy` is
+// the hard-failed bucket under its historical name — the old ladder put quota
+// and cooling credentials in it too (and, because hard_failure is always false
+// for an API key, a cooling key landed in NO bucket, so the buckets summed to
+// less than total). `serving` is orthogonal to the partition and overlaps
+// healthy/half_open/degraded; it is the count that answers "are we up".
+type statusCounts struct {
 	Total     int `json:"total"`
 	Healthy   int `json:"healthy"`
+	HalfOpen  int `json:"half_open"`
+	Degraded  int `json:"degraded"`
 	Quota     int `json:"quota"`
+	Cooling   int `json:"cooling"`
 	Unhealthy int `json:"unhealthy"`
 	Disabled  int `json:"disabled"`
+	Serving   int `json:"serving"`
 	OAuth     int `json:"oauth"`
 	APIKey    int `json:"apikey"`
+	Models    int `json:"models"`
 }
+
+// poolCensus is one walk of the credential pool, shared by the overview and the
+// dashboard so the two endpoints can never disagree about the same instant.
+type poolCensus struct {
+	Counts statusCounts
+	// Pools is keyed by normalized provider ("anthropic" | "openai").
+	Pools map[string]monitor.PoolHealthView
+	Auths []statusOverviewAuth
+}
+
+func (h *Handler) poolCensus() poolCensus {
+	out := poolCensus{
+		Pools: map[string]monitor.PoolHealthView{},
+		Auths: []statusOverviewAuth{},
+	}
+	byProvider := map[string][]auth.HealthReport{}
+	for _, st := range h.pool.Status() {
+		kind := "oauth"
+		if st.Auth.Kind == auth.KindAPIKey {
+			kind = "apikey"
+			out.Counts.APIKey++
+		} else {
+			out.Counts.OAuth++
+		}
+		out.Counts.Total++
+
+		rep := monitor.HealthReportFor(h.pool, st.Auth)
+		provider := auth.NormalizeProvider(st.Auth.Provider)
+		byProvider[provider] = append(byProvider[provider], rep)
+
+		if rep.Serving {
+			out.Counts.Serving++
+		}
+		switch rep.State {
+		case auth.HealthHealthy:
+			out.Counts.Healthy++
+		case auth.HealthHalfOpen:
+			out.Counts.HalfOpen++
+		case auth.HealthDegraded:
+			out.Counts.Degraded++
+		case auth.HealthQuota:
+			out.Counts.Quota++
+		case auth.HealthCooling:
+			out.Counts.Cooling++
+		case auth.HealthHardFailed:
+			out.Counts.Unhealthy++
+		case auth.HealthDisabled:
+			out.Counts.Disabled++
+		}
+
+		// Truncate label to 48 chars to keep the page defensive against
+		// operators who stuff private info (e.g. email) into the label.
+		label := st.Auth.Label
+		if len(label) > 48 {
+			label = label[:48] + "…"
+		}
+		out.Auths = append(out.Auths, statusOverviewAuth{
+			Kind:  kind,
+			Label: label,
+			Group: st.Auth.Group,
+			// Legacy booleans, unchanged in meaning for existing consumers.
+			Healthy:       rep.Healthy(),
+			Disabled:      rep.State == auth.HealthDisabled,
+			QuotaExceeded: rep.State == auth.HealthQuota,
+			HardFailure:   rep.State == auth.HealthHardFailed,
+			authHealth:    newAuthHealth(rep),
+		})
+	}
+	for provider, reports := range byProvider {
+		out.Pools[provider] = monitor.NewPoolHealthView(auth.NewPoolHealth(provider, reports))
+	}
+	out.Counts.Models = len(h.pricing.Models())
+	return out
+}
+
+// ---- /status/api/dashboard ----
 
 type statusDashboardRequests struct {
 	Summary  requestlog.Aggregate            `json:"summary"`
@@ -137,42 +289,26 @@ type statusDashboardRequests struct {
 }
 
 type statusDashboard struct {
-	Pool        statusDashboardPool     `json:"pool"`
-	Pricing     any                     `json:"pricing,omitempty"`
-	Requests14d statusDashboardRequests `json:"requests_14d"`
-	RequestsAll statusDashboardRequests `json:"requests_all"`
-	Hourly24h   []requestlog.HourBucket `json:"hourly_24h"`
+	// Counts carries what `pool` used to hold (total/healthy/quota/unhealthy/
+	// disabled/oauth/apikey, same key names) plus the new state buckets. The
+	// `pool` key now holds the per-provider health aggregate, matching
+	// /status/api/overview — one name, one meaning, on every endpoint.
+	Counts      statusCounts                      `json:"counts"`
+	Pool        map[string]monitor.PoolHealthView `json:"pool"`
+	Pricing     any                               `json:"pricing,omitempty"`
+	Requests14d statusDashboardRequests           `json:"requests_14d"`
+	RequestsAll statusDashboardRequests           `json:"requests_all"`
+	Hourly24h   []requestlog.HourBucket           `json:"hourly_24h"`
 }
 
 func (h *Handler) handleStatusDashboard(c *gin.Context) {
 	var out statusDashboard
 
-	// Pool health — same counts the /overview endpoint produces, inlined
-	// here so the SPA only needs one round trip for the dashboard tab.
-	for _, st := range h.pool.Status() {
-		out.Pool.Total++
-		if st.Auth.Kind == auth.KindAPIKey {
-			out.Pool.APIKey++
-		} else {
-			out.Pool.OAuth++
-		}
-		live := h.pool.FindByID(st.Auth.ID)
-		var healthy, hardFail bool
-		if live != nil {
-			healthy, hardFail, _, _ = live.HealthSnapshot()
-		}
-		quota := !st.Auth.QuotaExceededAt.IsZero()
-		switch {
-		case st.Auth.Disabled:
-			out.Pool.Disabled++
-		case quota:
-			out.Pool.Quota++
-		case hardFail || !healthy:
-			out.Pool.Unhealthy++
-		default:
-			out.Pool.Healthy++
-		}
-	}
+	// Pool health — the same walk the /overview endpoint does, inlined here so
+	// the SPA only needs one round trip for the dashboard tab.
+	census := h.poolCensus()
+	out.Counts = census.Counts
+	out.Pool = census.Pools
 
 	// Pricing (public — same shape admin /summary exposes).
 	if h.pricing != nil {
@@ -303,26 +439,24 @@ func (h *Handler) statusWindow24h() statusWindow24 {
 // ---- /status/api/overview ----
 
 type statusOverviewAuth struct {
-	Kind          string `json:"kind"`
-	Label         string `json:"label,omitempty"`
-	Group         string `json:"group,omitempty"`
-	Healthy       bool   `json:"healthy"`
-	Disabled      bool   `json:"disabled,omitempty"`
-	QuotaExceeded bool   `json:"quota_exceeded,omitempty"`
-	HardFailure   bool   `json:"hard_failure,omitempty"`
+	Kind  string `json:"kind"`
+	Label string `json:"label,omitempty"`
+	Group string `json:"group,omitempty"`
+	// Legacy booleans. Retained for backwards compatibility; `state` (from the
+	// embedded authHealth) is the authoritative field. Healthy here means
+	// strictly state == "healthy" — it is no longer the four-way AND that used
+	// to report a cooling API key as healthy.
+	Healthy       bool `json:"healthy"`
+	Disabled      bool `json:"disabled,omitempty"`
+	QuotaExceeded bool `json:"quota_exceeded,omitempty"`
+	HardFailure   bool `json:"hard_failure,omitempty"`
+	authHealth
 }
 
 type statusOverview struct {
-	Counts struct {
-		Total     int `json:"total"`
-		Healthy   int `json:"healthy"`
-		Quota     int `json:"quota"`
-		Unhealthy int `json:"unhealthy"`
-		Disabled  int `json:"disabled"`
-		OAuth     int `json:"oauth"`
-		APIKey    int `json:"apikey"`
-		Models    int `json:"models"`
-	} `json:"counts"`
+	Counts statusCounts `json:"counts"`
+	// Pool is the per-provider aggregate, keyed by normalized provider name.
+	Pool   map[string]monitor.PoolHealthView `json:"pool"`
 	Window struct {
 		Requests int64   `json:"requests"`
 		CostUSD  float64 `json:"cost_usd"`
@@ -333,50 +467,10 @@ type statusOverview struct {
 
 func (h *Handler) handleStatusOverview(c *gin.Context) {
 	var out statusOverview
-	out.Auths = []statusOverviewAuth{}
-	for _, st := range h.pool.Status() {
-		kind := "oauth"
-		if st.Auth.Kind == auth.KindAPIKey {
-			kind = "apikey"
-			out.Counts.APIKey++
-		} else {
-			out.Counts.OAuth++
-		}
-		out.Counts.Total++
-
-		live := h.pool.FindByID(st.Auth.ID)
-		var healthy, hardFail bool
-		if live != nil {
-			healthy, hardFail, _, _ = live.HealthSnapshot()
-		}
-		quota := !st.Auth.QuotaExceededAt.IsZero()
-		switch {
-		case st.Auth.Disabled:
-			out.Counts.Disabled++
-		case quota:
-			out.Counts.Quota++
-		case hardFail || !healthy:
-			out.Counts.Unhealthy++
-		default:
-			out.Counts.Healthy++
-		}
-		// Truncate label to 48 chars to keep the page defensive against
-		// operators who stuff private info (e.g. email) into the label.
-		label := st.Auth.Label
-		if len(label) > 48 {
-			label = label[:48] + "…"
-		}
-		out.Auths = append(out.Auths, statusOverviewAuth{
-			Kind:          kind,
-			Label:         label,
-			Group:         st.Auth.Group,
-			Healthy:       healthy && !quota && !hardFail && !st.Auth.Disabled,
-			Disabled:      st.Auth.Disabled,
-			QuotaExceeded: quota,
-			HardFailure:   hardFail,
-		})
-	}
-	out.Counts.Models = len(h.pricing.Models())
+	census := h.poolCensus()
+	out.Counts = census.Counts
+	out.Pool = census.Pools
+	out.Auths = census.Auths
 
 	// 24h aggregate across the whole pool (cached; see statusWindow24h).
 	if h.cfg.LogDir != "" {

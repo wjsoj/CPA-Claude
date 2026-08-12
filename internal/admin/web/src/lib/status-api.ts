@@ -1,30 +1,66 @@
 import { ApiError } from "./api";
+import type { CredStateFields } from "./cred-state";
+
+// Per-credential health as the public endpoints report it. The seven-state
+// `state` field is authoritative — see lib/cred-state.ts. The legacy booleans
+// are still present on the wire and still typed here, but nothing should read
+// them except the transitional fallback inside credState().
+export interface StatusAuthRow extends CredStateFields {
+  kind: "oauth" | "apikey";
+  provider?: string;
+  label?: string;
+  group?: string;
+  healthy: boolean;
+}
+
+/**
+ * Fleet counts. The seven state buckets partition the pool:
+ *
+ *   healthy + half_open + degraded + quota + cooling + unhealthy + disabled == total
+ *
+ * `unhealthy` is exactly the hard_failed bucket (it is no longer a catch-all).
+ * `serving` is ORTHOGONAL — it overlaps healthy/half_open/degraded and must
+ * never be added into that sum.
+ */
+export interface StatusCounts {
+  total: number;
+  healthy: number;
+  half_open: number;
+  degraded: number;
+  quota: number;
+  cooling: number;
+  unhealthy: number;
+  disabled: number;
+  serving: number;
+  oauth: number;
+  apikey: number;
+  models: number;
+}
+
+/** Per-provider availability, keyed by normalized provider ("anthropic" /
+ *  "openai"). A provider with no credentials at all is simply absent. */
+export type PoolWire = Record<
+  string,
+  {
+    available: boolean;
+    total: number;
+    serving: number;
+    worst_state: string;
+    by_state: Record<string, number>;
+  }
+>;
 
 export interface StatusOverview {
-  counts: {
-    total: number;
-    healthy: number;
-    quota: number;
-    unhealthy: number;
-    disabled: number;
-    oauth: number;
-    apikey: number;
-    models: number;
-  };
+  counts: StatusCounts;
   window_24h: {
     requests: number;
     cost_usd: number;
     errors: number;
   };
-  auths: {
-    kind: "oauth" | "apikey";
-    label?: string;
-    group?: string;
-    healthy: boolean;
-    disabled?: boolean;
-    quota_exceeded?: boolean;
-    hard_failure?: boolean;
-  }[];
+  // Pool availability, keyed by provider. Run it through normalizePools(),
+  // which also copes with a server that predates the field.
+  pool?: PoolWire;
+  auths: StatusAuthRow[];
 }
 
 export interface StatusRecent {
@@ -134,15 +170,12 @@ export function loadStatusOverview(): Promise<StatusOverview> {
 // Shape matches internal/admin/status.go statusDashboard. by_client keys
 // are deterministic pseudonyms (Alice/Bob/...), not real customer labels.
 export interface StatusDashboardResp {
-  pool: {
-    total: number;
-    healthy: number;
-    quota: number;
-    unhealthy: number;
-    disabled: number;
-    oauth: number;
-    apikey: number;
-  };
+  // NOTE: what used to be `pool` (the flat total/healthy/quota/... object) is
+  // now `counts`. The `pool` key belongs to the per-provider availability
+  // aggregate. Reading `data.pool.total` yields undefined against the current
+  // server — go through `counts` or normalizePools(data.pool).
+  counts?: StatusCounts;
+  pool?: PoolWire;
   pricing?: import("./types").Pricing;
   requests_14d: {
     summary: import("./types").RequestAgg;
@@ -171,8 +204,10 @@ export interface MonitorSample {
   status: number;
   latency_ms: number;
   err?: string;
-  // True when the passive pool had a healthy credential at probe time. Global
-  // health defers to pool capacity, so this overrides a failing probe status.
+  // Historical: the frontend used to treat this as an override that turned a
+  // failed probe green. It no longer does — the uptime strips render `ok`
+  // exactly as the backend recorded it. Kept on the type only because old
+  // persisted samples still carry it.
   pool_healthy?: boolean;
 }
 
@@ -191,6 +226,13 @@ export interface MonitorProvider {
   slot_available: boolean;
   healthy_creds: number;
   total_creds: number;
+  // Seven-state contract additions. serving_creds ≥ healthy_creds: a
+  // credential can be carrying traffic while still unverified or degraded.
+  // healthy_creds now counts state === "healthy" only.
+  serving_creds?: number;
+  cooling_creds?: number;
+  worst_state?: string;
+  by_state?: Record<string, number>;
   probe_enabled: boolean;
   last_probe?: MonitorSample;
   uptime_90d: MonitorDay[];

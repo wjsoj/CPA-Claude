@@ -1087,6 +1087,15 @@ recoveredFromSignature:
 		rewriteClientModel = model
 	}
 
+	// The health verdict is computed here and applied only once the body has
+	// been fully relayed (markResponseHealth, below). MarkSuccess used to fire
+	// on this line — before a single byte of the response had been read — so a
+	// 200 whose body was an error envelope, or an SSE stream carrying nothing
+	// but `event: error`, or a stream cut off mid-flight, all counted as
+	// successes and wiped the credential's failure counters. See
+	// responseOutcome in upstream_health.go for why a 200 is not evidence.
+	var outcome responseOutcome
+
 	if stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		// Headers commit lazily on the first byte, so a stream that breaks
 		// before any output reaches the client can transparently fail over to
@@ -1108,22 +1117,38 @@ recoveredFromSignature:
 				a.ID, attempts, time.Since(start).Round(time.Millisecond), res.err)
 			return true, false, nil
 		}
-		a.MarkSuccess()
+		outcome.errorPayload = res.sawError
+		outcome.detail = res.errDetail
 		if !res.sawTerminal {
+			outcome.truncated = true
+			outcome.clientGone = isClientDisconnect(c.Request.Context(), res.err)
+			if outcome.detail == "" {
+				outcome.detail = errString(res.err)
+			}
 			log.Warnf("proxy: SSE truncated mid-stream via %s (attempt %d, events=%d, bytes=%d, %s): %v",
 				a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond), res.err)
 		}
+		if res.sawError {
+			log.Warnf("proxy: %s streamed a 200 whose only terminal event was `error` — counting it as a credential failure. frame=%s",
+				a.ID, res.errDetail)
+		}
 	} else {
 		writeResponseHeaders(c, resp)
-		a.MarkSuccess()
 		respBody, _ := io.ReadAll(resp.Body)
 		if rewriteClientModel != "" {
 			respBody = rewriteResponseModel(respBody, rewriteClientModel)
 		}
 		c.Writer.Write(respBody)
 		counts.Add(extractUsageFromJSON(respBody, &sub))
+		if isErr, detail := bodyLooksLikeAPIError(respBody); isErr {
+			outcome.errorPayload = true
+			outcome.detail = detail
+			log.Warnf("proxy: %s returned %d with an error envelope — counting it as a credential failure. body=%s",
+				a.ID, resp.StatusCode, detail)
+		}
 	}
 	_ = resp.Body.Close()
+	markResponseHealth(a, resp.StatusCode, outcome)
 
 	// Auth-side ledger: every request this credential served counts toward its
 	// load, whether or not the upstream reported usage. Requests is restored on
@@ -1297,7 +1322,11 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	client := auth.ClientFor(a.ProxyURL, false)
 	resp, err := client.Do(upReq)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		// The client hanging up is not a channel fault: every other credential
+		// would hit the same dead context and get falsely blamed. Record the
+		// cancel hint and stop — no failure, no retry.
+		if isClientDisconnect(ctx, err) {
+			a.MarkClientCancel(errString(err))
 			log.Infof("proxy(apikey): client canceled via %s: %v", a.ID, err)
 			s.emitLog(requestlog.Record{
 				Client: clientName, ClientToken: maskClientToken(clientToken),
@@ -1307,16 +1336,24 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 			})
 			return false, true, nil
 		}
-		log.Warnf("proxy(apikey): upstream transport error via %s: %v", a.ID, err)
+		// Transport/gateway failure. This used to hand the client a bare 502
+		// and stop, so a fleet of API keys behaved like a fleet of one: the
+		// FIRST key's dead socket ended the request and the remaining keys
+		// were never tried. It is exactly the class a retryable 5xx is — the
+		// upstream is unreachable, another channel may well be — so roll back
+		// to the failover loop, which excludes this credential and tries the
+		// next. Nothing has been written downstream yet, so the retry is
+		// transparent. Matches the OAuth path and the Codex API-key path.
+		log.Warnf("proxy(apikey): upstream transport error via %s: %v — rotating to next credential", a.ID, err)
 		a.MarkFailure(fmt.Sprintf("transport: %v", err))
-		c.AbortWithStatusJSON(502, gin.H{"error": err.Error()})
 		s.emitLog(requestlog.Record{
 			Client: clientName, ClientToken: maskClientToken(clientToken),
 			Provider: auth.NormalizeProvider(a.Provider), AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
 			Model: model, Stream: stream, Path: path, Status: 502,
 			DurationMs: time.Since(start).Milliseconds(), Attempts: attempts, Error: err.Error(),
+			AttemptOnly: true,
 		})
-		return false, true, nil
+		return true, false, nil
 	}
 
 	// Decompress upstream gzip/br before reading. Some relays emit gzipped
@@ -1425,19 +1462,23 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	fault := classifyUpstreamStatus(statusForFault)
 	switch fault {
 	case faultNone:
-		a.MarkSuccess()
-	case faultCredential:
-		// Revoked, forbidden, or out of funds — definitive, so cc-core pauses
-		// the channel on this single strike rather than re-presenting a dead
-		// key on every subsequent request. Still never sticky for an API key:
-		// the pause expires by itself.
-		a.MarkHardFailure(fmt.Sprintf("upstream %d", statusForFault))
-	case faultUpstream:
-		// Throttling, gateway errors, or a contract violation. Not a verdict
-		// on the key itself, so it takes several in a row before cc-core
-		// pauses the channel — enough to ride out the ordinary weather of a
-		// shared relay without pausing anything that still works.
-		a.MarkFailure(fmt.Sprintf("upstream %d", statusForFault))
+		// Deliberately NO MarkSuccess here. A <400 status line is written
+		// before the model has produced anything, so it is not evidence the
+		// exchange worked — the body still has to be inspected. The verdict is
+		// applied by markResponseHealth once the body has been relayed.
+	case faultCredential, faultUpstream:
+		// faultCredential (revoked / forbidden / out of funds) is definitive,
+		// so the channel pauses on this single strike rather than
+		// re-presenting a dead key on every subsequent request.
+		//
+		// faultUpstream (throttling, gateway errors, a contract violation) is
+		// not a verdict on the key itself, so it takes several in a row — with
+		// one exception: a 429 goes through the pool's throttling path so the
+		// upstream's own Retry-After is honoured instead of being discarded in
+		// favour of a guess. See reportAnthropicAPIKeyFault.
+		//
+		// Neither is ever sticky for an API key: every pause expires by itself.
+		s.reportAnthropicAPIKeyFault(a, statusForFault, parseRetryAfter(resp.Header), "")
 	case faultClient:
 		// The caller's own request is at fault (400 malformed, 404 route not
 		// implemented by this relay, 413 too large, …). Another credential
@@ -1464,6 +1505,8 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	var counts usage.Counts
 	var sub advisor.SubUsage
 	var errSnippet string
+	// Deferred health verdict for a <400 exchange — see responseOutcome.
+	var outcome responseOutcome
 	if resp.StatusCode >= 400 {
 		// Capture upstream body for the request log + warning. Without
 		// this, API-key 4xx is silent — only the gin access line shows
@@ -1492,9 +1535,22 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 			// passthrough path. The relay still adds keepalive + truncation
 			// detection so a broken stream is logged, not silently swallowed.
 			res := streamSSE(c, resp, &counts, &sub, rewriteClientModel, nil)
-			if !res.sawTerminal && !isClientDisconnect(c.Request.Context(), res.err) {
-				log.Warnf("proxy(apikey): SSE truncated mid-stream via %s (events=%d, bytes=%d, %s): %v",
-					a.ID, res.events, res.bytes, time.Since(start).Round(time.Millisecond), res.err)
+			outcome.errorPayload = res.sawError
+			outcome.detail = res.errDetail
+			if !res.sawTerminal {
+				outcome.truncated = true
+				outcome.clientGone = isClientDisconnect(c.Request.Context(), res.err)
+				if outcome.detail == "" {
+					outcome.detail = errString(res.err)
+				}
+				if !outcome.clientGone {
+					log.Warnf("proxy(apikey): SSE truncated mid-stream via %s (events=%d, bytes=%d, %s): %v",
+						a.ID, res.events, res.bytes, time.Since(start).Round(time.Millisecond), res.err)
+				}
+			}
+			if res.sawError {
+				log.Warnf("proxy(apikey): %s streamed a 200 whose only terminal event was `error` — counting it as a credential failure. frame=%s",
+					a.ID, res.errDetail)
 			}
 		} else {
 			respBody, _ := io.ReadAll(resp.Body)
@@ -1503,9 +1559,16 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 			}
 			c.Writer.Write(respBody)
 			counts.Add(extractUsageFromJSON(respBody, &sub))
+			if isErr, detail := bodyLooksLikeAPIError(respBody); isErr {
+				outcome.errorPayload = true
+				outcome.detail = detail
+				log.Warnf("proxy(apikey): %s returned %d with an error envelope — counting it as a credential failure. body=%s",
+					a.ID, resp.StatusCode, detail)
+			}
 		}
 	}
 	_ = resp.Body.Close()
+	markResponseHealth(a, resp.StatusCode, outcome)
 
 	var costUSD float64
 	var multiplier, billedMain float64 = 1, 0
@@ -1661,6 +1724,15 @@ func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, sub *a
 	flusher, _ := c.Writer.(http.Flusher)
 	sc := ccstream.NewSSEScanner(resp.Body, 64*1024)
 	events := 0
+	// sawError is tracked separately from sawTerminal because the two answer
+	// different questions. `event: error` IS terminal — the stream is over, so
+	// the relay must stop — but it is the opposite of a healthy exchange. They
+	// were conflated, which meant an SSE body consisting of nothing but an
+	// error frame set sawTerminal=true and walked straight into MarkSuccess.
+	// A 200 is all the upstream can send once an SSE stream has begun, so the
+	// error frame is the ONLY place the failure is visible.
+	sawError := false
+	errDetail := ""
 
 	// next supplies framing + model-rewrite + usage to the shared relay; the
 	// relay (cc-core/stream.Relay) owns keepalive + lazy commit + write locking.
@@ -1689,8 +1761,14 @@ func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, sub *a
 			case "message_start", "message_delta":
 				mergeSSEUsage(counts, sub, payload)
 				events++
-			case "message_stop", "error":
+			case "message_stop":
 				terminal = true
+			case "error":
+				terminal = true
+				sawError = true
+				if errDetail == "" {
+					errDetail = truncate(payload, 200)
+				}
 			}
 			// Strip the upstream request id out of error frames. Gated on the
 			// event name inside cc-core, so the thousands of delta frames in a
@@ -1714,18 +1792,23 @@ func streamSSE(c *gin.Context, resp *http.Response, counts *usage.Counts, sub *a
 		KeepalivePayload: []byte("event: ping\ndata: {\"type\": \"ping\"}\n\n"),
 		Next:             next,
 	})
-	return sseRelayResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err}
+	return sseRelayResult{
+		sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events,
+		bytes: r.Bytes, err: r.Err, sawError: sawError, errDetail: errDetail,
+	}
 }
 
 // sseRelayResult reports the outcome of an Anthropic SSE relay so the caller can
 // choose between a transparent retry (nothing reached the client yet) and a
 // logged give-up (bytes already committed downstream — uninterruptible).
 type sseRelayResult struct {
-	sawTerminal bool  // message_stop / error event relayed
-	wroteAny    bool  // at least one byte was committed to the client
-	events      int   // message_start/_delta events relayed (diagnostics)
-	bytes       int64 // bytes written downstream (diagnostics)
-	err         error // underlying read error when the stream broke early
+	sawTerminal bool   // message_stop / error event relayed — the stream ended
+	sawError    bool   // the terminal event was `error`, i.e. a failed exchange
+	errDetail   string // first error frame payload (health note / diagnostics)
+	wroteAny    bool   // at least one byte was committed to the client
+	events      int    // message_start/_delta events relayed (diagnostics)
+	bytes       int64  // bytes written downstream (diagnostics)
+	err         error  // underlying read error when the stream broke early
 }
 
 // usageJSON is the wire shape of `usage` (and `message.usage`) on /v1/messages.

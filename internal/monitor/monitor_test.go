@@ -13,8 +13,9 @@ func TestRecordRollupAndPrune(t *testing.T) {
 
 	m.record(auth.ProviderAnthropic, Sample{TS: day, OK: true, LatencyMs: 100})
 	m.record(auth.ProviderAnthropic, Sample{TS: day.Add(time.Minute), OK: false, Status: 500})
-	// A 4xx probe rejection (probe bypasses OAuth) is "no signal", counted as
-	// healthy in the rollup — only the 5xx above should dock the day.
+	// A 4xx is a failed request and now docks the day like any other. The old
+	// rule counted it as "no signal" and green, which is how the strip stayed
+	// at 100% through outages.
 	m.record(auth.ProviderAnthropic, Sample{TS: day.Add(2 * time.Minute), OK: false, Status: 400})
 	m.record(auth.ProviderAnthropic, Sample{TS: day.Add(3 * time.Minute), OK: true})
 
@@ -23,7 +24,7 @@ func TestRecordRollupAndPrune(t *testing.T) {
 		t.Fatal("provider store not created")
 	}
 	d := st.Days["2026-05-29"]
-	if d == nil || d.Total != 4 || d.OK != 3 {
+	if d == nil || d.Total != 4 || d.OK != 2 {
 		t.Fatalf("day rollup wrong: %+v", d)
 	}
 	if st.Last == nil || !st.Last.OK {
@@ -41,17 +42,22 @@ func TestRecordRollupAndPrune(t *testing.T) {
 	}
 }
 
-func TestHealthySignalDefersToPool(t *testing.T) {
+// A sample is green only if the request actually succeeded. Every "no signal"
+// excuse the old rule carried — pool-healthy override, CF 520–527, transport
+// timeout, 4xx — is gone: those are failed requests and the uptime history has
+// to say so.
+func TestHealthySignalIsSuccessOnly(t *testing.T) {
 	cases := []struct {
 		name string
 		s    Sample
 		want bool
 	}{
 		{"2xx ok", Sample{OK: true, Status: 200}, true},
-		{"5xx, pool healthy → still healthy (no signal)", Sample{OK: false, Status: 500, PoolHealthy: true}, true},
-		{"5xx, pool dead → red", Sample{OK: false, Status: 500}, false},
-		{"CF 52x, pool dead → still healthy (transport)", Sample{OK: false, Status: 522}, true},
-		{"4xx probe rejection, pool dead → still healthy", Sample{OK: false, Status: 400}, true},
+		{"5xx with stale PoolHealthy stamp → red", Sample{OK: false, Status: 500, PoolHealthy: true}, false},
+		{"5xx → red", Sample{OK: false, Status: 500}, false},
+		{"CF 52x transport failure → red", Sample{OK: false, Status: 522}, false},
+		{"transport error / timeout → red", Sample{OK: false, Status: 0, Err: "context deadline exceeded"}, false},
+		{"4xx probe rejection → red", Sample{OK: false, Status: 400}, false},
 		{"503 passive sample, no creds → red", Sample{OK: false, Status: 503}, false},
 	}
 	for _, c := range cases {
@@ -104,6 +110,28 @@ func TestUptimePct(t *testing.T) {
 	}
 }
 
+// snap builds a ProviderSnapshot from a state census, keeping the derived
+// fields consistent the way GetSnapshot does.
+func snap(slot bool, byState map[auth.HealthState]int) ProviderSnapshot {
+	ps := ProviderSnapshot{SlotAvailable: slot, ByState: map[string]int{}}
+	for _, s := range AllStates {
+		n := byState[s]
+		ps.ByState[string(s)] = n
+		ps.TotalCreds += n
+		switch s {
+		case auth.HealthHealthy, auth.HealthHalfOpen, auth.HealthDegraded:
+			ps.ServingCreds += n
+		case auth.HealthCooling:
+			ps.CoolingCreds += n
+		}
+	}
+	ps.HealthyCreds = ps.ByState[string(auth.HealthHealthy)]
+	return ps
+}
+
+// deriveStatus has exactly three branches and they key off serving, never off
+// the "healthy" count (which used to include a credential whose circuit breaker
+// had merely expired).
 func TestDeriveStatus(t *testing.T) {
 	cases := []struct {
 		name string
@@ -111,23 +139,31 @@ func TestDeriveStatus(t *testing.T) {
 		want string
 	}{
 		{"no creds", ProviderSnapshot{TotalCreds: 0}, "down"},
-		{"all unhealthy", ProviderSnapshot{TotalCreds: 3, HealthyCreds: 0}, "down"},
-		{"healthy + slot + probe ok", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: true}}, "operational"},
-		// Global health defers to pool capacity: the probe hits ONE api-key
-		// credential and never OAuth, so even a genuine upstream 5xx must NOT
-		// degrade the badge while healthy credentials remain.
-		{"healthy + slot + probe fail (5xx provider error)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 500}}, "operational"},
-		{"healthy + slot + probe nodata (transport err)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 0}}, "operational"},
-		// Cloudflare 52x is a CF↔origin transport failure, not an origin 5xx —
-		// it must NOT degrade the badge (same class as a Status==0 timeout).
-		{"healthy + slot + probe 522 (CF edge timeout)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 522}}, "operational"},
-		// A 4xx is a probe-side rejection (the probe bypasses OAuth), not a
-		// provider outage — it must NOT degrade the badge.
-		{"healthy + slot + probe 400 (bad probe body)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 400}}, "operational"},
-		{"healthy + slot + probe 403 (key rejected)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 403}}, "operational"},
-		{"healthy + slot + probe 429 (per-key rate limit)", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: true, ProbeEnabled: true, LastProbe: &Sample{OK: false, Status: 429}}, "operational"},
-		{"healthy but saturated", ProviderSnapshot{TotalCreds: 2, HealthyCreds: 2, SlotAvailable: false}, "degraded"},
-		{"passive only, slot free", ProviderSnapshot{TotalCreds: 1, HealthyCreds: 1, SlotAvailable: true}, "operational"},
+
+		// --- branch 1: serving == 0 → down ---
+		{"all hard-failed", snap(true, map[auth.HealthState]int{auth.HealthHardFailed: 3}), "down"},
+		{"all cooling", snap(true, map[auth.HealthState]int{auth.HealthCooling: 2}), "down"},
+		{"all quota", snap(true, map[auth.HealthState]int{auth.HealthQuota: 2}), "down"},
+		{"all disabled", snap(true, map[auth.HealthState]int{auth.HealthDisabled: 2}), "down"},
+
+		// --- branch 2: serving > 0 with half_open/degraded/cooling → degraded ---
+		{"one half-open among the dead", snap(true, map[auth.HealthState]int{auth.HealthHardFailed: 4, auth.HealthHalfOpen: 1}), "degraded"},
+		{"healthy + degraded", snap(true, map[auth.HealthState]int{auth.HealthHealthy: 2, auth.HealthDegraded: 1}), "degraded"},
+		{"healthy + one cooling", snap(true, map[auth.HealthState]int{auth.HealthHealthy: 2, auth.HealthCooling: 1}), "degraded"},
+
+		// --- branch 3: all verified-good ---
+		{"all healthy + slot", snap(true, map[auth.HealthState]int{auth.HealthHealthy: 2}), "operational"},
+		{"all healthy but saturated", snap(false, map[auth.HealthState]int{auth.HealthHealthy: 2}), "degraded"},
+		{"healthy + quota sibling, slot free", snap(true, map[auth.HealthState]int{auth.HealthHealthy: 1, auth.HealthQuota: 1}), "operational"},
+
+		// The active probe never factors in — it hits ONE api-key credential
+		// and never OAuth, so it cannot speak for pool capacity.
+		{"probe 5xx but pool fine", func() ProviderSnapshot {
+			ps := snap(true, map[auth.HealthState]int{auth.HealthHealthy: 2})
+			ps.ProbeEnabled = true
+			ps.LastProbe = &Sample{OK: false, Status: 500}
+			return ps
+		}(), "operational"},
 	}
 	for _, c := range cases {
 		if got := deriveStatus(c.ps); got != c.want {

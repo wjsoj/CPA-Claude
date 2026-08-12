@@ -1,6 +1,8 @@
 // API response types. Hand-derived from internal/admin/admin.go — keep in
 // sync when the Go structs change.
 
+import type { CredStateFields } from "./cred-state";
+
 export interface Counts {
   input_tokens?: number;
   output_tokens?: number;
@@ -26,7 +28,7 @@ export interface UsageSummary {
 
 export type Provider = "anthropic" | "openai";
 
-export interface AuthRow {
+export interface AuthRow extends CredStateFields {
   id: string;
   kind: "oauth" | "apikey";
   provider: Provider;
@@ -50,6 +52,13 @@ export interface AuthRow {
    * API-key circuit breaker. Set while the channel is paused after repeated
    * upstream failures; the pause expires on its own and one good response
    * clears it. Absent = circuit closed.
+   *
+   * NOTE: `quarantined_until`, `quarantine_strikes`, `state`, `serving`,
+   * `reason`, `retry_after_seconds`, `consecutive_failures` and
+   * `last_success_at` all come from CredStateFields. Read them through
+   * credState()/credServing() rather than testing them individually — the
+   * whole point of the seven-state contract is that the ladder lives in one
+   * place.
    */
   quarantined_until?: string;
   quarantine_strikes?: number;

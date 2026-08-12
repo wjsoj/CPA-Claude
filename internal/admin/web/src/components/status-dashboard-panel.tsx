@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { loadStatusDashboard, type StatusDashboardResp } from "@/lib/status-api";
 import { DashboardBoard } from "./dashboard-board";
+import { mergePools, normalizePools } from "@/lib/cred-state";
 
 interface Props {
   refreshTick: number;
@@ -31,9 +32,14 @@ export function StatusDashboardPanel({ refreshTick }: Props) {
     load();
   }, [load, refreshTick]);
 
+  // `pool` arrives provider-grouped; the pie shows the fleet, so merge. If the
+  // server predates the seven-state contract normalizePools yields nothing and
+  // the chart renders its own empty state rather than a wrong one.
+  const merged = data ? mergePools(normalizePools(data.pool)) : null;
+
   return (
     <DashboardBoard
-      pool={data ? { ...data.pool } : null}
+      pool={merged && merged.total > 0 ? { total: merged.total, by_state: merged.by_state } : null}
       pricing={data?.pricing}
       reqData={data?.requests_14d ?? null}
       lifetimeData={data?.requests_all ?? null}

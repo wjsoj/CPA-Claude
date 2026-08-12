@@ -163,8 +163,16 @@ func TestAPIKeyUpstreamFaultCountsTowardHealth(t *testing.T) {
 	if !retry || deferred == nil || deferred.status != http.StatusTooManyRequests {
 		t.Fatalf("a 429 must be withheld and retried; got retry=%v deferred=%+v", retry, deferred)
 	}
-	if _, _, _, consecutive := cred.HealthSnapshot(); consecutive != 1 {
-		t.Fatalf("ConsecutiveFailures = %d, want 1 — throttling is an upstream fault and must be visible to operators", consecutive)
+	// A 429 no longer takes the generic MarkFailure branch: it goes through the
+	// pool's throttling path (ReportUpstreamError), which cools the credential
+	// down instead of ticking the consecutive-failure counter. Throttling means
+	// "come back later", not "this key is breaking" — and the cooldown is what
+	// actually keeps the pool from re-picking it in the meantime.
+	if !cred.IsQuotaExceeded(time.Now()) {
+		t.Fatal("a 429 must cool the credential down so the pool stops routing to it")
+	}
+	if _, _, _, consecutive := cred.HealthSnapshot(); consecutive != 0 {
+		t.Fatalf("ConsecutiveFailures = %d, want 0 — a 429 is throttling, handled by the cooldown path", consecutive)
 	}
 	// An API-key channel is never auto-retired, however badly it behaves:
 	// only the explicit Disabled flag takes it out of rotation.

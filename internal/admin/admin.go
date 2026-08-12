@@ -434,20 +434,22 @@ type authRow struct {
 	Disabled        bool       `json:"disabled"`
 	QuotaExceeded   bool       `json:"quota_exceeded"`
 	QuotaResetAt    *time.Time `json:"quota_reset_at,omitempty"`
-	// Quarantine is the API-key circuit breaker: a channel that failed
-	// repeatedly is paused for a self-expiring, exponentially growing
-	// interval so traffic rotates onto a working key. Surfaced so the panel
-	// can distinguish "paused, will retry at X" from a plain failure — a
-	// silently paused channel looks identical to a healthy idle one.
-	// Zero/absent = circuit closed. API-key credentials only.
-	QuarantinedUntil  *time.Time `json:"quarantined_until,omitempty"`
-	QuarantineStrikes int        `json:"quarantine_strikes,omitempty"`
-	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
-	LastFailure       string     `json:"last_failure,omitempty"`
-	FileBacked        bool       `json:"file_backed"`
-	Healthy           bool       `json:"healthy"`
-	HardFailure       bool       `json:"hard_failure"`
-	FailureReason     string     `json:"failure_reason,omitempty"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	LastFailure     string     `json:"last_failure,omitempty"`
+	FileBacked      bool       `json:"file_backed"`
+	// Healthy / HardFailure are the legacy booleans, retained for backwards
+	// compatibility. Healthy is now strictly state == "healthy"; read `state`
+	// from the embedded health block for anything that needs to tell a paused
+	// channel from a half-open one from a degraded one.
+	//
+	// The circuit-breaker fields (quarantined_until, quarantine_strikes) moved
+	// into that block under the same JSON names — a channel that is paused,
+	// or was paused and has not yet re-proven itself, looks identical to a
+	// healthy idle one without them.
+	Healthy       bool   `json:"healthy"`
+	HardFailure   bool   `json:"hard_failure"`
+	FailureReason string `json:"failure_reason,omitempty"`
+	authHealth
 	// Most recent client-initiated cancellation. Informational only —
 	// doesn't affect Healthy or trigger any cooldown. Used by the panel to
 	// show a low-tone "client canceled" hint distinct from upstream
@@ -570,11 +572,6 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			t := st.Auth.ExpiresAt
 			expAt = &t
 		}
-		var quarantinedUntil *time.Time
-		if !st.Auth.QuarantineUntil.IsZero() {
-			t := st.Auth.QuarantineUntil
-			quarantinedUntil = &t
-		}
 		var u *usageSummary
 		// Show a usage row for every auth that has either in-memory daily
 		// history or any log-recorded activity, so lifetime totals keep
@@ -602,12 +599,15 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			}
 		}
 		live := h.pool.FindByID(st.Auth.ID)
-		var healthy, hardFail bool
-		var failReason string
+		// HealthState() replaces HealthSnapshot(): the snapshot's consecutive
+		// count was discarded at all four call sites, and its (healthy,
+		// hardFailure) pair cannot express half-open — the state a credential is
+		// in for the whole window between its circuit breaker expiring and its
+		// first success afterwards.
+		rep := monitor.HealthReportFor(h.pool, st.Auth)
 		var cancelAt *time.Time
 		var cancelReason string
 		if live != nil {
-			healthy, hardFail, failReason, _ = live.HealthSnapshot()
 			if at, reason := live.ClientCancelSnapshot(); !at.IsZero() {
 				t := at
 				cancelAt = &t
@@ -637,13 +637,12 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			Disabled:           st.Auth.Disabled,
 			QuotaExceeded:      !st.Auth.QuotaExceededAt.IsZero(),
 			QuotaResetAt:       quotaReset,
-			QuarantinedUntil:   quarantinedUntil,
-			QuarantineStrikes:  st.Auth.QuarantineStrikes,
 			ExpiresAt:          expAt,
 			FileBacked:         strings.TrimSpace(st.Auth.FilePath) != "",
-			Healthy:            healthy,
-			HardFailure:        hardFail,
-			FailureReason:      failReason,
+			Healthy:            rep.Healthy(),
+			HardFailure:        rep.State == auth.HealthHardFailed,
+			FailureReason:      rep.Reason,
+			authHealth:         newAuthHealth(rep),
 			LastClientCancel:   cancelAt,
 			ClientCancelReason: cancelReason,
 			ModelMap:           st.Auth.ModelMap,

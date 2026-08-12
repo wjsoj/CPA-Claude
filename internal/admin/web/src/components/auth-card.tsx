@@ -7,12 +7,16 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { GroupBadge } from "./group-badge";
 import { cn, fmtDate, fmtDay, fmtInt, fmtUSD } from "@/lib/utils";
+import { credState, credServing } from "@/lib/cred-state";
+import { CredStateDot, STATE_META, stateDetail, toneText } from "./cred-state-badge";
 import {
   AlertTriangle,
   Ban,
   CheckCircle2,
   ChevronRight,
   CreditCard,
+  Gauge,
+  PauseCircle,
   Pencil,
   Power,
   RefreshCw,
@@ -31,24 +35,6 @@ interface Props {
   dragHandle?: React.ReactNode;
 }
 
-function statusMeta(a: AuthRow) {
-  if (a.disabled)
-    return { label: "Disabled", tone: "text-muted-foreground", dot: "bg-muted-foreground" };
-  if (a.quota_exceeded)
-    return { label: "Quota", tone: "text-[color:var(--warning)]", dot: "bg-[color:var(--warning)]" };
-  // Distinct from both Quota and Unhealthy: the channel is temporarily out of
-  // rotation after repeated upstream errors and re-probes itself. Without its
-  // own state a paused channel is indistinguishable from an idle healthy one,
-  // which is how a silently dead relay goes unnoticed.
-  if (a.quarantined_until)
-    return { label: "Paused", tone: "text-[color:var(--warning)]", dot: "bg-[color:var(--warning)]" };
-  if (a.hard_failure)
-    return { label: "Unhealthy", tone: "text-destructive", dot: "bg-destructive" };
-  if (a.healthy)
-    return { label: "Healthy", tone: "text-[color:var(--success)]", dot: "bg-[color:var(--success)]" };
-  return { label: "Degraded", tone: "text-[color:var(--warning)]", dot: "bg-[color:var(--warning)]" };
-}
-
 export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
   const slot =
     a.max_concurrent > 0 ? `${a.active_clients}/${a.max_concurrent}` : `${a.active_clients}/∞`;
@@ -56,7 +42,15 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
     a.max_concurrent > 0
       ? Math.min(100, Math.round((a.active_clients / a.max_concurrent) * 100))
       : 0;
-  const status = statusMeta(a);
+  // Health comes straight from the backend's `state`; the card never rebuilds
+  // its own ladder (see lib/cred-state.ts).
+  const state = credState(a);
+  const meta = STATE_META[state];
+  const detail = stateDetail(a, state);
+  // `reason` is the contract field; `failure_reason` is the pre-contract one.
+  // The admin console is authenticated, so it shows the raw text — only the
+  // public status page sanitizes.
+  const failureText = a.reason || a.failure_reason || "";
   // The model map can hold dozens of entries; fully expanded it dwarfs the rest
   // of the card, so it stays folded until asked for.
   const [mapOpen, setMapOpen] = React.useState(false);
@@ -79,7 +73,8 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
         aria-hidden
         className={cn(
           "absolute inset-x-0 top-0 h-[2px] transition-all",
-          a.healthy && !a.disabled && !a.quota_exceeded
+          // Only a verified-healthy credential gets the "alive" accent.
+          state === "healthy"
             ? "bg-gradient-to-r from-transparent via-primary/40 to-transparent opacity-60 group-hover:opacity-100"
             : "bg-transparent",
         )}
@@ -89,17 +84,7 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
             {dragHandle}
-            <span className="relative inline-flex h-2 w-2 shrink-0">
-              {!a.disabled && a.healthy && (
-                <span
-                  className={cn(
-                    "absolute inline-flex h-full w-full rounded-full opacity-60 animate-ping",
-                    status.dot,
-                  )}
-                />
-              )}
-              <span className={cn("relative inline-flex h-2 w-2 rounded-full", status.dot)} />
-            </span>
+            <CredStateDot row={a} />
             <h3 className="font-display text-xl leading-tight truncate">{a.label || a.id}</h3>
           </div>
           <div className="mt-1 mono text-[11px] text-muted-foreground truncate pl-4.5">{a.id}</div>
@@ -116,30 +101,65 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
           )}
           <GroupBadge group={a.group} />
 
-          <span className={cn("eyebrow !text-[10px]", status.tone)}>{status.label}</span>
+          <span
+            className={cn("eyebrow !text-[10px]", toneText(meta.tone))}
+            title={meta.blurb}
+          >
+            {meta.label}
+          </span>
+          {detail && (
+            <span className="mono text-[10px] text-muted-foreground text-right max-w-[150px]">
+              {detail}
+            </span>
+          )}
+          {!credServing(a) && state !== "disabled" && (
+            <span className="eyebrow !text-[10px] text-muted-foreground">not serving</span>
+          )}
         </div>
       </header>
 
-      {a.quota_exceeded && (
-        <AlertStrip tone="warning" icon={<AlertTriangle className="h-3.5 w-3.5" />} label="Quota exceeded">
-          {a.quota_reset_at ? `resets ${fmtDate(a.quota_reset_at)}` : "no reset time reported"}
+      {/* One strip per state, driven by `state` alone — no overlapping
+          conditions, so a cooling credential can no longer be described as
+          both quota-exceeded and unhealthy depending on which branch won. */}
+      {state === "quota" && (
+        <AlertStrip tone="warning" icon={<Gauge className="h-3.5 w-3.5" />} label="Quota exceeded">
+          {a.quota_reset_at
+            ? `resets ${fmtDate(a.quota_reset_at)}`
+            : detail || "no reset time reported"}
         </AlertStrip>
       )}
-      {a.quarantined_until && (
-        <AlertStrip tone="warning" icon={<AlertTriangle className="h-3.5 w-3.5" />} label="Channel paused">
-          {`repeated upstream errors — traffic rotated to other keys. Re-probes ${fmtDate(
-            a.quarantined_until,
-          )}${a.quarantine_strikes ? ` (backoff round ${a.quarantine_strikes})` : ""}; one good response restores it automatically.`}
+      {state === "cooling" && (
+        <AlertStrip tone="warning" icon={<PauseCircle className="h-3.5 w-3.5" />} label="Channel paused">
+          {`repeated upstream errors — traffic rotated to other keys. ${
+            detail || "retry time unknown"
+          }; one good response restores it automatically.`}
         </AlertStrip>
       )}
-      {!a.quota_exceeded && !a.quarantined_until && a.failure_reason && (
+      {state === "half_open" && (
         <AlertStrip
-          tone={a.hard_failure ? "error" : "warning"}
-          icon={a.hard_failure ? <ShieldOff className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
-          label={a.hard_failure ? "Unhealthy" : "Recent failure"}
-          title={a.failure_reason}
+          tone="warning"
+          icon={<AlertTriangle className="h-3.5 w-3.5" />}
+          label="Unverified"
         >
-          {a.failure_reason}
+          {`pause elapsed, no successful request since — the next request decides. ${
+            a.last_success_at ? `last success ${fmtDate(a.last_success_at)}` : "no recorded success"
+          }`}
+        </AlertStrip>
+      )}
+      {(state === "hard_failed" || state === "degraded") && failureText && (
+        <AlertStrip
+          tone={state === "hard_failed" ? "error" : "warning"}
+          icon={
+            state === "hard_failed" ? (
+              <ShieldOff className="h-3.5 w-3.5" />
+            ) : (
+              <AlertTriangle className="h-3.5 w-3.5" />
+            )
+          }
+          label={state === "hard_failed" ? "Failed" : "Recent failure"}
+          title={failureText}
+        >
+          {failureText}
         </AlertStrip>
       )}
       {/* A billing problem is invisible to every health signal we have: the
@@ -357,12 +377,15 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
             <Button size="sm" variant="outline" onClick={() => onAction(a, "refresh")}>
               <RefreshCw className="h-3 w-3" /> Refresh
             </Button>
-            {a.quota_exceeded && (
+            {state === "quota" && (
               <Button size="sm" variant="warning" onClick={() => onAction(a, "clear-quota")}>
                 Clear quota
               </Button>
             )}
-            {(a.hard_failure || (!a.healthy && !a.quota_exceeded && !a.disabled)) && (
+            {(state === "hard_failed" ||
+              state === "cooling" ||
+              state === "degraded" ||
+              state === "half_open") && (
               <Button size="sm" variant="warning" onClick={() => onAction(a, "clear-failure")}>
                 <CheckCircle2 className="h-3 w-3" /> Mark healthy
               </Button>
@@ -390,12 +413,15 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
                 </Button>
               </>
             )}
-            {a.quota_exceeded && (
+            {state === "quota" && (
               <Button size="sm" variant="warning" onClick={() => onAction(a, "clear-quota")}>
                 Clear quota
               </Button>
             )}
-            {(a.hard_failure || (!a.healthy && !a.quota_exceeded && !a.disabled)) && (
+            {(state === "hard_failed" ||
+              state === "cooling" ||
+              state === "degraded" ||
+              state === "half_open") && (
               <Button size="sm" variant="warning" onClick={() => onAction(a, "clear-failure")}>
                 <CheckCircle2 className="h-3 w-3" /> Mark healthy
               </Button>

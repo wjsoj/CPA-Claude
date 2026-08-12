@@ -312,7 +312,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) buildClaudeEngine(adminH *admin.Handler, primary bool) *gin.Engine {
 	engine := gin.New()
 	engine.Use(gin.Recovery(), loggingMiddleware("claude"), corsMiddleware())
-	engine.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "endpoint": "claude"}) })
+	engine.GET("/healthz", s.healthzHandler("claude", auth.ProviderAnthropic))
 
 	v1 := engine.Group("/v1")
 	v1.Use(s.clientAuth())
@@ -340,7 +340,7 @@ func (s *Server) buildClaudeEngine(adminH *admin.Handler, primary bool) *gin.Eng
 func (s *Server) buildCodexEngine(adminH *admin.Handler, primary bool) *gin.Engine {
 	engine := gin.New()
 	engine.Use(gin.Recovery(), loggingMiddleware("codex"), corsMiddleware())
-	engine.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "endpoint": "codex"}) })
+	engine.GET("/healthz", s.healthzHandler("codex", auth.ProviderOpenAI))
 
 	v1 := engine.Group("/v1")
 	v1.Use(s.clientAuth())
@@ -421,6 +421,55 @@ func extractClientToken(r *http.Request) string {
 		return v
 	}
 	return ""
+}
+
+// healthzHandler serves /healthz for one endpoint.
+//
+// **BEHAVIOUR CHANGE.** This endpoint used to return a hardcoded 200 with no
+// reference to the credential pool at all: every credential could be
+// hard-failed, quota-blocked or paused and the probe still said "ok", which is
+// precisely the failure mode a liveness/readiness probe exists to catch. It now
+// returns 503 when the endpoint's provider has no credential able to take a
+// request (auth.PoolHealth.Available() == false, i.e. Serving == 0).
+//
+// Operators: this endpoint is commonly wired to a load balancer or an uptime
+// check. A pool-wide outage will now pull this instance out of rotation and
+// page whoever watches it — intended, but it is a change in what the 200 means.
+// If a probe must only test that the process is listening, point it at a route
+// that does not consult the pool.
+//
+// Half-open and degraded credentials count as available: they are routable, the
+// router deliberately keeps using them, and the response body carries the full
+// state partition so a caller that wants to be stricter can be.
+func (s *Server) healthzHandler(endpoint, provider string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		code, body := healthzPayload(s.pool, endpoint, provider)
+		c.JSON(code, body)
+	}
+}
+
+// healthzPayload is healthzHandler's body, split out so it is testable without
+// standing up an engine.
+func healthzPayload(pool *auth.Pool, endpoint, provider string) (int, gin.H) {
+	ph, slot := monitor.PoolHealthFor(pool, provider)
+	view := monitor.NewPoolHealthView(ph)
+	body := gin.H{
+		"endpoint":       endpoint,
+		"provider":       auth.NormalizeProvider(provider),
+		"pool":           view,
+		"slot_available": slot,
+	}
+	if !ph.Available() {
+		body["status"] = "unavailable"
+		if ph.Total == 0 {
+			body["reason"] = "no credentials configured for this provider"
+		} else {
+			body["reason"] = "no credential can serve (worst state: " + view.WorstState + ")"
+		}
+		return http.StatusServiceUnavailable, body
+	}
+	body["status"] = "ok"
+	return http.StatusOK, body
 }
 
 func (s *Server) handleStatus(c *gin.Context) {

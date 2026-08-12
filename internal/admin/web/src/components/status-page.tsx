@@ -6,7 +6,6 @@ import {
   BarChart3,
   BookOpen,
   CheckCircle2,
-  CircleOff,
   Gauge,
   Loader2,
   Plus,
@@ -50,55 +49,23 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThemeToggle } from "./theme-toggle";
+import { PoolBanner } from "./pool-banner";
+import { CredStateBadge, STATE_META, stateDetail, toneText } from "./cred-state-badge";
+import {
+  CRED_STATES,
+  credState,
+  mergePools,
+  normalizePools,
+  poolsFromRows,
+  publicReason,
+  type PoolAgg,
+} from "@/lib/cred-state";
 import { cn, fmtDate, fmtInt } from "@/lib/utils";
 
 function mask(tok: string): string {
   const t = tok.trim();
   if (t.length <= 10) return "***";
   return t.slice(0, 6) + "…" + t.slice(-4);
-}
-
-function HealthBadge({ row }: { row: StatusOverview["auths"][number] }) {
-  if (row.disabled) {
-    return (
-      <Badge variant="slate" className="gap-1">
-        <CircleOff className="h-3 w-3" /> disabled
-      </Badge>
-    );
-  }
-  if (row.quota_exceeded) {
-    return (
-      <Badge
-        className="gap-1"
-        style={{
-          background: "color-mix(in oklab, var(--warning) 15%, transparent)",
-          color: "var(--warning)",
-          borderColor: "color-mix(in oklab, var(--warning) 40%, transparent)",
-        }}
-      >
-        <Gauge className="h-3 w-3" /> quota
-      </Badge>
-    );
-  }
-  if (row.hard_failure || !row.healthy) {
-    return (
-      <Badge variant="destructive" className="gap-1">
-        <XCircle className="h-3 w-3" /> unhealthy
-      </Badge>
-    );
-  }
-  return (
-    <Badge
-      className="gap-1"
-      style={{
-        background: "color-mix(in oklab, var(--success) 15%, transparent)",
-        color: "var(--success)",
-        borderColor: "color-mix(in oklab, var(--success) 40%, transparent)",
-      }}
-    >
-      <CheckCircle2 className="h-3 w-3" /> healthy
-    </Badge>
-  );
 }
 
 function Metric({
@@ -259,6 +226,17 @@ export function StatusPage() {
     setResults([]);
   };
 
+  // Pool availability. The backend's `pool` aggregate is authoritative; if the
+  // server hasn't shipped it yet, rebuild the same shape from the per-row
+  // `state` field so the banner still works during the rollout.
+  const pools: PoolAgg[] = useMemo(() => {
+    if (!ov) return [];
+    const fromServer = normalizePools(ov.pool);
+    if (fromServer.length > 0) return fromServer;
+    return poolsFromRows(ov.auths || []);
+  }, [ov]);
+  const poolTotals = useMemo(() => mergePools(pools), [pools]);
+
   const byMasked = useMemo(() => {
     const m = new Map<string, StatusTokenResult>();
     for (const r of results || []) m.set(r.masked, r);
@@ -316,6 +294,10 @@ export function StatusPage() {
           )}
         </header>
 
+        {/* POOL AVAILABILITY — above the tabs, so it is on screen whichever
+            section the visitor is looking at. */}
+        <PoolBanner pools={pools} className="stagger" />
+
         {/* TAB NAV */}
         <nav
           role="tablist"
@@ -365,7 +347,7 @@ export function StatusPage() {
 
         {tab === "dashboard" && (
           <div className="stagger pt-2 md:pt-4 space-y-6">
-            <StatusMonitorPanel refreshTick={refreshTick} />
+            <StatusMonitorPanel refreshTick={refreshTick} pools={pools} />
             <StatusDashboardPanel refreshTick={refreshTick} />
           </div>
         )}
@@ -393,12 +375,20 @@ export function StatusPage() {
         {/* OVERVIEW METRICS */}
         <section className="stagger">
           <div className="hud-strip">
-            <div className="hud-strip-grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="hud-strip-grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
+              {/* "Healthy" here is verified-healthy only — the count comes
+                  from by_state, not from a `healthy` boolean that flips true
+                  the moment a circuit-breaker window lapses. */}
               <Metric
-                label="Credentials"
-                value={ov ? ov.counts.healthy : "···"}
-                unit={ov ? `/ ${ov.counts.total}` : undefined}
+                label="Healthy"
+                value={ov ? poolTotals.by_state.healthy : "···"}
+                unit={ov ? `/ ${poolTotals.total}` : undefined}
                 accent
+              />
+              <Metric
+                label="Serving"
+                value={ov ? poolTotals.serving : "···"}
+                unit={ov ? `/ ${poolTotals.total}` : undefined}
               />
               <Metric label="OAuth" value={ov ? fmtInt(ov.counts.oauth) : "···"} />
               <Metric label="API keys" value={ov ? fmtInt(ov.counts.apikey) : "···"} />
@@ -421,10 +411,17 @@ export function StatusPage() {
                 Credentials <span className="text-muted-foreground">overview</span>
               </h2>
             </div>
-            {ov && (
-              <span className="eyebrow tabular opacity-70">
-                {ov.counts.healthy} healthy · {ov.counts.quota} quota · {ov.counts.unhealthy}{" "}
-                unhealthy · {ov.counts.disabled} disabled
+            {ov && poolTotals.total > 0 && (
+              // Every state, straight from by_state — the parts sum to the
+              // total by construction. The old three-term line silently
+              // dropped circuit-broken API keys.
+              <span className="eyebrow tabular opacity-70 flex flex-wrap gap-x-2">
+                {CRED_STATES.filter((s) => poolTotals.by_state[s] > 0).map((s) => (
+                  <span key={s} className={toneText(STATE_META[s].tone)}>
+                    {poolTotals.by_state[s]} {STATE_META[s].label.toLowerCase()}
+                  </span>
+                ))}
+                <span className="opacity-60">= {poolTotals.total}</span>
               </span>
             )}
           </div>
@@ -440,32 +437,7 @@ export function StatusPage() {
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
               {(ov.auths || []).map((a, i) => (
-                <div
-                  key={i}
-                  className={cn(
-                    "bg-card border border-border-strong rounded-md p-4 transition-colors",
-                    a.disabled && "opacity-60",
-                  )}
-                >
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="eyebrow mb-0.5">
-                        {a.kind === "oauth" ? "OAuth" : "API key"}
-                        {a.group && (
-                          <span className={a.group.toLowerCase() === "new"
-                            ? "ml-1 font-semibold tracking-wider text-amber-600 dark:text-amber-400"
-                            : "opacity-60"}>
-                            {a.group.toLowerCase() === "new" ? " · NEW" : ` · ${a.group}`}
-                          </span>
-                        )}
-                      </div>
-                      <div className="font-display text-base truncate" title={a.label ? a.label.split("@")[0] : undefined}>
-                        {a.label ? a.label.split("@")[0] : <span className="text-muted-foreground">(unnamed)</span>}
-                      </div>
-                    </div>
-                    <HealthBadge row={a} />
-                  </div>
-                </div>
+                <PublicCredCard key={i} a={a} />
               ))}
             </div>
           )}
@@ -587,6 +559,80 @@ export function StatusPage() {
           <span className="opacity-60">CPA · Claude / {new Date().getFullYear()}</span>
         </footer>
       </div>
+    </div>
+  );
+}
+
+// Public credential card. Carries the seven-state badge, the recovery
+// countdown, and a sanitized failure reason.
+//
+// `reason` is raw upstream error text and this page needs no authentication,
+// so it goes through publicReason(): identity-bearing fragments (credential
+// ids, UUIDs, request ids, key prefixes, URLs, IPs, file paths, emails, long
+// opaque tokens) are replaced with placeholders, the text is truncated to 120
+// chars, and anything that redacts down to mostly placeholders is dropped in
+// favour of a generic phrase for the state. See lib/cred-state.ts.
+function PublicCredCard({ a }: { a: StatusOverview["auths"][number] }) {
+  const state = credState(a);
+  const meta = STATE_META[state];
+  const detail = stateDetail(a, state);
+  const reason = publicReason(a.reason, state);
+  return (
+    <div
+      className={cn(
+        "bg-card border rounded-md p-4 transition-colors space-y-2",
+        state === "hard_failed"
+          ? "border-destructive/40"
+          : state === "disabled"
+            ? "border-border-strong opacity-60"
+            : "border-border-strong",
+      )}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="eyebrow mb-0.5">
+            {a.kind === "oauth" ? "OAuth" : "API key"}
+            {a.group && (
+              <span
+                className={
+                  a.group.toLowerCase() === "new"
+                    ? "ml-1 font-semibold tracking-wider text-amber-600 dark:text-amber-400"
+                    : "opacity-60"
+                }
+              >
+                {a.group.toLowerCase() === "new" ? " · NEW" : ` · ${a.group}`}
+              </span>
+            )}
+          </div>
+          <div
+            className="font-display text-base truncate"
+            title={a.label ? a.label.split("@")[0] : undefined}
+          >
+            {a.label ? (
+              a.label.split("@")[0]
+            ) : (
+              <span className="text-muted-foreground">(unnamed)</span>
+            )}
+          </div>
+        </div>
+        <CredStateBadge row={a} />
+      </div>
+
+      <p className={cn("text-[11px] leading-relaxed", toneText(meta.tone))}>{meta.blurb}</p>
+
+      {detail && <div className="mono text-[11px] tabular text-muted-foreground">{detail}</div>}
+
+      {reason && state !== "healthy" && (
+        <div className="mono text-[11px] leading-relaxed text-muted-foreground break-words">
+          {reason}
+        </div>
+      )}
+
+      {a.last_success_at && (
+        <div className="mono text-[10px] text-muted-foreground opacity-70">
+          last success · {fmtDate(a.last_success_at)}
+        </div>
+      )}
     </div>
   );
 }

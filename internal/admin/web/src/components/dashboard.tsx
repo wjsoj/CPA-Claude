@@ -41,6 +41,8 @@ const SessionCookieModal = lazyNamed(() => import("./modals/session-cookie"), "S
 const AddTokenModal = lazyNamed(() => import("./modals/add-token"), "AddTokenModal");
 const EditTokenModal = lazyNamed(() => import("./modals/edit-token"), "EditTokenModal");
 import { ThemeToggle } from "./theme-toggle";
+import { PoolBanner } from "./pool-banner";
+import { mergePools, poolsFromRows } from "@/lib/cred-state";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/hooks/use-confirm";
 import { cn, fmtDate, fmtInt } from "@/lib/utils";
@@ -245,7 +247,12 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     return Array.from(s).sort();
   })();
   const totalCreds = auths.length;
-  const healthyCreds = auths.filter((a) => a.healthy).length;
+  // Per-provider pools for the banner, merged for the metric strip. Both read
+  // the backend's `state` — the console does not classify health itself.
+  const pools = poolsFromRows(auths);
+  const merged = mergePools(pools);
+  const healthyCreds = merged.by_state.healthy;
+  const servingCreds = merged.serving;
   const totals = { in: 0, out: 0, in24: 0 };
   for (const a of auths) {
     const t = a.usage?.total;
@@ -332,6 +339,11 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
           )}
         </header>
 
+        {/* Pool availability — shown on every tab, above everything. When a
+            provider has nothing able to serve, that is the first thing the
+            operator must see. */}
+        <PoolBanner pools={pools} className="stagger" />
+
         <datalist id="groups-datalist">
           {knownGroups.map((g) => (
             <option key={g} value={g} />
@@ -346,7 +358,12 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
               label="Credentials"
               value={`${healthyCreds}`}
               unit={`/ ${totalCreds}`}
-              hint="healthy"
+              // "healthy" here means verified-healthy only. `serving` is the
+              // wider set that includes unverified/degraded credentials still
+              // taking traffic; showing both stops the strip from reading as
+              // an outage when the pool is merely unproven, and from reading
+              // as fine when it is unproven and about to fall over.
+              hint={`healthy · ${servingCreds} serving`}
               accent
             />
             <MetricCell label="OAuth" value={fmtInt(oauths.length)} />
@@ -404,7 +421,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
           <Suspense fallback={<PanelSkeleton />}>
           {tab === "overview" && (
             <div className="space-y-6">
-              <StatusMonitorPanel refreshTick={refreshTick} />
+              <StatusMonitorPanel refreshTick={refreshTick} pools={pools} />
               <OverviewPanel summary={data} pricing={data?.pricing} refreshTick={refreshTick} />
             </div>
           )}

@@ -17,7 +17,33 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import type { AuthRow, Provider, Summary } from "@/lib/types";
 import { AuthCard } from "./auth-card";
+import { PoolBanner } from "./pool-banner";
+import { STATE_META, toneText } from "./cred-state-badge";
+import { CRED_STATES, poolFromRows, type PoolAgg } from "@/lib/cred-state";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+
+// One line per non-empty state. Rendered from `by_state` alone, which is what
+// guarantees the parts sum to the whole — the count is a partition of the
+// pool, not four independent predicates that may overlap or leave gaps.
+function StateTally({ pool }: { pool: PoolAgg }) {
+  const shown = CRED_STATES.filter((s) => pool.by_state[s] > 0);
+  if (pool.total === 0) return null;
+  return (
+    <p className="text-sm text-muted-foreground mt-1.5 mono tabular flex flex-wrap gap-x-2 gap-y-1 items-baseline">
+      {shown.map((s, i) => (
+        <span key={s}>
+          {i > 0 && <span className="opacity-40 mr-2">·</span>}
+          <span className={cn("font-medium", toneText(STATE_META[s].tone))}>
+            {pool.by_state[s]}
+          </span>{" "}
+          {STATE_META[s].label.toLowerCase()}
+        </span>
+      ))}
+      <span className="opacity-60">= {pool.total} total</span>
+    </p>
+  );
+}
 
 type Action = "toggle" | "refresh" | "clear-quota" | "clear-failure" | "delete";
 
@@ -107,9 +133,11 @@ export function CredentialsPanel({
   // pinned, with no drag handle.
   const sortableKeys = apikeys.filter((a) => a.file_backed);
   const staticKeys = apikeys.filter((a) => !a.file_backed);
-  const healthy = scoped.filter((a) => a.healthy).length;
-  const quota = scoped.filter((a) => a.quota_exceeded).length;
-  const unhealthy = scoped.filter((a) => a.hard_failure).length;
+  // Counts come from the backend's seven states, so they always add up to
+  // `scoped.length`. The previous healthy/quota/unhealthy triple summed to
+  // LESS than the total — `hard_failure` is permanently false for API keys, so
+  // every circuit-broken key vanished from the tally entirely.
+  const pool = poolFromRows(scoped, provider);
 
   const current = TABS.find((t) => t.id === provider)!;
 
@@ -174,17 +202,20 @@ export function CredentialsPanel({
 
   return (
     <div className="space-y-6">
+      {/* Pool-down / nothing-verified banner for the provider being viewed. */}
+      <PoolBanner pools={[pool]} />
       <header className="flex items-end justify-between gap-4 flex-wrap">
         <div>
           <div className="eyebrow mb-1.5">§ Credentials management</div>
           <h2 className="font-display text-3xl md:text-4xl tracking-tight">
             Auth <span className="text-muted-foreground">pool</span>
           </h2>
-          <p className="text-sm text-muted-foreground mt-1.5 mono tabular">
-            <span className="text-[color:var(--success)] font-medium">{healthy}</span> healthy ·{" "}
-            <span className="text-[color:var(--warning)] font-medium">{quota}</span> quota ·{" "}
-            <span className="text-destructive font-medium">{unhealthy}</span> unhealthy ·{" "}
-            {oauths.length} OAuth · {apikeys.length} API key(s)
+          <StateTally pool={pool} />
+          <p className="text-sm text-muted-foreground mt-1 mono tabular">
+            {oauths.length} OAuth · {apikeys.length} API key(s) ·{" "}
+            <span className={pool.serving === 0 && pool.total > 0 ? "text-destructive font-medium" : ""}>
+              {pool.serving}/{pool.total} serving
+            </span>
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

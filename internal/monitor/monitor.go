@@ -1,9 +1,11 @@
 // Package monitor implements the public /status/ uptime monitor. It keeps one
 // logical health record per provider (Claude, OpenAI) and combines two signals:
 //
-//   - Passive (zero cost, always live): reads auth.Pool to report whether the
-//     provider currently has a free credential slot and how many credentials
-//     are healthy. This is the primary "is there capacity right now" signal.
+//   - Passive (zero cost, always live): reads auth.Pool for the full health
+//     partition (healthy / half-open / degraded / quota / cooling / hard-failed
+//     / disabled) plus whether a serving credential has a free slot. This is
+//     the "is there capacity right now" signal. "Serving" and "healthy" are
+//     different questions and both are published.
 //   - Active (every IntervalMinutes): sends one minimal request DIRECTLY to a
 //     healthy API-key credential's upstream, confirming the model actually
 //     serves. **OAuth (subscription) credentials are never actively probed** —
@@ -68,11 +70,14 @@ type Sample struct {
 	Status    int       `json:"status"`
 	LatencyMs int64     `json:"latency_ms"`
 	Err       string    `json:"err,omitempty"`
-	// PoolHealthy records whether the passive pool had at least one healthy
-	// credential at the moment of this sample. Global health defers to pool
-	// capacity, so a probe failure with PoolHealthy=true is "no signal" — the
-	// probe hits ONE api-key credential and never OAuth, so it can't prove the
-	// pool can't serve. Status/LatencyMs are still kept for the tooltip/logs.
+	// PoolHealthy is DEPRECATED and no longer written or read.
+	//
+	// It used to record whether the passive pool had a healthy credential at
+	// sample time, and healthySignal() then painted the sample green whenever
+	// it was set. That made the uptime strip permanently green: every probe
+	// failure was excused by a pool signal that was itself computed from a
+	// polluted "healthy" count. The field is retained only so previously
+	// persisted state files still unmarshal.
 	PoolHealthy bool `json:"pool_healthy,omitempty"`
 }
 
@@ -104,11 +109,16 @@ func (s Sample) realFailure() bool {
 }
 
 // healthySignal reports whether the sample should count as healthy (green) in
-// the uptime timeline and toward the uptime percentage. Global health is the
-// passive pool signal: a sample counts as healthy whenever the pool had a
-// healthy credential (PoolHealthy), regardless of how the single api-key probe
-// fared. Only a genuine outage with NO healthy credentials paints red.
-func (s Sample) healthySignal() bool { return s.OK || s.PoolHealthy || !s.realFailure() }
+// the uptime timeline and toward the uptime percentage.
+//
+// A sample is green if and only if the request actually succeeded. The previous
+// rule (`s.OK || s.PoolHealthy || !s.realFailure()`) excused every non-5xx
+// outcome — timeouts, transport failures, Cloudflare 520–527, 4xx — and then
+// excused the 5xx too whenever the pool reported a healthy credential. The net
+// effect was a strip that could not go red, which is worse than no strip. A
+// timeout is a failed request from the caller's point of view; record it as one.
+// realFailure() survives, but only to classify the log line.
+func (s Sample) healthySignal() bool { return s.OK }
 
 // DayStat is a per-local-day rollup of probe outcomes.
 type DayStat struct {
@@ -214,13 +224,11 @@ func (m *Monitor) probeAll(ctx context.Context) {
 		} else {
 			s = m.passiveSample(provider)
 		}
-		// Global health defers to passive pool capacity. The probe hits ONE
-		// api-key credential and never OAuth, so its failure says nothing about
-		// whether the pool can serve: stamp PoolHealthy so a probe error with
-		// healthy credentials still left counts as healthy (no signal), not red.
-		if healthy, _, _ := m.liveCounts(provider); healthy > 0 {
-			s.PoolHealthy = true
-		}
+		// The sample is recorded exactly as observed. It is deliberately NOT
+		// overwritten with the passive pool signal any more: doing so meant a
+		// probe could never fail, because the pool count that excused it was
+		// itself derived from a "healthy" number that counted just-expired
+		// circuit breakers as healthy.
 		m.record(t.Provider, s)
 	}
 	m.save()
@@ -242,7 +250,10 @@ func (m *Monitor) pickAPIKeyCred(provider string) *auth.Auth {
 		if live == nil {
 			continue
 		}
-		if h, _, _, _ := live.HealthSnapshot(); !h {
+		// Serving, not "healthy": a half-open or degraded key is routable and is
+		// exactly the one we want to probe — probing it is how it gets verified.
+		// A cooling / quota / hard-failed key must not be woken up by a probe.
+		if !live.HealthState().Serving {
 			continue
 		}
 		return live
@@ -251,17 +262,23 @@ func (m *Monitor) pickAPIKeyCred(provider string) *auth.Auth {
 }
 
 // passiveSample records the pool's passive health for a provider we don't
-// actively probe (OAuth-only). OK when at least one credential is healthy, so
-// the strip reads green; a synthetic 503 marks "no healthy credentials".
+// actively probe (OAuth-only). OK only when a credential is fully healthy —
+// half-open and degraded credentials are routable but unverified, so they must
+// not paint the strip green; a synthetic 503 marks "nothing can serve".
 func (m *Monitor) passiveSample(provider string) Sample {
-	healthy, _, _ := m.liveCounts(provider)
+	ph, _ := PoolHealthFor(m.pool, provider)
 	s := Sample{TS: time.Now()}
-	if healthy > 0 {
+	switch {
+	case ph.ByState[auth.HealthHealthy] > 0:
 		s.OK = true
 		s.Status = 200
-	} else {
+	case ph.Serving > 0:
+		// Routable but nothing has proven it works since the last failure.
 		s.Status = 503
-		s.Err = "no healthy credentials"
+		s.Err = "no verified credentials (" + string(ph.Worst) + ")"
+	default:
+		s.Status = 503
+		s.Err = "no serving credentials"
 	}
 	return s
 }
@@ -384,11 +401,9 @@ func (m *Monitor) record(provider string, s Sample) {
 		d = &DayStat{Date: key}
 		st.Days[key] = d
 	}
-	// Only a genuine provider-side failure (5xx) counts against the day. A
-	// transport error/timeout (no HTTP response) or a probe-side rejection (4xx
-	// — bad probe body, revoked/rate-limited key, unknown model) is "no signal":
-	// the probe never went through OAuth, so it can't tell us the provider is
-	// down. Defer to the passive pool signal instead of painting the bar red.
+	// Anything that was not a successful request counts against the day —
+	// timeouts, transport errors, CF 520–527 and 4xx included. See
+	// healthySignal: excusing those is what kept the bars permanently green.
 	d.Total++
 	if s.healthySignal() {
 		d.OK++
@@ -436,17 +451,28 @@ func (m *Monitor) pruneDaysLocked(st *provStore) {
 
 // ProviderSnapshot is the per-provider public payload.
 type ProviderSnapshot struct {
-	Name          string    `json:"name"` // "claude" | "openai"
-	Provider      string    `json:"provider"`
-	Operational   string    `json:"operational"` // operational | degraded | down | unknown
-	SlotAvailable bool      `json:"slot_available"`
-	HealthyCreds  int       `json:"healthy_creds"`
-	TotalCreds    int       `json:"total_creds"`
-	ProbeEnabled  bool      `json:"probe_enabled"`
-	LastProbe     *Sample   `json:"last_probe,omitempty"`
-	Uptime90d     []DayStat `json:"uptime_90d"`
-	Uptime90dPct  float64   `json:"uptime_90d_pct"`
-	Timeline24h   []Sample  `json:"timeline_24h"`
+	Name          string `json:"name"` // "claude" | "openai"
+	Provider      string `json:"provider"`
+	Operational   string `json:"operational"` // operational | degraded | down | unknown
+	SlotAvailable bool   `json:"slot_available"`
+	// HealthyCreds counts only auth.HealthHealthy — verified-good credentials.
+	// It is NOT the count that decides whether we can serve; ServingCreds is.
+	HealthyCreds int `json:"healthy_creds"`
+	// ServingCreds counts credentials the router will actually offer traffic to
+	// (healthy + half-open + degraded). This is the "are we up" number.
+	ServingCreds int `json:"serving_creds"`
+	// CoolingCreds counts credentials paused by the API-key circuit breaker.
+	CoolingCreds int `json:"cooling_creds"`
+	// WorstState is the highest-severity credential state present.
+	WorstState string `json:"worst_state"`
+	// ByState is the full partition; the values sum to TotalCreds.
+	ByState      map[string]int `json:"by_state"`
+	TotalCreds   int            `json:"total_creds"`
+	ProbeEnabled bool           `json:"probe_enabled"`
+	LastProbe    *Sample        `json:"last_probe,omitempty"`
+	Uptime90d    []DayStat      `json:"uptime_90d"`
+	Uptime90dPct float64        `json:"uptime_90d_pct"`
+	Timeline24h  []Sample       `json:"timeline_24h"`
 }
 
 // Snapshot is the full /status/api/monitor payload.
@@ -456,36 +482,134 @@ type Snapshot struct {
 	Providers   []ProviderSnapshot `json:"providers"`
 }
 
-// liveCounts reports the passive pool signal for one provider: how many
-// credentials are healthy, the total for the provider, and whether at least one
-// healthy credential has a free concurrency slot right now.
-func (m *Monitor) liveCounts(provider string) (healthy, total int, slot bool) {
+// AllStates is every health state, in triage order. Exported so serializers can
+// emit a complete by_state map (zeros included) instead of a sparse one that
+// makes a missing key ambiguous with a zero count.
+var AllStates = []auth.HealthState{
+	auth.HealthHealthy,
+	auth.HealthHalfOpen,
+	auth.HealthDegraded,
+	auth.HealthQuota,
+	auth.HealthCooling,
+	auth.HealthHardFailed,
+	auth.HealthDisabled,
+}
+
+// HealthReportFor resolves the live health report for one credential. Prefers
+// the live *auth.Auth (whose HealthState() also expires stale deadlines); falls
+// back to reconstructing the report from the AuthInfo snapshot when the
+// credential has been removed from the pool between Status() and here.
+func HealthReportFor(pool *auth.Pool, info auth.AuthInfo) auth.HealthReport {
+	if pool != nil {
+		if live := pool.FindByID(info.ID); live != nil {
+			return live.HealthState()
+		}
+	}
+	return reportFromInfo(info)
+}
+
+// reportFromInfo rebuilds a HealthReport from an AuthInfo snapshot. AuthInfo
+// already carries the classified State (Snapshot computes it under the lock);
+// this only re-derives the fields AuthInfo does not carry.
+func reportFromInfo(info auth.AuthInfo) auth.HealthReport {
+	r := auth.HealthReport{
+		State:               info.State,
+		ConsecutiveFailures: info.ConsecutiveFailures,
+		Consecutive429s:     info.Consecutive429s,
+		Consecutive401s:     info.Consecutive401s,
+		LastSuccess:         info.LastSuccess,
+		LastFailure:         info.LastFailure,
+		LastFailureReason:   info.LastFailureReason,
+		HardFailureAt:       info.HardFailureAt,
+		QuotaResetAt:        info.QuotaResetAt,
+		QuarantineUntil:     info.QuarantineUntil,
+		QuarantineStrikes:   info.QuarantineStrikes,
+	}
+	if r.State == "" {
+		r.State = auth.HealthHealthy
+	}
+	r.Reason = info.LastFailureReason
+	switch r.State {
+	case auth.HealthDisabled:
+		r.Reason = "disabled by operator"
+	case auth.HealthQuota:
+		if d := time.Until(info.QuotaResetAt); d > 0 {
+			r.RetryAfter = d
+		}
+	case auth.HealthCooling:
+		if d := time.Until(info.QuarantineUntil); d > 0 {
+			r.RetryAfter = d
+		}
+	}
+	switch r.State {
+	case auth.HealthDisabled, auth.HealthHardFailed, auth.HealthQuota, auth.HealthCooling:
+		r.Serving = false
+	default:
+		r.Serving = true
+	}
+	return r
+}
+
+// PoolHealthFor aggregates one provider's credentials and reports whether any
+// serving credential has a free concurrency slot right now.
+//
+// slot is computed over SERVING credentials, not "healthy" ones: a half-open
+// key still takes traffic, and pretending otherwise is what made the panel show
+// "down" while requests were flowing (and, in the other direction, "healthy"
+// the instant a circuit-breaker deadline elapsed).
+func PoolHealthFor(pool *auth.Pool, provider string) (ph auth.PoolHealth, slot bool) {
 	provider = auth.NormalizeProvider(provider)
-	for _, st := range m.pool.Status() {
+	if pool == nil {
+		return auth.NewPoolHealth(provider, nil), false
+	}
+	reports := make([]auth.HealthReport, 0, 8)
+	for _, st := range pool.Status() {
 		info := st.Auth
 		if auth.NormalizeProvider(info.Provider) != provider {
 			continue
 		}
-		total++
-		isHealthy := false
-		if live := m.pool.FindByID(info.ID); live != nil {
-			h, _, _, _ := live.HealthSnapshot()
-			isHealthy = h
-		} else {
-			// Fall back to the snapshot fields if the live auth is gone.
-			isHealthy = !info.Disabled && info.QuotaExceededAt.IsZero()
-		}
-		if !isHealthy {
+		r := HealthReportFor(pool, info)
+		reports = append(reports, r)
+		if !r.Serving {
 			continue
 		}
-		healthy++
 		// cap 0 = unlimited (API keys, uncapped OAuth). A free slot exists
 		// when uncapped or active sessions are below the cap.
 		if info.MaxConcurrent == 0 || st.ActiveClients < info.MaxConcurrent {
 			slot = true
 		}
 	}
-	return healthy, total, slot
+	return auth.NewPoolHealth(provider, reports), slot
+}
+
+// PoolHealthView is the wire shape of an aggregated pool, shared by every
+// endpoint that publishes one (`pool` in the admin summary, the public
+// overview/dashboard, and /healthz) so the frontend parses one structure.
+type PoolHealthView struct {
+	Available  bool           `json:"available"`
+	Total      int            `json:"total"`
+	Serving    int            `json:"serving"`
+	WorstState string         `json:"worst_state"`
+	ByState    map[string]int `json:"by_state"`
+}
+
+// NewPoolHealthView serializes an auth.PoolHealth, zero-filling every state key.
+func NewPoolHealthView(p auth.PoolHealth) PoolHealthView {
+	by := make(map[string]int, len(AllStates))
+	for _, s := range AllStates {
+		by[string(s)] = p.ByState[s]
+	}
+	worst := p.Worst
+	if worst == "" {
+		worst = auth.HealthHealthy
+	}
+	return PoolHealthView{
+		Available:  p.Available(),
+		Total:      p.Total,
+		Serving:    p.Serving,
+		WorstState: string(worst),
+		ByState:    by,
+	}
 }
 
 // GetSnapshot builds the public payload: passive live counts for every
@@ -503,15 +627,20 @@ func (m *Monitor) GetSnapshot() Snapshot {
 	}
 	for _, t := range m.cfg.Targets {
 		provider := auth.NormalizeProvider(t.Provider)
-		healthy, total, slot := m.liveCounts(provider)
+		ph, slot := PoolHealthFor(m.pool, provider)
 		st := m.stores[provider]
 
+		view := NewPoolHealthView(ph)
 		ps := ProviderSnapshot{
 			Name:          displayName(provider),
 			Provider:      provider,
 			SlotAvailable: slot,
-			HealthyCreds:  healthy,
-			TotalCreds:    total,
+			HealthyCreds:  ph.ByState[auth.HealthHealthy],
+			ServingCreds:  ph.Serving,
+			CoolingCreds:  ph.ByState[auth.HealthCooling],
+			WorstState:    view.WorstState,
+			ByState:       view.ByState,
+			TotalCreds:    ph.Total,
 			ProbeEnabled:  m.cfg.Enabled && t.Model != "" && m.pickAPIKeyCred(provider) != nil,
 			Uptime90d:     []DayStat{},
 			Timeline24h:   []Sample{},
@@ -535,19 +664,31 @@ func displayName(provider string) string {
 	return "Claude"
 }
 
-// deriveStatus is the global health badge, derived purely from passive pool
-// capacity — the source of truth for "can we serve". The active probe never
-// factors in: it hits ONE api-key credential and never OAuth, so a probe
-// failure (even a genuine upstream 5xx) says nothing about whether the pool can
-// serve. As long as a healthy credential exists, the channel is healthy.
+// deriveStatus is the global health badge, derived from the passive pool
+// partition. Three branches, in order:
+//
+//   - nothing can take a request (ServingCreds == 0) → down. Note this is
+//     ServingCreds, not HealthyCreds: a pool of nothing but half-open keys is
+//     still up, and a pool whose "healthy" count was inflated by an expired
+//     circuit breaker was never up in the first place.
+//   - something can take a request but the pool is carrying half-open,
+//     degraded or cooling credentials → degraded. The deterioration is visible
+//     before it becomes an outage, which is the entire point.
+//   - everything verified-good and a free slot → operational. Verified-good but
+//     every slot busy stays degraded, as before.
 func deriveStatus(ps ProviderSnapshot) string {
-	if ps.TotalCreds == 0 || ps.HealthyCreds == 0 {
+	if ps.TotalCreds == 0 || ps.ServingCreds == 0 {
 		return "down"
+	}
+	if ps.ByState[string(auth.HealthHalfOpen)] > 0 ||
+		ps.ByState[string(auth.HealthDegraded)] > 0 ||
+		ps.CoolingCreds > 0 {
+		return "degraded"
 	}
 	if ps.SlotAvailable {
 		return "operational"
 	}
-	// Healthy credentials exist but every slot is busy — partially available.
+	// Everything verified-good but every slot is busy — partially available.
 	return "degraded"
 }
 

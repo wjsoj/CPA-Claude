@@ -6,6 +6,7 @@ import {
   type DashboardPool,
   type DashboardRequestsSlim,
 } from "./dashboard-board";
+import { mergePools, poolsFromRows } from "@/lib/cred-state";
 
 interface Props {
   summary: Summary | null;
@@ -53,34 +54,31 @@ export function OverviewPanel({ summary, pricing, refreshTick }: Props) {
     load();
   }, [load, refreshTick]);
 
-  const pool: DashboardPool | null = summary
-    ? (() => {
-        let healthy = 0,
-          quota = 0,
-          unhealthy = 0,
-          disabled = 0;
-        for (const a of summary.auths) {
-          if (a.disabled) disabled++;
-          else if (a.quota_exceeded) quota++;
-          else if (a.hard_failure) unhealthy++;
-          else if (a.healthy) healthy++;
-          else unhealthy++;
-        }
-        return { total: summary.auths.length, healthy, quota, unhealthy, disabled };
-      })()
+  // Per-provider pools drive the banner; the merged one drives the pie. Both
+  // are built from each row's backend `state` — the panel no longer runs its
+  // own if/else ladder (which used to classify a paused API key as "healthy"
+  // because hard_failure is always false for API keys).
+  const pools = summary ? poolsFromRows(summary.auths) : [];
+  const merged = summary ? mergePools(pools) : null;
+  const pool: DashboardPool | null = merged
+    ? { total: merged.total, by_state: merged.by_state }
     : null;
 
   const slim = (r: RequestsResp | null): DashboardRequestsSlim | null =>
     r ? { summary: r.summary, by_client: r.by_client, by_model: r.by_model, by_day: r.by_day } : null;
 
+  // The pool-down banner lives in the console shell (dashboard.tsx) so it is
+  // visible from every tab, not only this one.
   return (
-    <DashboardBoard
-      pool={pool}
-      pricing={pricing}
-      reqData={slim(reqData)}
-      lifetimeData={slim(lifetimeData)}
-      hourly={hourly}
-      busy={busy}
-    />
+    <div className="space-y-6">
+      <DashboardBoard
+        pool={pool}
+        pricing={pricing}
+        reqData={slim(reqData)}
+        lifetimeData={slim(lifetimeData)}
+        hourly={hourly}
+        busy={busy}
+      />
+    </div>
   );
 }

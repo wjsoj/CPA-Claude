@@ -30,6 +30,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn, fmtInt } from "@/lib/utils";
+import { CRED_STATES, type ByState } from "@/lib/cred-state";
+import { STATE_META } from "./cred-state-badge";
 
 const DAYS = 14;
 
@@ -59,10 +61,16 @@ const weekConfig: ChartConfig = {
 const monthConfig: ChartConfig = {
   cost_usd: { label: "Cost (USD)", theme: { light: "oklch(0.5 0.12 175)", dark: "oklch(0.8 0.15 175)" } },
 };
+// One slice per backend state. Green is reserved for `healthy`; the three
+// amber states are separated by hue rather than promoted or collapsed, and
+// `half_open` deliberately sits next to them rather than next to healthy.
 const healthConfig: ChartConfig = {
   healthy: { label: "Healthy", theme: { light: "oklch(0.58 0.12 150)", dark: "oklch(0.78 0.16 145)" } },
-  quota: { label: "Quota", theme: { light: "oklch(0.68 0.15 70)", dark: "oklch(0.82 0.16 72)" } },
-  unhealthy: { label: "Unhealthy", theme: { light: "oklch(0.52 0.18 25)", dark: "oklch(0.68 0.2 25)" } },
+  half_open: { label: "Unverified", theme: { light: "oklch(0.74 0.13 95)", dark: "oklch(0.86 0.14 98)" } },
+  degraded: { label: "Degraded", theme: { light: "oklch(0.68 0.15 70)", dark: "oklch(0.82 0.16 72)" } },
+  quota: { label: "Quota", theme: { light: "oklch(0.66 0.16 50)", dark: "oklch(0.8 0.16 52)" } },
+  cooling: { label: "Paused", theme: { light: "oklch(0.6 0.16 35)", dark: "oklch(0.75 0.17 38)" } },
+  hard_failed: { label: "Failed", theme: { light: "oklch(0.52 0.18 25)", dark: "oklch(0.68 0.2 25)" } },
   disabled: { label: "Disabled", theme: { light: "oklch(0.7 0.01 85)", dark: "oklch(0.5 0.01 260)" } },
 };
 
@@ -111,12 +119,13 @@ export interface DashboardRequestsSlim {
   by_day: Record<string, RequestAgg>;
 }
 
+// The pool as a partition over the seven backend states. Deliberately NOT a
+// set of independent counters: `by_state` sums to `total` by construction, so
+// the chart can never quietly drop a category (which is what happened to
+// circuit-broken API keys under the old healthy/quota/unhealthy triple).
 export interface DashboardPool {
   total: number;
-  healthy: number;
-  quota: number;
-  unhealthy: number;
-  disabled: number;
+  by_state: ByState;
 }
 
 export interface DashboardBoardProps {
@@ -282,12 +291,11 @@ export function DashboardBoard({
 
   const health = (() => {
     if (!pool) return [];
-    return [
-      { key: "healthy", label: "Healthy", value: pool.healthy },
-      { key: "quota", label: "Quota", value: pool.quota },
-      { key: "unhealthy", label: "Unhealthy", value: pool.unhealthy },
-      { key: "disabled", label: "Disabled", value: pool.disabled },
-    ].filter((x) => x.value > 0);
+    return CRED_STATES.map((key) => ({
+      key,
+      label: STATE_META[key].label,
+      value: pool.by_state[key],
+    })).filter((x) => x.value > 0);
   })();
 
   if (!pool && !reqData && !lifetimeData) {
