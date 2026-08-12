@@ -224,7 +224,7 @@ func TestCodexStreamCanceledContextReportsClientGone(t *testing.T) {
 	var counts usage.Counts
 	// Reader hits EOF immediately; with the context already canceled that must
 	// classify as the client leaving.
-	gone := streamSSEOpenAI(c, bufio.NewReader(strings.NewReader("")), &counts, "")
+	gone, _ := streamSSEOpenAI(c, bufio.NewReader(strings.NewReader("")), &counts, "")
 	if !gone {
 		t.Fatal("a read error under a canceled request context is a client hang-up")
 	}
@@ -249,6 +249,6 @@ func runCodexStream(t *testing.T, sse string, cancelClient bool) (*gin.Context, 
 		defer cancel()
 	}
 	var counts usage.Counts
-	gone := streamSSEOpenAI(c, bufio.NewReader(strings.NewReader(sse)), &counts, "")
+	gone, _ := streamSSEOpenAI(c, bufio.NewReader(strings.NewReader(sse)), &counts, "")
 	return c, counts, gone
 }

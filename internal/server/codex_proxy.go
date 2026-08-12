@@ -31,6 +31,11 @@ import (
 // (codex_oauth_proxy.go) so the request-transformation complexity doesn't
 // clutter the BYOK flow.
 
+// codexTruncatedStreamError is the request-log marker for a stream that ended
+// before its terminal event. It matches the wording the OAuth path and hypitoken
+// already use, so the two hops of one truncated turn line up in the logs.
+const codexTruncatedStreamError = "stream truncated before terminal event"
+
 func (s *Server) handleCodexChatCompletions(c *gin.Context) {
 	s.forward(c, auth.ProviderOpenAI, "/v1/chat/completions")
 }
@@ -277,6 +282,10 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 
 	var counts usage.Counts
 	var errSnippet string
+	// truncatedStream records a stream that ended before its terminal event —
+	// see the classification below. It is deliberately neither a success nor a
+	// fault for the credential.
+	truncatedStream := false
 	outcome := usage.StreamComplete
 	// logStatus defaults to the upstream's. A mid-stream client hang-up
 	// overrides it to 499 so a cancellation stops masquerading as a clean 200.
@@ -297,8 +306,26 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		br := bufio.NewReaderSize(resp.Body, 64*1024)
 		if stream && responseIsSSE(resp.Header, br) {
 			writeResponseHeaders(c, resp)
-			clientGone := streamSSEOpenAI(c, br, &counts, rewriteClientModel)
+			clientGone, sawTerminal := streamSSEOpenAI(c, br, &counts, rewriteClientModel)
 			outcome = usage.ClassifyStreamOutcome(counts, clientGone)
+			// A stream that never reached its terminal event was cut off in
+			// flight — by the model's own upstream, several hops away. It has no
+			// usage for the same reason it has no `response.completed`, so the
+			// generic no-usage verdict below (which cools the credential) would
+			// convict the wrong party. Downgrade it to a truncation: still $0 to
+			// the customer, but health-neutral.
+			//
+			// This is not a theoretical distinction. On 2026-08-12 truncations ran
+			// ~2% of the relay's traffic, and a run of them tripped the breaker on
+			// the only OpenAI API key configured — so the fallback channel went
+			// dark and 44 requests got a 503 from a channel that was, at that
+			// moment, serving everyone else fine.
+			if outcome == usage.StreamUpstreamNoUsage && !sawTerminal {
+				truncatedStream = true
+				outcome = usage.StreamComplete // unbillable anyway: Billable() gates on observed counts
+				log.Warnf("codex proxy(apikey): %s stream truncated before the terminal event (in=%d out=%d) — billing $0, credential untouched",
+					a.ID, counts.InputTokens, counts.OutputTokens)
+			}
 			switch outcome {
 			case usage.StreamClientCanceled:
 				// The user walked away. Bill whatever usage arrived before they
@@ -351,7 +378,12 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	// A client cancellation is a success for the credential: it served bytes
 	// until the caller stopped listening. Only StreamUpstreamNoUsage withholds
 	// MarkSuccess, and it has already reported the fault above.
-	if resp.StatusCode < 400 && !outcome.CredentialFault() {
+	//
+	// A truncated stream withholds it too, without being a fault: the cut came
+	// from further upstream, so it is evidence of neither health nor sickness,
+	// and letting it reset the failure counter would mask a channel that is
+	// genuinely deteriorating.
+	if resp.StatusCode < 400 && !outcome.CredentialFault() && !truncatedStream {
 		a.MarkSuccess()
 	}
 
@@ -371,6 +403,9 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		}
 	}
 	errField := outcome.LogError()
+	if truncatedStream {
+		errField = codexTruncatedStreamError
+	}
 	if resp.StatusCode >= 400 {
 		errField = fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate([]byte(errSnippet), 200))
 	}
@@ -495,7 +530,12 @@ func looksLikeSSE(br *bufio.Reader) bool {
 // The read error alone cannot tell them apart — an upstream RST and a client
 // disconnect surface identically at the reader — so the signal comes from the
 // request context plus the write side, as the Anthropic path already does.
-func streamSSEOpenAI(c *gin.Context, reader *bufio.Reader, counts *usage.Counts, rewriteClientModel string) (clientGone bool) {
+//
+// sawTerminal reports whether the stream reached an event the client treats as
+// the end of the turn. It is the third party to that same billing decision: a
+// stream with no usage AND no terminal event was cut off in flight, which is a
+// property of the model's upstream rather than of the credential we dialled.
+func streamSSEOpenAI(c *gin.Context, reader *bufio.Reader, counts *usage.Counts, rewriteClientModel string) (clientGone, sawTerminal bool) {
 	flusher, _ := c.Writer.(http.Flusher)
 	// c.Request is nil in unit tests that drive the relay directly; treat that
 	// as "no cancellation signal" rather than panicking on the hot path.
@@ -523,12 +563,21 @@ func streamSSEOpenAI(c *gin.Context, reader *bufio.Reader, counts *usage.Counts,
 						}
 					}
 					counts.Add(extractOpenAIUsageFromJSON(payload))
+					// Terminal detection reuses the Codex backend's event names
+					// (/v1/responses): the API-key relays serve the same wire
+					// format. /v1/chat/completions ends with the `[DONE]`
+					// sentinel instead, handled just below.
+					if codexTerminalEvent(payload) {
+						sawTerminal = true
+					}
+				} else if bytes.Equal(payload, []byte("[DONE]")) {
+					sawTerminal = true
 				}
 			}
 			if _, werr := c.Writer.Write(outLine); werr != nil {
 				// Writing to the client failed — it hung up. Nothing further can
 				// be delivered, and the credential is blameless.
-				return true
+				return true, sawTerminal
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -537,7 +586,7 @@ func streamSSEOpenAI(c *gin.Context, reader *bufio.Reader, counts *usage.Counts,
 		if err != nil {
 			// A read error with our own context already canceled means the
 			// client left and the transport tore the upstream down behind it.
-			return ctx != nil && ctx.Err() != nil
+			return ctx != nil && ctx.Err() != nil, sawTerminal
 		}
 	}
 }
