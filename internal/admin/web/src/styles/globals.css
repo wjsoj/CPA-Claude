@@ -232,6 +232,36 @@
     font-feature-settings: "tnum", "zero";
   }
 
+  /* Docs article body. status-docs-panel maps the elements the docs actually
+     use (headings, code, tables, lists, links) to explicit classes; this
+     covers the stragglers so a page that reaches for <h4>, <hr> or <strong>
+     doesn't fall back to the browser's unstyled defaults. */
+  .doc-prose {
+    font-size: 0.9375rem;
+    color: var(--color-foreground);
+  }
+  .doc-prose h1 {
+    font-family: var(--font-display);
+    font-size: 1.75rem;
+    letter-spacing: -0.02em;
+    margin: 1.5rem 0 0.75rem;
+  }
+  .doc-prose h4 {
+    font-weight: 600;
+    margin: 1.25rem 0 0.5rem;
+  }
+  .doc-prose strong {
+    font-weight: 600;
+  }
+  .doc-prose hr {
+    border: 0;
+    border-top: 1px solid var(--color-border);
+    margin: 1.75rem 0;
+  }
+  .doc-prose li > p {
+    margin: 0.25rem 0;
+  }
+
   /* Tabular numbers for any mono block by default */
   .mono, .tabular {
     font-variant-numeric: tabular-nums;

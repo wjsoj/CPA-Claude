@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   Activity,
   AlertTriangle,
   BarChart3,
+  BookOpen,
   CheckCircle2,
   CircleOff,
   Gauge,
@@ -20,6 +21,11 @@ import { StatusDashboardPanel } from "./status-dashboard-panel";
 import { StatusMonitorPanel } from "./status-monitor-panel";
 import { WalletPanel } from "./wallet-panel";
 import { TeamPanel } from "./team-panel";
+// Lazy: the docs tab pulls in react-markdown and the whole bundled doc set,
+// which most visitors (here for the dashboard) never open.
+const StatusDocsPanel = lazy(() =>
+  import("./status-docs-panel").then((m) => ({ default: m.StatusDocsPanel })),
+);
 import {
   loadStatusDashboard,
   loadStatusOverview,
@@ -132,7 +138,7 @@ function Metric({
   );
 }
 
-type StatusTab = "dashboard" | "wallet" | "lookup";
+type StatusTab = "dashboard" | "wallet" | "lookup" | "docs";
 
 export function StatusPage() {
   const [ov, setOv] = useState<StatusOverview | null>(null);
@@ -144,7 +150,12 @@ export function StatusPage() {
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<StatusTab>(() => {
     const stored = localStorage.getItem("cpa.status.tab");
-    if (stored === "lookup" || stored === "wallet" || stored === "dashboard") {
+    if (
+      stored === "lookup" ||
+      stored === "wallet" ||
+      stored === "dashboard" ||
+      stored === "docs"
+    ) {
       return stored;
     }
     return "dashboard";
@@ -316,6 +327,7 @@ export function StatusPage() {
               { key: "dashboard" as const, label: "Dashboard", hint: "CHARTS · AGGREGATE", icon: BarChart3 },
               { key: "wallet" as const, label: "Wallet", hint: "BALANCE · TOPUP · ORDERS", icon: Wallet },
               { key: "lookup" as const, label: "Usage lookup", hint: "TOKEN · LEDGER", icon: Search },
+              { key: "docs" as const, label: "文档", hint: "SETUP · CLI", icon: BookOpen },
             ]).map(({ key, label, hint, icon: Icon }) => {
               const active = tab === key;
               return (
@@ -361,6 +373,18 @@ export function StatusPage() {
         {tab === "wallet" && (
           <div className="stagger pt-2 md:pt-4">
             <WalletPanel />
+          </div>
+        )}
+
+        {tab === "docs" && (
+          <div className="stagger pt-2 md:pt-4">
+            <Suspense
+              fallback={
+                <div className="py-16 text-center text-sm text-muted-foreground">载入文档…</div>
+              }
+            >
+              <StatusDocsPanel />
+            </Suspense>
           </div>
         )}
 
