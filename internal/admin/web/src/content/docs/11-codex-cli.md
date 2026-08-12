@@ -37,7 +37,7 @@ Windows 用户如果在原生 PowerShell 遇到 shell / PTY 问题，改用 WSL2
 
 ```toml
 model_provider = "cpa"
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
