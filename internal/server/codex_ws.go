@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -260,7 +262,7 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 			// frame when ALPN mis-negotiates), which gorilla renders as a long
 			// \x-escaped string. Cap it so a binary reply can't dump a screenful.
 			log.Warnf("codex ws: upstream dial via %s failed (status=%d): %s", cand.ID, status, truncate([]byte(derr.Error()), 200))
-			if s.reportCodexWSDialFault(cand, status, retryAfter, derr) {
+			if s.reportCodexWSDialFault(c.Request.Context(), cand, status, retryAfter, derr) {
 				s.pool.Unstick(provider, clientToken, slotID)
 			}
 			s.pool.Release(provider, clientToken, slotID)
@@ -675,10 +677,24 @@ func (s *Server) codexWSDialTarget(a *auth.Auth, clientToken, slotID, betaValue,
 // whose WS ingress is disabled — touches no health state at all: the credential
 // is fine, it simply has no socket to offer, and quarantining it would take its
 // HTTP traffic down with it.
-func (s *Server) reportCodexWSDialFault(a *auth.Auth, status int, retryAfter time.Time, derr error) (unstick bool) {
+func (s *Server) reportCodexWSDialFault(ctx context.Context, a *auth.Auth, status int, retryAfter time.Time, derr error) (unstick bool) {
 	if status != 0 && !classifyUpstreamStatus(status).retryable() {
 		log.Warnf("codex ws: %s answered the handshake with %d — not a credential fault, leaving health untouched", a.ID, status)
 		return false
+	}
+	// status == 0 means the handshake never produced an HTTP response at all:
+	// the failure is below the protocol, so it says nothing about the
+	// credential until we have ruled out the two things that routinely land
+	// here and are nobody's fault.
+	if status == 0 {
+		if isClientDisconnect(ctx, derr) {
+			// The user closed the tab while we were dialling.
+			return false
+		}
+		if isCodexWSDialFlap(derr) {
+			log.Infof("codex ws: handshake to %s flapped (%v) — network-level, leaving health untouched", a.ID, derr)
+			return false
+		}
 	}
 	if a.Kind == auth.KindAPIKey {
 		if status == 0 {
@@ -695,6 +711,45 @@ func (s *Server) reportCodexWSDialFault(a *auth.Auth, status int, retryAfter tim
 		a.MarkFailure(derr.Error())
 		return false
 	}
+}
+
+// isCodexWSDialFlap reports whether a failed WebSocket handshake was a
+// network-level flap rather than anything the credential did.
+//
+// It is deliberately wider than auth.IsTransientNetErr, which does NOT count a
+// timeout: on the HTTP paths a timeout is meaningful, because the request
+// reached an upstream that then failed to answer in time, and because those
+// paths sit behind the transport's own backoff-retry (auth.retryRoundTripper) —
+// by the time an error surfaces there the flap has already been shown to
+// persist. A WS handshake has neither property. codexws.Dial goes straight out
+// with a 10s budget and no internal retry, so a single slow TLS handshake or a
+// dropped SYN arrives here as `read tcp …: i/o timeout` on the first try, and
+// nothing about it distinguishes a bad credential from a bad moment.
+//
+// Counting those toward health is how a network hiccup takes subscription
+// accounts offline: five in a row hard-fail an OAuth credential
+// (hardFailureThreshold), and two are enough to degrade it. The dial loop
+// already handles the failure the right way by moving to the next credential —
+// this only stops it from also leaving a mark.
+//
+// It applies to relay peers as well as OAuth. A timeout proves no more about a
+// peer than about a subscription account, and the peer is the last channel left
+// when the OAuth fleet is spent — quarantining it on a dropped SYN is how the
+// fallback goes dark exactly when it is needed. Failures that do carry
+// information (a refused connection, an unexplained transport error, any 5xx)
+// still count for both.
+func isCodexWSDialFlap(err error) bool {
+	if err == nil {
+		return false
+	}
+	if auth.IsTransientNetErr(err) {
+		return true
+	}
+	// Covers `i/o timeout` (net.OpError), the dialer's own handshake deadline,
+	// and context.DeadlineExceeded. A client cancellation is context.Canceled,
+	// whose Timeout() is false, and is classified by isClientDisconnect instead.
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // codexWSRelayURL turns a relay peer's HTTP base URL into its Codex responses

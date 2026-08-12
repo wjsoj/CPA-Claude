@@ -1,7 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -143,7 +146,7 @@ func TestCodexWSDialFaultLeavesHealthAloneOnRouteMiss(t *testing.T) {
 	cred := codexRelayCred("peer1", "https://api.example.com", true)
 	s := codexWSTestServer(cred)
 
-	if unstick := s.reportCodexWSDialFault(cred, http.StatusNotFound, time.Time{}, http.ErrNotSupported); unstick {
+	if unstick := s.reportCodexWSDialFault(context.Background(), cred, http.StatusNotFound, time.Time{}, http.ErrNotSupported); unstick {
 		t.Error("a route miss must not break the sticky assignment")
 	}
 	if _, _, _, consecutive := cred.HealthSnapshot(); consecutive != 0 {
@@ -158,7 +161,7 @@ func TestCodexWSDialFaultCountsGatewayErrorsOnRelay(t *testing.T) {
 	cred := codexRelayCred("peer1", "https://api.example.com", true)
 	s := codexWSTestServer(cred)
 	// Transport failure: no status at all.
-	if unstick := s.reportCodexWSDialFault(cred, 0, time.Time{}, http.ErrServerClosed); !unstick {
+	if unstick := s.reportCodexWSDialFault(context.Background(), cred, 0, time.Time{}, http.ErrServerClosed); !unstick {
 		t.Error("a dead peer must break the sticky assignment so the next dial can land elsewhere")
 	}
 	if _, _, _, consecutive := cred.HealthSnapshot(); consecutive != 1 {
@@ -166,6 +169,84 @@ func TestCodexWSDialFaultCountsGatewayErrorsOnRelay(t *testing.T) {
 	}
 	if _, hardFailed, _, _ := cred.HealthSnapshot(); hardFailed {
 		t.Error("an API key must never be hard-failed by a gateway error — that is what the breaker ladder is for")
+	}
+}
+
+// A WS handshake that never got an HTTP response says nothing about the
+// credential until the network has been ruled out. codexws.Dial has a 10s budget
+// and no internal retry, so one slow TLS handshake surfaces here as `i/o
+// timeout` on the very first try — and counting those toward health is how a
+// network hiccup takes subscription accounts offline: two in a row degrade a
+// credential, five hard-fail it. Seen live on 2026-08-12 right after the deploy,
+// twice within ten seconds, against two different Codex accounts.
+func TestCodexWSDialTimeoutDoesNotFaultTheCredential(t *testing.T) {
+	oauth := &auth.Auth{
+		ID: "codex-a.json", Kind: auth.KindOAuth, Provider: auth.ProviderOpenAI,
+		AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour),
+	}
+	s := codexWSTestServer()
+
+	// Exactly what the production log carried.
+	timeout := &net.OpError{
+		Op: "read", Net: "tcp",
+		Err: &timeoutError{},
+	}
+	if unstick := s.reportCodexWSDialFault(context.Background(), oauth, 0, time.Time{}, timeout); unstick {
+		t.Error("a network flap must not break the sticky assignment either")
+	}
+	if _, _, _, consecutive := oauth.HealthSnapshot(); consecutive != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0 — an i/o timeout on the handshake is not the credential's fault", consecutive)
+	}
+
+	// A client that closed the tab mid-dial is likewise blameless.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if unstick := s.reportCodexWSDialFault(ctx, oauth, 0, time.Time{}, context.Canceled); unstick {
+		t.Error("a client hang-up must not break the sticky assignment")
+	}
+	if _, _, _, consecutive := oauth.HealthSnapshot(); consecutive != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0 — the user closed the tab", consecutive)
+	}
+
+	// But a genuine transport failure still counts: the point is to classify,
+	// not to stop counting. (It leaves the sticky assignment alone — only the
+	// credential-scoped statuses 401/403/429 break that.)
+	if unstick := s.reportCodexWSDialFault(context.Background(), oauth, 0, time.Time{}, errors.New("no route to host")); unstick {
+		t.Error("only a credential-scoped status should break the sticky assignment")
+	}
+	if _, _, _, consecutive := oauth.HealthSnapshot(); consecutive != 1 {
+		t.Errorf("ConsecutiveFailures = %d, want 1", consecutive)
+	}
+}
+
+// timeoutError is a net.Error whose Timeout() is true, standing in for the
+// *net.OpError the dialer returns on `i/o timeout`.
+type timeoutError struct{}
+
+func (*timeoutError) Error() string   { return "i/o timeout" }
+func (*timeoutError) Timeout() bool   { return true }
+func (*timeoutError) Temporary() bool { return true }
+
+func TestIsCodexWSDialFlap(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"i/o timeout", &net.OpError{Op: "read", Err: &timeoutError{}}, true},
+		{"deadline exceeded", context.DeadlineExceeded, true},
+		{"connection reset", errors.New("read tcp: connection reset by peer"), true},
+		{"h2 flap", errors.New("http2: client connection lost"), true},
+		// A cancellation is the client's doing, classified by isClientDisconnect;
+		// it must not be swept in here, where it would look like a network fault.
+		{"client cancel", context.Canceled, false},
+		{"anything else", errors.New("no route to host"), false},
+	}
+	for _, tc := range cases {
+		if got := isCodexWSDialFlap(tc.err); got != tc.want {
+			t.Errorf("isCodexWSDialFlap(%s) = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
