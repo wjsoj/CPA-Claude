@@ -27,6 +27,10 @@ function severityOf(p: PoolAgg): Severity | null {
   return null;
 }
 
+// The banner's one and only state readout. It supersedes the worst-state
+// phrase the prose used to carry: `by_state` already contains the worst state
+// alongside everything else, so naming it separately said the same thing twice
+// ("最严重状态 Failed" directly above "… · Failed 3 · …").
 function summarize(p: PoolAgg): string {
   const parts: string[] = [];
   for (const [state, n] of Object.entries(p.by_state)) {
@@ -45,7 +49,6 @@ export function PoolBanner({ pools, className }: { pools: PoolAgg[]; className?:
     <div className={cn("space-y-2", className)}>
       {rows.map(({ p, sev }) => {
         const down = sev === "down";
-        const worst = STATE_META[p.worst_state];
         return (
           <div
             key={p.provider || "pool"}
@@ -72,22 +75,16 @@ export function PoolBanner({ pools, className }: { pools: PoolAgg[]; className?:
               <p className="text-xs md:text-sm opacity-90 leading-relaxed">
                 {down ? (
                   <>
-                    全部 {p.total} 个凭据均无法承接请求，最严重状态为{" "}
-                    <span className="font-medium">
-                      {worst.label}
-                      <span className="opacity-80">（{p.worst_state}）</span>
-                    </span>
-                    。此刻发往该上游的请求会失败。
+                    全部 {p.total} 个凭据均无法承接请求。此刻发往该上游的请求会失败。
                   </>
                 ) : (
                   <>
-                    {p.serving}/{p.total} 个凭据在承接流量，但其中没有一个最近成功过
-                    （最严重状态 <span className="font-medium">{worst.label}</span>）。
+                    {p.serving}/{p.total} 个凭据在承接流量，但其中没有一个最近成功过。
                     随时可能整体不可用。
                   </>
                 )}
               </p>
-              <p className="mono text-[11px] tabular opacity-75">{summarize(p)}</p>
+              <p className="mono text-xs tabular opacity-90">{summarize(p)}</p>
             </div>
           </div>
         );

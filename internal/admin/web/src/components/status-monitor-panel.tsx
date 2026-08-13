@@ -131,7 +131,6 @@ export function StatusMonitorPanel({ refreshTick, pools = [] }: Props) {
 // Pool state with no probe history behind it. Same visual weight as a
 // ProviderCard so the section doesn't look broken when probing is off.
 function PoolOnlyCard({ pool }: { pool: PoolAgg }) {
-  const worst = STATE_META[pool.worst_state];
   const tone = !pool.available
     ? "destructive"
     : pool.by_state.healthy === 0
@@ -163,9 +162,6 @@ function PoolOnlyCard({ pool }: { pool: PoolAgg }) {
             {STATE_META[s].label.toLowerCase()}
           </span>
         ))}
-      </div>
-      <div className="text-[11px] text-muted-foreground">
-        最严重状态 · <span className="font-medium">{worst.label}</span>
       </div>
     </Card>
   );
@@ -210,8 +206,6 @@ function ProviderCard({
   // to the caller's pool aggregate on an older server.
   const byState = p.by_state ?? pool?.by_state;
   const cooling = p.cooling_creds ?? byState?.cooling;
-  const worstKey = (p.worst_state ?? pool?.worst_state) as keyof typeof STATE_META | undefined;
-  const worst = worstKey && STATE_META[worstKey] ? STATE_META[worstKey] : undefined;
   const slots = bucketRecent(p.timeline_24h, generatedAt);
   const recentTotal = slots.reduce((n, s) => n + s.total, 0);
   const recentOk = slots.reduce((n, s) => n + s.ok, 0);
@@ -247,11 +241,6 @@ function ProviderCard({
                   {byState[s]} {STATE_META[s].label.toLowerCase()}
                 </span>
               ))}
-            </div>
-          )}
-          {worst && worstKey !== "healthy" && (
-            <div className={cn("text-[11px]", toneText(worst.tone))}>
-              最严重状态 · {worst.label}
             </div>
           )}
         </div>
