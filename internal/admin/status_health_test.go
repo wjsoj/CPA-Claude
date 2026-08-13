@@ -291,3 +291,49 @@ func TestRetryAfterRoundsUp(t *testing.T) {
 		t.Fatalf("healthy credential must not carry a retry hint, got %d", got)
 	}
 }
+
+// A credential an operator switched off must not be published as the pool's
+// worst state while real faults are present. This is the exact shape
+// production carried on 2026-08-13 — three healthy, three hard-failed, two
+// disabled — which reported worst_state "disabled" and so hid the three
+// retired credentials from the 503 body and the monitor's error line.
+//
+// The fix is cc-core's Severity ladder (v0.8.84); this test is here because
+// this is where the string reaches a user.
+func TestCensusWorstStatePrefersFaultOverDisabled(t *testing.T) {
+	off := testKey("off")
+	off.Disabled = true
+	off2 := testKey("off2")
+	off2.Disabled = true
+	h := testHandler(
+		testKey("ok1"), testKey("ok2"), testKey("ok3"),
+		testHardFailed("x"), testHardFailed("y"), testHardFailed("z"),
+		off, off2,
+	)
+	census := h.poolCensus()
+
+	pool := census.Pools[auth.ProviderAnthropic]
+	if pool.WorstState != string(auth.HealthHardFailed) {
+		t.Errorf("worst_state = %q, want hard_failed — a disabled credential is an operator decision, not the worst fault",
+			pool.WorstState)
+	}
+	if pool.ByState[string(auth.HealthDisabled)] != 2 {
+		t.Errorf("by_state.disabled = %d, want 2", pool.ByState[string(auth.HealthDisabled)])
+	}
+	if pool.ByState[string(auth.HealthHardFailed)] != 3 {
+		t.Errorf("by_state.hard_failed = %d, want 3", pool.ByState[string(auth.HealthHardFailed)])
+	}
+}
+
+// ...but a pool whose only non-healthy credential is disabled still reports it,
+// rather than claiming nothing is going on.
+func TestCensusWorstStateReportsDisabledOverHealthy(t *testing.T) {
+	off := testKey("off")
+	off.Disabled = true
+	h := testHandler(testKey("ok"), off)
+
+	pool := h.poolCensus().Pools[auth.ProviderAnthropic]
+	if pool.WorstState != string(auth.HealthDisabled) {
+		t.Errorf("worst_state = %q, want disabled", pool.WorstState)
+	}
+}

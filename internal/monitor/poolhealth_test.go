@@ -141,8 +141,14 @@ func TestPoolViewByStateSumsToTotal(t *testing.T) {
 	if !view.Available {
 		t.Error("available must be true while three credentials serve")
 	}
-	if view.WorstState != string(auth.HealthDisabled) {
-		t.Errorf("worst_state = %q, want disabled", view.WorstState)
+	// One credential in every state, so this pins which one wins. hard_failed,
+	// not disabled: an operator switching a channel off is not the worst thing
+	// happening in a pool that also has a credential auto-retired under it.
+	// This asserted `disabled` while cc-core's Severity ladder ranked it top
+	// (fixed in v0.8.84) — the inverted answer reached users through the 503
+	// body of an exhausted pool and the monitor's per-provider error line.
+	if view.WorstState != string(auth.HealthHardFailed) {
+		t.Errorf("worst_state = %q, want hard_failed", view.WorstState)
 	}
 }
 
