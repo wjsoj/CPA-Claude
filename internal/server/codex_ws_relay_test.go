@@ -17,6 +17,7 @@ import (
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/clienttoken"
 	"github.com/wjsoj/cc-core/codexws"
+	"github.com/wjsoj/cc-core/mimicry"
 	"github.com/wjsoj/cc-core/pricing"
 	"github.com/wjsoj/cc-core/relay"
 	"github.com/wjsoj/cc-core/usage"
@@ -60,6 +61,27 @@ func codexWSTestServer(creds ...*auth.Auth) *Server {
 		pricing:          pricing.NewCatalog(pricing.Config{}),
 		tokens:           clienttoken.OpenInMemory(),
 		codexRespAccount: newCodexRespAccountStore(codexRespAccountTTL),
+		codexSessions:    codexws.NewSessionRegistry(0),
+	}
+}
+
+// testCodexIdent is the server-derived upstream identity a real handshake
+// carries. It is deliberately NOT the downstream slot id: the session id
+// becomes our upstream prompt_cache_key, so it must never be a value a client
+// can choose.
+// rawHeader reads a header by its literal map key. The Codex handshake uses
+// non-canonical lowercase names, which Header.Get cannot find.
+func rawHeader(h http.Header, name string) string {
+	if v, ok := h[name]; ok && len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
+func testCodexIdent() *mimicry.CodexFrameIdentity {
+	return &mimicry.CodexFrameIdentity{
+		AccountKey: "acct-key",
+		SessionID:  "01a00500-0000-7000-8000-0000000000aa",
 	}
 }
 
@@ -67,18 +89,21 @@ func TestCodexWSDialTargetRelayPeer(t *testing.T) {
 	cred := codexRelayCred("peer1", "https://api.example.com", true)
 	s := codexWSTestServer(cred)
 
-	target, ok := s.codexWSDialTarget(cred, "sk-downstream-user", "win-7", codexws.CodexOpenAIBetaWS, "gpt-5-codex", "")
+	target, ok := s.codexWSDialTarget(cred, "sk-downstream-user", "win-7", codexws.CodexOpenAIBetaWS, testCodexIdent())
 	if !ok {
 		t.Fatal("a relay peer must be dialable over WS — it runs this same stack")
 	}
 	if target.URL != "wss://api.example.com/v1/responses" {
 		t.Errorf("URL = %q, want wss://api.example.com/v1/responses", target.URL)
 	}
-	if got := target.Header.Get("Authorization"); got != "Bearer sk-peer-peer1" {
-		t.Errorf("Authorization = %q — the peer authenticates us by our API key", got)
+	// Read the RAW map keys, not Header.Get. cc-core writes the Codex handshake
+	// header names in the lowercase form the captures show, and Get would
+	// canonicalize the lookup to "Authorization" and miss them.
+	if got := rawHeader(target.Header, "authorization"); got != "Bearer sk-peer-peer1" {
+		t.Errorf("authorization = %q — the peer authenticates us by our API key", got)
 	}
-	if target.Header.Get("Chatgpt-Account-Id") != "" {
-		t.Error("Chatgpt-Account-Id names an upstream ChatGPT account; that is the peer's choice, not ours")
+	if _, ok := target.Header["chatgpt-account-id"]; ok {
+		t.Error("chatgpt-account-id names an upstream ChatGPT account; that is the peer's choice, not ours")
 	}
 	if target.UseUTLS {
 		t.Error("a cooperating peer is not Cloudflare-fronted; the HTTP relay path dials it without uTLS too")
@@ -100,7 +125,7 @@ func TestCodexWSDialTargetRelayPeer(t *testing.T) {
 func TestCodexWSDialTargetRejectsPlainAPIKey(t *testing.T) {
 	cred := codexRelayCred("vendor", "https://vendor.example.com", false)
 	s := codexWSTestServer(cred)
-	if _, ok := s.codexWSDialTarget(cred, "tok", "slot", codexws.CodexOpenAIBetaWS, "gpt-5-codex", ""); ok {
+	if _, ok := s.codexWSDialTarget(cred, "tok", "slot", codexws.CodexOpenAIBetaWS, testCodexIdent()); ok {
 		t.Fatal("a third-party OpenAI-compatible relay serves HTTP POST only; dialing it would only collect a 404")
 	}
 }
@@ -111,7 +136,7 @@ func TestCodexWSDialTargetOAuthUnchanged(t *testing.T) {
 		AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour),
 	}
 	s := codexWSTestServer()
-	target, ok := s.codexWSDialTarget(cred, "tok", "slot", codexws.CodexOpenAIBetaWS, "gpt-5-codex", "")
+	target, ok := s.codexWSDialTarget(cred, "tok", "slot", codexws.CodexOpenAIBetaWS, testCodexIdent())
 	if !ok {
 		t.Fatal("OAuth must remain dialable")
 	}
@@ -404,9 +429,10 @@ func TestCodexWSSessionServedByRelayPeerWhenNoOAuth(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	type peerSaw struct {
-		auth    string
-		relayID relay.Identity
-		frame   string
+		auth             string
+		relayID          relay.Identity
+		frame            string
+		handshakeSession string
 	}
 	saw := make(chan peerSaw, 1)
 	upgrader := gorillaws.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -428,7 +454,15 @@ func TestCodexWSSessionServedByRelayPeerWhenNoOAuth(t *testing.T) {
 		if err != nil {
 			return
 		}
-		saw <- peerSaw{auth: r.Header.Get("Authorization"), relayID: id, frame: string(first)}
+		// r.Header is an INBOUND map, so Go has already canonicalized the
+		// lowercase "session-id" we put on the wire into "Session-Id"; Get
+		// finds it. (Reading our own outbound map would need the raw key.)
+		saw <- peerSaw{
+			auth:             r.Header.Get("Authorization"),
+			relayID:          id,
+			frame:            string(first),
+			handshakeSession: r.Header.Get("session-id"),
+		}
 		// Answer with a terminal event carrying usage, then close cleanly.
 		_ = conn.WriteMessage(gorillaws.TextMessage, []byte(
 			`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":10,"output_tokens":5}}}`))
@@ -476,8 +510,39 @@ func TestCodexWSSessionServedByRelayPeerWhenNoOAuth(t *testing.T) {
 	if got.auth != "Bearer sk-peer-peer1" {
 		t.Errorf("peer saw Authorization %q, want our API key", got.auth)
 	}
-	if got.frame != firstFrame {
-		t.Errorf("peer saw frame %q, want it forwarded verbatim", got.frame)
+	// The frame is NOT forwarded verbatim any more: a client_metadata bound to
+	// our own identity is synthesized onto it. Forwarding the downstream
+	// client's ids would present N of our users as N installations on one
+	// upstream account, and would contradict the ids we put on the handshake.
+	if !strings.HasPrefix(got.frame, `{"type":"response.create","model":"gpt-5-codex",`) {
+		t.Errorf("peer saw frame %q, want the original prefix preserved", got.frame)
+	}
+	if !strings.Contains(got.frame, `"client_metadata"`) {
+		t.Errorf("peer saw frame %q, want a synthesized client_metadata", got.frame)
+	}
+	var relayed struct {
+		ClientMetadata map[string]string `json:"client_metadata"`
+	}
+	if err := json.Unmarshal([]byte(got.frame), &relayed); err != nil {
+		t.Fatalf("relayed frame is not valid JSON: %v", err)
+	}
+	if !strings.HasSuffix(relayed.ClientMetadata["x-codex-window-id"], ":0") ||
+		relayed.ClientMetadata["session_id"] == "" {
+		t.Errorf("relayed client_metadata not bound to our identity: %v", relayed.ClientMetadata)
+	}
+	// THE invariant this whole change exists for: a genuine client's handshake
+	// session-id and its frame's client_metadata.session_id are the same value.
+	// Asserting only "non-empty" would pass even if the two halves disagreed,
+	// which is precisely the tell being removed.
+	if got.handshakeSession == "" {
+		t.Fatal("the peer saw no session-id on the handshake")
+	}
+	if relayed.ClientMetadata["session_id"] != got.handshakeSession {
+		t.Errorf("frame session_id %q disagrees with handshake session-id %q — a real client always has them equal",
+			relayed.ClientMetadata["session_id"], got.handshakeSession)
+	}
+	if want := got.handshakeSession + ":0"; relayed.ClientMetadata["x-codex-window-id"] != want {
+		t.Errorf("frame window id %q, want %q", relayed.ClientMetadata["x-codex-window-id"], want)
 	}
 	if got.relayID.Client != relay.ClientID("sk-downstream-user") || got.relayID.Session != "win-42" {
 		t.Errorf("peer saw relay identity %+v, want our downstream user's slot", got.relayID)

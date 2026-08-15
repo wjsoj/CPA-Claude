@@ -20,6 +20,7 @@ import (
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/clientguard"
 	"github.com/wjsoj/cc-core/clienttoken"
+	"github.com/wjsoj/cc-core/codexws"
 	"github.com/wjsoj/cc-core/pricing"
 	"github.com/wjsoj/cc-core/ratelimit"
 	"github.com/wjsoj/cc-core/requestlog"
@@ -88,6 +89,14 @@ type Server struct {
 	// it, namespaced by credential group. Backs the cross-group previous_response_id
 	// safety boundary on the WS path. Always initialized (cheap; janitor goroutine).
 	codexRespAccount *codexRespAccountStore
+
+	// codexSessions maps a logical downstream conversation to the stable
+	// upstream session id we present for it. That id is the handshake's
+	// session-id AND the frame's prompt_cache_key, so minting a fresh one per
+	// connection would drop every reconnect out of the upstream prompt cache.
+	// Never keyed on anything a downstream client controls alone — see the
+	// anchor built in handleCodexWS.
+	codexSessions *codexws.SessionRegistry
 }
 
 // New constructs the multi-endpoint server. At least one endpoint must be
@@ -99,6 +108,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	cat := pricing.NewCatalog(cfg.Pricing)
 	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens, reqLog: reqLog}
 	s.codexRespAccount = newCodexRespAccountStore(codexRespAccountTTL)
+	s.codexSessions = codexws.NewSessionRegistry(0)
 	if cfg.ClientGuard.Enabled {
 		s.guard = clientguard.New(cfg.ClientGuard.ExtraBlockedUserAgents, !cfg.ClientGuard.AllowEmptyUserAgent)
 		log.Infof("client-guard: enabled on Claude endpoint (blocklist=%d defaults + %d extra, block-empty-ua=%v)",
