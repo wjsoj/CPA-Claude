@@ -156,6 +156,70 @@ func (db *DB) ListWalletTx(ctx context.Context, token string, limit int) ([]*Wal
 	return out, rows.Err()
 }
 
+// ChargedUSDBetween sums everything actually debited for a token over
+// [from, to), across both ledgers.
+//
+// It exists so a usage statement can be reconciled against the money rather
+// than trusting the request log alone. The two records are written by different
+// code on different paths: the debit is a transaction against the wallet, while
+// the itemised row is a separate append to the request log. A crash, a disk
+// problem, or a retention prune can lose the second while the first stands —
+// and then a statement built only from the log silently under-reports what the
+// customer was charged, which is the one direction a spend record must never be
+// wrong in.
+//
+// Both tables are summed because ChargeMemberFirst debits a workspace member's
+// shared pool (workspace_tx) before their personal wallet (wallet_tx); reading
+// only wallet_tx would report a team member's spend as near zero. Amounts are
+// stored negative for charges, so the sums are negated back to positive.
+//
+// The window is half-open: from inclusive, to exclusive, matching how the
+// statement's day bounds are resolved.
+func (db *DB) ChargedUSDBetween(ctx context.Context, token string, from, to time.Time) (float64, error) {
+	if token == "" {
+		return 0, nil
+	}
+	lo, hi := from.Unix(), to.Unix()
+	var personal, pool float64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(-SUM(amount_usd), 0) FROM wallet_tx
+		 WHERE token = ? AND kind = 'charge' AND created_at >= ? AND created_at < ?`,
+		token, lo, hi).Scan(&personal); err != nil {
+		return 0, err
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx
+		 WHERE token = ? AND kind = 'charge' AND created_at >= ? AND created_at < ?`,
+		token, lo, hi).Scan(&pool); err != nil {
+		return 0, err
+	}
+	return personal + pool, nil
+}
+
+// TotalPaidCNY sums alipay_orders.cny_amount for this token's paid orders —
+// what the account has actually paid via Alipay, in yuan.
+//
+// This is deliberately narrower than lifetime spend or the wallet balance:
+// it excludes admin-granted or adjusted credit (wallet_tx kind='adjust'),
+// counting only orders that reached status='paid'. It exists as the ceiling
+// a target-amount usage statement is checked against — that feature lets a
+// token holder generate a statement whose line items sum to a figure they
+// name, and the one thing standing between that and manufacturing a bigger
+// "consumption" total than they ever paid for is refusing to let the target
+// exceed money that genuinely changed hands.
+func (db *DB) TotalPaidCNY(ctx context.Context, token string) (float64, error) {
+	if token == "" {
+		return 0, nil
+	}
+	var total float64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(cny_amount), 0) FROM alipay_orders WHERE token = ? AND status = ?`,
+		token, OrderPaid).Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
 // SetWalletGroup reassigns a token to a different pricing group. Used by
 // the admin panel when an operator moves a token between groups.
 func (db *DB) SetWalletGroup(ctx context.Context, token string, groupID int64) error {

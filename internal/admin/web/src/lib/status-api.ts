@@ -272,6 +272,85 @@ export function queryStatusHistory(args: {
   });
 }
 
+// ---- Usage statement (reimbursement export) ----------------------------
+//
+// The preview and the PDF are built from the same server-side scan, so the
+// numbers in the export dialog are the ones that land in the file. Amounts are
+// the real settled charges in yuan, each converted at the rate its own request
+// settled at — which is why the same range exported twice reads the same.
+
+export interface StatementModelRow {
+  model: string;
+  requests: number;
+  billed_cny: number;
+}
+
+export interface StatementPreview {
+  from: string;
+  to: string;
+  timezone: string;
+  requests: number;
+  billed_cny: number;
+  /** Ledger-confirmed spend with no request-log row behind it. */
+  unitemised_cny?: number;
+  /** The ledger's own total for the range (billed + unitemised). */
+  charged_cny?: number;
+  lifetime_requests: number;
+  lifetime_billed_cny: number;
+  lifetime_days: number;
+  /**
+   * True when `from`/`to` were derived by scanning backward from the newest
+   * request until spend reached `target_cny`, rather than named by the
+   * caller. The dialog must caption the range differently in this mode.
+   */
+  by_target?: boolean;
+  /** The requested figure that produced the range, when `by_target`. */
+  target_cny?: number;
+  /**
+   * The token's total Alipay-paid CNY — the ceiling a target amount must not
+   * exceed. Populated whenever SaaS billing is enabled, not only on target
+   * requests, so the dialog can show it before the user switches into
+   * target mode.
+   */
+  total_paid_cny?: number;
+  /** In-range rows predating per-row rate capture, converted at today's rate. */
+  unrated_requests?: number;
+  /** Rows the PDF will itemise; fewer than `requests` when `truncated`. */
+  detail_lines: number;
+  truncated: boolean;
+  by_model: StatementModelRow[];
+}
+
+export function loadStatementPreview(args: {
+  token: string;
+  from?: string;
+  to?: string;
+  target_cny?: number;
+}): Promise<StatementPreview> {
+  return fetchJSON<StatementPreview>("/status/api/statement", {
+    method: "POST",
+    body: JSON.stringify(args),
+  });
+}
+
+export async function downloadStatementPDF(args: {
+  token: string;
+  from?: string;
+  to?: string;
+  target_cny?: number;
+}): Promise<Blob> {
+  const res = await fetch("/status/api/statement.pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new ApiError(text || `HTTP ${res.status}`, res.status);
+  }
+  return await res.blob();
+}
+
 // ---- Wallet / SaaS billing ---------------------------------------------
 //
 // All wallet endpoints (except /rate, /notify, /groups) require the active

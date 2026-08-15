@@ -45,6 +45,8 @@ func (h *Handler) RegisterStatus(r *gin.Engine) {
 	r.GET("/status/api/dashboard", h.handleStatusDashboard)
 	r.POST("/status/api/query", h.handleStatusQuery)
 	r.POST("/status/api/history", h.handleStatusHistory)
+	r.POST("/status/api/statement", h.handleStatementPreview)
+	r.POST("/status/api/statement.pdf", h.handleStatementPDF)
 	log.Info("admin: public /status/ page enabled")
 }
 

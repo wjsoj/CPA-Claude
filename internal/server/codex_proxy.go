@@ -424,6 +424,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 		CostUSD:     costUSD,
 		BilledUSD:   billed,
 		Multiplier:  multiplier,
+		CNYPerUSD:   s.settleCNYRate(),
 		Status:      logStatus,
 		DurationMs:  time.Since(start).Milliseconds(),
 		Stream:      stream,

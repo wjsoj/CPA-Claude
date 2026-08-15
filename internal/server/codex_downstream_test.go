@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,7 +23,15 @@ import (
 // response header the real backend sends that describes OUR pool rather than
 // the caller's request.
 func codexLeakyUpstream() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Drain the request body before answering. A handler that returns
+		// without reading it leaves Go's server to abort the connection, which
+		// truncates the response we just wrote — the relay then reported the
+		// stream as broken before its terminal event and withheld everything
+		// for a failover with no second credential to try.
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+
 		h := w.Header()
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("X-Codex-Primary-Used-Percent", "42")
@@ -33,21 +42,43 @@ func codexLeakyUpstream() *httptest.Server {
 		h.Set("Set-Cookie", "__cf_bm=leak; HttpOnly")
 		h.Set("Server", "cloudflare")
 		h.Set("Retry-After", "120")
-		w.WriteHeader(http.StatusOK)
 
 		// An in-band rate-limit frame and a telemetry frame, then a terminal
 		// event carrying usage — the shape crack/codexapp0.147.0/rows/13 shows.
+		//
+		// Written as ONE Write. Emitting them event-by-event raced with the
+		// reader: the handler returned, closing the connection, before the last
+		// event had been drained, so the relay saw EOF without a terminal event,
+		// called the stream truncated and retried onto another credential — and
+		// the test then asserted against an empty response, about one run in
+		// five. One write is one chunk, complete before the handler returns.
+		var body strings.Builder
 		for _, line := range []string{
 			`data: {"type":"codex.rate_limits","plan_type":"plus","rate_limits":{"allowed":true,"limit_reached":false,"primary":{"used_percent":42,"reset_at":1787329759}}}`,
 			`data: {"type":"responsesapi.websocket_timing","timing_metrics":{"engine_ids":"gpt56sol-codex-a-c321"}}`,
 			`data: {"type":"response.completed","response":{"id":"resp_1","safety_identifier":"user-SECRET","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}`,
 		} {
-			_, _ = w.Write([]byte(line + "\n\n"))
+			body.WriteString(line)
+			body.WriteString("\n\n")
 		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body.String())
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
+		// Hold the stream open until the reader is done. Returning immediately
+		// closes the connection, and the relay could see EOF before it had
+		// drained the events — it then reported the stream truncated before its
+		// terminal event and withheld the whole response for a failover with no
+		// second credential to try, so the test asserted against an empty
+		// recorder. A real SSE server likewise does not hang up the instant it
+		// finishes writing.
+		select {
+		case <-r.Context().Done():
+		case <-time.After(150 * time.Millisecond):
+		}
 	}))
+	return srv
 }
 
 func codexLeakTestServer(upstreamURL string) (*Server, *auth.Auth) {
@@ -69,10 +100,15 @@ func codexLeakTestServer(upstreamURL string) (*Server, *auth.Auth) {
 
 func runCodexLeakStream(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	upstream := codexLeakyUpstream()
 	t.Cleanup(upstream.Close)
-	s, cred := codexLeakTestServer(upstream.URL)
+	return runCodexLeakStreamAt(t, upstream.URL)
+}
+
+func runCodexLeakStreamAt(t *testing.T, upstreamURL string) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	s, cred := codexLeakTestServer(upstreamURL)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

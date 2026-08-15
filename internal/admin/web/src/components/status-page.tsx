@@ -6,6 +6,7 @@ import {
   BarChart3,
   BookOpen,
   CheckCircle2,
+  FileText,
   Gauge,
   Loader2,
   Plus,
@@ -16,6 +17,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import { StatementDialog } from "./statement-dialog";
 import { StatusDashboardPanel } from "./status-dashboard-panel";
 import { StatusMonitorPanel } from "./status-monitor-panel";
 import { WalletPanel } from "./wallet-panel";
@@ -874,6 +876,7 @@ function TokenLedger({ r, fullToken }: { r: StatusTokenResult; fullToken: string
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [filterActive, setFilterActive] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [pricing, setPricing] = useState<Pricing | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1025,8 +1028,30 @@ function TokenLedger({ r, fullToken }: { r: StatusTokenResult; fullToken: string
               <X className="h-3 w-3" />
             </Button>
           )}
+          {/* Seeded with the ledger's own filter, so "export what I'm looking
+              at" is one click. The dialog still owns the final range. */}
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 px-2.5 text-[11px] gap-1"
+            onClick={() => setExportOpen(true)}
+            title="导出该时间区间的消费对账单 (PDF)"
+          >
+            <FileText className="h-3 w-3" />
+            对账单
+          </Button>
         </div>
       </div>
+
+      <StatementDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        token={fullToken}
+        tokenLabel={r.name || r.masked}
+        initialFrom={from || undefined}
+        initialTo={to || undefined}
+      />
 
       {page.err && (
         <div className="mb-2 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive mono">
