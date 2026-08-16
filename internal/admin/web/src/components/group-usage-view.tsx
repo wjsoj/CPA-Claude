@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, BarChart3, Loader2, RefreshCw } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { AlertTriangle, BarChart3, ChevronDown, ChevronRight, Loader2, RefreshCw } from "lucide-react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
@@ -18,9 +18,9 @@ import {
   type ChartConfig,
 } from "./ui/chart";
 import { DateRangeRow } from "./date-range-row";
-import { rangeProblem, trailingDays } from "@/lib/date-range";
+import { formatTimestampIn, rangeProblem, trailingDays } from "@/lib/date-range";
 import { ApiError } from "@/lib/api";
-import type { GroupUsage } from "@/lib/team-api";
+import type { GroupUsage, TeamRequestRow, TeamRequestsResp } from "@/lib/team-api";
 import { cn } from "@/lib/utils";
 
 // The group's real consumption over a date range, split by member / model / day.
@@ -33,12 +33,23 @@ import { cn } from "@/lib/utils";
 //
 // `load` is injected so the group admin's console (/api/team/usage) and the
 // operator panel (/mgmt-console/api/workspaces/:id/usage) — identical response
-// bodies, different auth — render through one component.
+// bodies, different auth — render through one component. `loadRequests` is the
+// same arrangement for the per-member drill-down, and optional: the operator
+// panel has no itemised endpoint, and where it is absent the member rows simply
+// don't expand.
 
 const usd = (n: number) => `$${(n || 0).toFixed(4)}`;
+const cny = (n: number) =>
+  `¥${(n || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const int = (n: number) => (n || 0).toLocaleString("zh-CN");
 const pct = (part: number, whole: number) =>
   whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : "—";
+
+export type GroupRequestLoader = (args: {
+  from: string;
+  to: string;
+  member: string;
+}) => Promise<TeamRequestsResp>;
 
 const dailySpendConfig: ChartConfig = {
   billed_usd: {
@@ -49,10 +60,12 @@ const dailySpendConfig: ChartConfig = {
 
 export function GroupUsageView({
   load,
+  loadRequests,
   defaultDays = 30,
   className,
 }: {
   load: (from: string, to: string) => Promise<GroupUsage>;
+  loadRequests?: GroupRequestLoader;
   defaultDays?: number;
   className?: string;
 }) {
@@ -244,7 +257,7 @@ export function GroupUsageView({
 
       {shown && (
         <div className="grid gap-3 lg:grid-cols-2">
-          <MemberUsageTable data={shown} />
+          <MemberUsageTable data={shown} loadRequests={loadRequests} />
           <ModelUsageTable data={shown} />
         </div>
       )}
@@ -256,8 +269,33 @@ export function GroupUsageView({
   );
 }
 
-function MemberUsageTable({ data }: { data: GroupUsage }) {
+function MemberUsageTable({
+  data,
+  loadRequests,
+}: {
+  data: GroupUsage;
+  loadRequests?: GroupRequestLoader;
+}) {
   const whole = data.total.billed_usd;
+  // The expanded member is dropped whenever the answered range moves: the rows
+  // underneath belong to the old window, and leaving them open under new dates
+  // reads as an answer to a question nobody asked.
+  const [open, setOpen] = useState("");
+  // Fetched rows live here rather than inside the expanded panel, which is
+  // conditionally rendered and so loses its state on every collapse. Held at
+  // this level, clicking a member shut and open again is free; held below it,
+  // each toggle was another /api/team/requests query — the one endpoint in the
+  // usage family with no server-side cache in front of it.
+  const [fetched, setFetched] = useState<Record<string, MemberRequestRows>>({});
+  useEffect(() => {
+    setOpen("");
+    // Same reasoning as `open`: these rows answer the old range.
+    setFetched({});
+  }, [data.from, data.to]);
+  const remember = useCallback((member: string, rows: MemberRequestRows) => {
+    setFetched((prev) => ({ ...prev, [member]: rows }));
+  }, []);
+
   return (
     <div className="overflow-x-auto rounded-lg border border-border/60">
       <Table>
@@ -270,12 +308,27 @@ function MemberUsageTable({ data }: { data: GroupUsage }) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {data.by_member.map((m) => (
-            <TableRow key={m.masked}>
+          {data.by_member.map((m) => {
+            // A member whose masked token can't be told apart from another's
+            // has no rows of its own to show, so there is nothing to drill into.
+            const drillable = !!loadRequests && !m.unmeasurable;
+            const expanded = open === m.masked;
+            return (
+            <Fragment key={m.masked}>
+            <TableRow
+              className={cn(drillable && "cursor-pointer", expanded && "bg-muted/40")}
+              onClick={drillable ? () => setOpen(expanded ? "" : m.masked) : undefined}
+            >
               {/* nowrap so a narrow screen scrolls the table rather than
                   hyphenating a masked token down four lines. */}
               <TableCell className="whitespace-nowrap">
                 <div className="flex items-center gap-1.5">
+                  {drillable &&
+                    (expanded ? (
+                      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    ))}
                   <span className="font-mono text-xs">{m.masked}</span>
                   {m.role === "admin" && (
                     <Badge variant="secondary" className="px-1 py-0 text-[10px]">
@@ -305,7 +358,24 @@ function MemberUsageTable({ data }: { data: GroupUsage }) {
                 <div className="text-[10px] opacity-80">{usd(m.personal_billed_usd)}</div>
               </TableCell>
             </TableRow>
-          ))}
+            {expanded && loadRequests && (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={4} className="bg-muted/20 p-0">
+                  <MemberRequests
+                    load={loadRequests}
+                    member={m.masked}
+                    from={data.from}
+                    to={data.to}
+                    cached={fetched[m.masked]}
+                    onLoaded={remember}
+                    fallbackZone={data.timezone}
+                  />
+                </TableCell>
+              </TableRow>
+            )}
+            </Fragment>
+            );
+          })}
           {data.by_member.length === 0 && (
             <TableRow>
               <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
@@ -317,6 +387,144 @@ function MemberUsageTable({ data }: { data: GroupUsage }) {
       </Table>
       <p className="px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
         「池」来自组池流水，「个人」是总消费减去池消费的推算值——两者出自不同账本，边界处可能有微小出入。
+      </p>
+    </div>
+  );
+}
+
+interface MemberRequestRows {
+  rows: TeamRequestRow[];
+  truncated: boolean;
+  /** Zone the server cut the day window on; row times are printed in it. */
+  timezone: string;
+}
+
+// One member's requests, one row each, over the range the view above is
+// already showing — the range is never picked twice.
+//
+// This is a drill-down, not a second set of figures: the server caps the rows
+// and says so with `truncated`, so the amounts here are not meant to add up to
+// the member's total in the table above.
+//
+// The rows themselves are owned by MemberUsageTable; this component only asks
+// for them when they aren't there yet.
+function MemberRequests({
+  load,
+  member,
+  from,
+  to,
+  cached,
+  onLoaded,
+  fallbackZone,
+}: {
+  load: GroupRequestLoader;
+  member: string;
+  from: string;
+  to: string;
+  cached?: MemberRequestRows;
+  onLoaded: (member: string, rows: MemberRequestRows) => void;
+  fallbackZone: string;
+}) {
+  // Starts loading unless the rows are already in hand, so the first render of
+  // a fresh expand shows the spinner rather than a flash of "no requests".
+  const [loading, setLoading] = useState(!cached);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    // Already answered for this range — a re-expand must not re-query.
+    if (cached) {
+      setLoading(false);
+      setErr("");
+      return;
+    }
+    let live = true;
+    setLoading(true);
+    setErr("");
+    load({ from, to, member })
+      .then((r) => {
+        if (!live) return;
+        onLoaded(member, {
+          rows: r.requests || [],
+          truncated: !!r.truncated,
+          timezone: r.timezone || fallbackZone,
+        });
+      })
+      .catch((e) => {
+        if (!live) return;
+        // Deliberately not cached: a failure should be retried on re-expand.
+        setErr(e instanceof ApiError ? e.message : String(e));
+      })
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [load, member, from, to, cached, onLoaded, fallbackZone]);
+
+  const rows = cached?.rows ?? null;
+  const truncated = !!cached?.truncated;
+  const zone = cached?.timezone || fallbackZone;
+
+  if (loading && !rows) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-3 text-xs text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        正在拉取逐笔请求…
+      </div>
+    );
+  }
+  if (err) {
+    return <div className="px-3 py-3 text-xs text-destructive">逐笔请求加载失败：{err}</div>;
+  }
+  if (!rows || rows.length === 0) {
+    return (
+      <div className="px-3 py-3 text-xs text-muted-foreground">该区间内该成员没有请求记录。</div>
+    );
+  }
+
+  return (
+    <div className={cn("space-y-1.5 px-3 py-2", loading && "opacity-50 transition-opacity")}>
+      {/* Capped height: a 200-row list otherwise pushes the model table and
+          everything below it off the bottom of the panel. */}
+      <div className="max-h-[320px] overflow-y-auto overflow-x-auto rounded-md border border-border/60 bg-background/40">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              {/* The zone is spelled out because it is the display zone the
+                  range was cut on, not the reader's — see formatTimestampIn. */}
+              <TableHead className="h-8 whitespace-nowrap">时间 · {zone}</TableHead>
+              <TableHead className="h-8">模型</TableHead>
+              <TableHead className="h-8 text-right">状态</TableHead>
+              <TableHead className="h-8 text-right">输入 / 输出</TableHead>
+              <TableHead className="h-8 text-right">金额</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r, i) => (
+              <TableRow key={`${r.ts}-${i}`}>
+                <TableCell className="whitespace-nowrap py-1.5 font-mono text-xs text-muted-foreground">
+                  {formatTimestampIn(r.ts, zone)}
+                </TableCell>
+                <TableCell className="py-1.5 font-mono text-xs">{r.model || "—"}</TableCell>
+                <TableCell className="py-1.5 text-right font-mono text-xs">
+                  <span className={cn(r.status >= 400 && "text-destructive")}>{r.status || "—"}</span>
+                </TableCell>
+                <TableCell className="whitespace-nowrap py-1.5 text-right font-mono text-xs text-muted-foreground">
+                  {int(r.input_tokens)} / {int(r.output_tokens)}
+                </TableCell>
+                <TableCell className="whitespace-nowrap py-1.5 text-right font-mono text-xs">
+                  {cny(r.billed_cny)}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {truncated
+          ? `仅显示最近 ${int(rows.length)} 笔，区间内更早的请求未列出——金额请以上方汇总为准。`
+          : `共 ${int(rows.length)} 笔，按时间倒序。`}
       </p>
     </div>
   );

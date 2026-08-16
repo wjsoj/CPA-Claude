@@ -21,11 +21,17 @@ package tokenmask
 // which is therefore NOT a usable identity — callers that key on the mask must
 // treat it as "cannot distinguish this token".
 func Mask(tok string) string {
-	if len(tok) <= 10 {
+	if len(tok) <= MinDistinguishableLen {
 		return Opaque
 	}
 	return tok[:6] + "…" + tok[len(tok)-4:]
 }
+
+// MinDistinguishableLen is the longest token that still masks to Opaque —
+// prefix and suffix would overlap at or below it. Exported so the one place
+// that mints tokens can refuse to create a token nothing downstream can tell
+// apart, rather than each caller re-deriving 6+4 from Mask.
+const MinDistinguishableLen = 10
 
 // Opaque is what Mask returns for a token short enough that prefix and suffix
 // would overlap. Every such token shares this one string, so usage keyed on the

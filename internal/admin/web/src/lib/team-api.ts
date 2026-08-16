@@ -178,17 +178,34 @@ export interface TeamLedgerRow {
   created_at: number;
 }
 
+// ---- Per-request drill-down -------------------------------------------
+//
+// /api/team/requests is the itemised view under /usage, not a second source of
+// truth for it: the rows are capped and `truncated` says so, so summing them
+// undercounts. The totals stay with /usage.
+
 export interface TeamRequestRow {
+  /** Masked token of the member the row belongs to. */
   member: string;
   label?: string;
   ts: number;
   provider?: string;
   model?: string;
   status: number;
-  input: number;
-  output: number;
-  cost_usd: number;
-  billed_usd?: number;
+  input_tokens: number;
+  output_tokens: number;
+  /** What was actually charged; the server reads BilledOrCost, not the raw field. */
+  billed_usd: number;
+  /** Same amount at the statement's rate — this is the column users reconcile. */
+  billed_cny: number;
+}
+
+export interface TeamRequestsResp {
+  requests: TeamRequestRow[];
+  /** The cap was hit: only the newest rows of the range came back. */
+  truncated: boolean;
+  /** Zone the day range was cut on. */
+  timezone: string;
 }
 
 export interface TeamTopupResp {
@@ -270,8 +287,24 @@ export const teamRemoveMember = (token: string, masked: string) =>
 export const teamLedger = (token: string) =>
   teamFetch<{ ledger: TeamLedgerRow[] }>(token, "/api/team/ledger");
 
-export const teamRequests = (token: string) =>
-  teamFetch<{ requests: TeamRequestRow[] }>(token, "/api/team/requests");
+/**
+ * Itemised requests for the group. `member` is a **masked** token (the form
+ * /api/team/usage reports), and the window is the same inclusive day-label pair
+ * every other range in this app speaks — never a timestamp, which would cost
+ * the server its pre-summed index.
+ */
+export const teamRequests = (
+  token: string,
+  opts: { from?: string; to?: string; member?: string; limit?: number } = {},
+) => {
+  const q = new URLSearchParams();
+  if (opts.from) q.set("from", opts.from);
+  if (opts.to) q.set("to", opts.to);
+  if (opts.member) q.set("member", opts.member);
+  if (opts.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return teamFetch<TeamRequestsResp>(token, `/api/team/requests${qs ? `?${qs}` : ""}`);
+};
 
 export const teamTopup = (token: string, usd: number) =>
   teamFetch<TeamTopupResp>(token, "/api/team/topup", {

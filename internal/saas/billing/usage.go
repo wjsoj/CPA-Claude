@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,6 +43,11 @@ import (
 //     fleet-wide pass stays either way: it is one query no matter how large the
 //     team is, and losing it would take the whole feature down on a deployment
 //     that legitimately runs log_index_disabled.
+//   - Every query names the groupings it reads (Filter.Dims). The unrequested
+//     ones come back empty, so the pairing of "which dims" with "which map is
+//     read" is a correctness rule and not only a cost one — which is why the
+//     two shapes this file needs are two named accessors rather than a
+//     parameter each caller passes.
 
 // DayLayout is the wire format for every date parameter on the usage
 // endpoints: an inclusive whole day in the request log's display zone. RFC3339
@@ -325,7 +331,7 @@ func groupBreakdown(dir, from, to string, members []MemberUsage) (breakdown, boo
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			res, err := cachedUsageQuery(dir, from, to, mask)
+			res, err := cachedMemberBreakdown(dir, from, to, mask)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -555,29 +561,37 @@ func addAggregate(a, b requestlog.Aggregate) requestlog.Aggregate {
 // (Limit is 1 precisely so the query returns aggregates and no page). The maps
 // are shared between concurrent readers and must be treated as read-only —
 // Aggregate is a value type, so reading a bucket copies it.
+//
+// A map is empty rather than absent when its dimension wasn't asked for, so a
+// result may only be read through the accessor whose dims produced it — see
+// cachedUsageQuery / cachedMemberBreakdown.
 type usageResult struct {
-	// Summary is the filter's own total. It equals ByClient[mask] on a
-	// single-member query and the whole fleet's spend on an unfiltered one, so
-	// only the filtered callers may read it.
-	Summary  requestlog.Aggregate
 	ByClient map[string]requestlog.Aggregate
 	ByModel  map[string]requestlog.Aggregate
 	ByDay    map[string]requestlog.Aggregate
 }
 
 // usageFilter builds every request-log query this package makes. It is a
-// separate function so the one rule that costs two orders of magnitude when
-// broken — day labels, never a From/To timestamp pair — is stated once and can
-// be asserted by test.
+// separate function so the two rules that decide what a query costs are stated
+// once and can be asserted by test:
 //
-// Limit 1, never PageOnly: PageOnly zeroes exactly the aggregates this whole
-// file reads. One entry row is answered off an index and costs nothing.
-func usageFilter(dir, fromDay, toDay, clientToken string) requestlog.Filter {
+//   - The window is day labels, never a From/To timestamp pair. Breaking this
+//     costs two orders of magnitude and changes no number (see the file header).
+//   - Dims names exactly the groupings the caller reads. Each is its own GROUP
+//     BY over the cube, so asking for four when one is read pays for three
+//     nobody looks at — and this package's per-member fan-out pays it 40 times
+//     over. Never zero: zero means "all four", which is the right default for a
+//     caller that has never heard of the field but the wrong one here.
+//
+// Limit 1, never PageOnly: PageOnly zeroes every aggregate at once, which is
+// all this file reads. One entry row is answered off an index and costs nothing.
+func usageFilter(dir, fromDay, toDay, clientToken string, dims requestlog.Dims) requestlog.Filter {
 	return requestlog.Filter{
 		Dir:         dir,
 		FromDay:     fromDay,
 		ToDay:       toDay,
 		ClientToken: clientToken,
+		Dims:        dims,
 		Limit:       1,
 	}
 }
@@ -593,12 +607,31 @@ var usageQueryCache = struct {
 	sf singleflight.Group
 }{m: map[string]usageCacheEntry{}}
 
-// cachedUsageQuery runs one aggregate query, deduplicating concurrent callers
+// cachedUsageQuery answers "what did each token spend over this window" — the
+// per-client buckets, and nothing else. It is what both the fleet-wide pass and
+// the member-list windows read; ByModel/ByDay on this result are empty by
+// construction, so a caller that needs them wants cachedMemberBreakdown.
+func cachedUsageQuery(dir, fromDay, toDay, clientToken string) (*usageResult, error) {
+	return cachedDimsQuery(dir, fromDay, toDay, clientToken, requestlog.DimByClient)
+}
+
+// cachedMemberBreakdown answers one member's model/day cross-tab. ByClient on
+// this result is empty: the filter already pins the member, so the bucket would
+// only restate a total the caller has from the fleet-wide pass.
+func cachedMemberBreakdown(dir, fromDay, toDay, mask string) (*usageResult, error) {
+	return cachedDimsQuery(dir, fromDay, toDay, mask, requestlog.DimByModel|requestlog.DimByDay)
+}
+
+// cachedDimsQuery runs one aggregate query, deduplicating concurrent callers
 // and reusing the answer briefly. Both the team console and the operator panel
 // poll, and the fleet-wide query is identical for every group — so the cache is
 // keyed on the query, not on the workspace.
-func cachedUsageQuery(dir, fromDay, toDay, clientToken string) (*usageResult, error) {
-	key := dir + "\x00" + fromDay + "\x00" + toDay + "\x00" + clientToken
+//
+// dims is part of the key because it changes what the entry contains, not just
+// how it was obtained: serving a breakdown caller from a ByClient-only entry
+// would hand back empty maps that read as "this member spent nothing".
+func cachedDimsQuery(dir, fromDay, toDay, clientToken string, dims requestlog.Dims) (*usageResult, error) {
+	key := dir + "\x00" + fromDay + "\x00" + toDay + "\x00" + clientToken + "\x00" + strconv.Itoa(int(dims))
 	usageQueryCache.mu.Lock()
 	if e, ok := usageQueryCache.m[key]; ok && time.Since(e.at) < usageCacheTTL {
 		usageQueryCache.mu.Unlock()
@@ -607,11 +640,11 @@ func cachedUsageQuery(dir, fromDay, toDay, clientToken string) (*usageResult, er
 	usageQueryCache.mu.Unlock()
 
 	v, err, _ := usageQueryCache.sf.Do(key, func() (any, error) {
-		res, err := requestlog.Query(usageFilter(dir, fromDay, toDay, clientToken))
+		res, err := requestlog.Query(usageFilter(dir, fromDay, toDay, clientToken, dims))
 		if err != nil {
 			return nil, err
 		}
-		out := &usageResult{Summary: res.Summary, ByClient: res.ByClient, ByModel: res.ByModel, ByDay: res.ByDay}
+		out := &usageResult{ByClient: res.ByClient, ByModel: res.ByModel, ByDay: res.ByDay}
 		usageQueryCache.mu.Lock()
 		usageQueryCache.m[key] = usageCacheEntry{res: out, at: time.Now()}
 		evictExpiredUsageEntries()

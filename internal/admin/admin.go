@@ -1992,6 +1992,19 @@ func (h *Handler) handleCreateToken(c *gin.Context) {
 		}
 		tok = v
 	}
+	// A token this short masks to tokenmask.Opaque, the one string every short
+	// token collapses to — and the mask is the request log's only client
+	// identity. Such a token's usage is indistinguishable from every other
+	// short token's, so the team console has to report it as unmeasurable and
+	// refuse to query it (see internal/saas/billing/team_requests.go). Refusing
+	// it here is what stops new rows of that kind being created; the ones
+	// already in the wild are handled downstream.
+	if len(tok) <= tokenmask.MinDistinguishableLen {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+			"error": "token too short: usage keyed on the masked token could not be told apart from other short tokens",
+		})
+		return
+	}
 	entry := clienttoken.Token{
 		Token:         tok,
 		Name:          body.Name,

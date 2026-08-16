@@ -35,6 +35,7 @@ import {
   teamRemoveMember,
   teamLedger,
   teamUsage,
+  teamRequests,
   teamTopup,
   teamInvoiceSummary,
   teamInvoices,
@@ -113,6 +114,11 @@ export function TeamPanel({ token }: { token: string }) {
     (from: string, to: string) => teamUsage(token, from, to),
     [token],
   );
+  // Same reason: the drill-down re-fetches whenever its loader changes.
+  const requestsLoader = useCallback(
+    (args: { from: string; to: string; member: string }) => teamRequests(token, args),
+    [token],
+  );
 
   if (err) {
     return (
@@ -160,7 +166,7 @@ export function TeamPanel({ token }: { token: string }) {
         onChange={load}
       />
 
-      <GroupUsageView load={usageLoader} />
+      <GroupUsageView load={usageLoader} loadRequests={requestsLoader} />
 
       <TeamInvoiceSection token={token} />
 

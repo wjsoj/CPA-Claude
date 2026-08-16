@@ -3,9 +3,7 @@ package billing
 import (
 	"errors"
 	"net/http"
-	"sort"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -346,117 +344,6 @@ func (t *TeamHandler) ledger(c *gin.Context) {
 		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, gin.H{"ledger": out})
-}
-
-// requests returns recent request-log entries for this workspace's members,
-// merged newest-first. Tokens in the log are already masked; we match members
-// by their masked form. Bounded: at most 50 members scanned, 200 rows out.
-//
-// This is the drill-down under /usage, not a second source of truth for it:
-// PageOnly deliberately returns rows without aggregates, and the rows are
-// truncated, so summing them would undercount. Totals come from /usage.
-//
-// Optional from/to (inclusive YYYY-MM-DD day labels, same contract as /usage)
-// and member (a masked token) narrow it.
-func (t *TeamHandler) requests(c *gin.Context) {
-	if t.LogDir == "" {
-		c.JSON(http.StatusOK, gin.H{"requests": []any{}})
-		return
-	}
-	fromDay, toDay := "", ""
-	if v := c.Query("from"); v != "" {
-		d, err := ParseDay(v)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		fromDay = d
-	}
-	if v := c.Query("to"); v != "" {
-		d, err := ParseDay(v)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		toDay = d
-	}
-	only := c.Query("member")
-	ws := t.ws(c)
-	ms, err := t.DB.ListMembers(c.Request.Context(), ws.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if only != "" {
-		// Filtering by member happens against this workspace's own roster, so
-		// a masked token belonging to someone else's team reads back as empty
-		// rather than leaking their traffic.
-		filtered := ms[:0:0]
-		for _, m := range ms {
-			if maskToken(m.Token) == only {
-				filtered = append(filtered, m)
-			}
-		}
-		ms = filtered
-	}
-	if len(ms) > 50 {
-		ms = ms[:50]
-	}
-	labelByMask := make(map[string]string, len(ms))
-	type entry struct {
-		ts  time.Time
-		row gin.H
-	}
-	var all []entry
-	for _, m := range ms {
-		masked := maskToken(m.Token)
-		if t.TokenLabel != nil {
-			labelByMask[masked] = t.TokenLabel(m.Token)
-		}
-		res, qerr := requestlog.Query(requestlog.Filter{
-			Dir:         t.LogDir,
-			ClientToken: masked,
-			// Day labels, never a From/To timestamp pair — the timestamp form
-			// forfeits the pre-summed index and scans row by row.
-			FromDay: fromDay,
-			ToDay:   toDay,
-			Limit:   100,
-			// Only res.Entries is read below — skip the per-member aggregates
-			// and stop scanning at the newest 100 hits so a 50-member team
-			// dashboard doesn't trigger 50 full-archive scans.
-			PageOnly: true,
-		})
-		if qerr != nil {
-			continue
-		}
-		for _, r := range res.Entries {
-			all = append(all, entry{ts: r.TS, row: gin.H{
-				"member":   masked,
-				"label":    labelByMask[masked],
-				"ts":       r.TS.Unix(),
-				"provider": r.Provider,
-				"model":    r.Model,
-				"status":   r.Status,
-				"input":    r.Input,
-				"output":   r.Output,
-				"cost_usd": r.CostUSD,
-				// BilledOrCost, not the raw field: rows written before the
-				// cost/billed split carry the charge in cost_usd alone and
-				// would show up as free. These rows get compared against an
-				// invoice, so a legacy row reading 0 is a support ticket.
-				"billed_usd": r.BilledOrCost(),
-			}})
-		}
-	}
-	sort.Slice(all, func(i, j int) bool { return all[i].ts.After(all[j].ts) })
-	if len(all) > 200 {
-		all = all[:200]
-	}
-	out := make([]gin.H, 0, len(all))
-	for _, e := range all {
-		out = append(out, e.row)
-	}
-	c.JSON(http.StatusOK, gin.H{"requests": out})
 }
 
 // usage answers "what did this team really spend over this window", split by

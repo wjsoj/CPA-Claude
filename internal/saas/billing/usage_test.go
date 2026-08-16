@@ -419,7 +419,7 @@ func masks(ms []MemberUsage) []string {
 // Modelled on internal/admin/datebounds_test.go, which pins the same rule one
 // layer up.
 func TestUsageFilterStatesTheWindowInDays(t *testing.T) {
-	f := usageFilter("/logs", "2026-08-01", "2026-08-16", "sk-abc…wxyz")
+	f := usageFilter("/logs", "2026-08-01", "2026-08-16", "sk-abc…wxyz", requestlog.DimByClient)
 	if f.FromDay != "2026-08-01" || f.ToDay != "2026-08-16" {
 		t.Fatalf("day labels not passed through: %+v", f)
 	}
@@ -434,6 +434,70 @@ func TestUsageFilterStatesTheWindowInDays(t *testing.T) {
 	}
 	if f.Limit != 1 {
 		t.Fatalf("limit = %d, want 1 (aggregates only)", f.Limit)
+	}
+	if f.Dims != requestlog.DimByClient {
+		t.Fatalf("dims = %d, want the caller's own set passed through", f.Dims)
+	}
+}
+
+// The two accessors are the only places dims are chosen, and each must ask for
+// exactly the maps its callers read. Asking for less returns an empty map that
+// reads as "spent nothing"; asking for more buys a GROUP BY per member that
+// nobody looks at. A dims of zero is the loudest way to get the second, because
+// requestlog reads zero as "all four".
+func TestCachedQueriesAskForTheDimsTheyRead(t *testing.T) {
+	dir := newDir(t)
+	now := time.Now().UTC().Add(-24 * time.Hour)
+	writeLog(t, dir, []requestlog.Record{
+		rec(now, tokAlice, "claude-opus-4-7", 3),
+		rec(now, tokBob, "claude-sonnet-5", 5),
+	})
+	mask := tokenmask.Mask(tokAlice)
+
+	byClient, err := cachedUsageQuery(dir, day(now), day(now), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !approx(byClient.ByClient[mask].BilledUSD, 3) {
+		t.Fatalf("fleet-wide pass lost its per-client buckets: %+v", byClient.ByClient)
+	}
+	if len(byClient.ByModel) != 0 || len(byClient.ByDay) != 0 {
+		t.Fatalf("fleet-wide pass paid for cross-tabs nobody reads: %+v %+v", byClient.ByModel, byClient.ByDay)
+	}
+
+	bd, err := cachedMemberBreakdown(dir, day(now), day(now), mask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !approx(bd.ByModel["claude-opus-4-7"].BilledUSD, 3) || len(bd.ByModel) != 1 {
+		t.Fatalf("member breakdown lost ByModel: %+v", bd.ByModel)
+	}
+	if !approx(bd.ByDay[day(now)].BilledUSD, 3) || len(bd.ByDay) != 1 {
+		t.Fatalf("member breakdown lost ByDay: %+v", bd.ByDay)
+	}
+	if len(bd.ByClient) != 0 {
+		t.Fatalf("member breakdown paid for a bucket the filter already pins: %+v", bd.ByClient)
+	}
+}
+
+// The cache key has to carry the dims: the two shapes share a directory, a
+// window and — for a single-member call — a token, so a key without them lets
+// whichever shape ran first answer the other with empty maps.
+func TestUsageCacheDoesNotServeAcrossDims(t *testing.T) {
+	dir := newDir(t)
+	now := time.Now().UTC().Add(-24 * time.Hour)
+	writeLog(t, dir, []requestlog.Record{rec(now, tokAlice, "claude-opus-4-7", 3)})
+	mask := tokenmask.Mask(tokAlice)
+
+	if _, err := cachedUsageQuery(dir, day(now), day(now), mask); err != nil {
+		t.Fatal(err)
+	}
+	bd, err := cachedMemberBreakdown(dir, day(now), day(now), mask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !approx(bd.ByModel["claude-opus-4-7"].BilledUSD, 3) {
+		t.Fatalf("breakdown served from the by-client entry: %+v", bd.ByModel)
 	}
 }
 

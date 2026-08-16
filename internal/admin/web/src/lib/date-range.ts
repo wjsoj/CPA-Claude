@@ -67,6 +67,59 @@ export function rangeProblem(from: string, to: string): string | null {
   return null;
 }
 
+// One formatter per zone: an itemised drill-down renders hundreds of rows, and
+// constructing an Intl.DateTimeFormat is the expensive half of formatting one.
+const tsFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function tsFormatter(zone: string): Intl.DateTimeFormat | null {
+  const hit = tsFormatters.get(zone);
+  if (hit) return hit;
+  try {
+    // hourCycle rather than hour12:false — the latter still prints midnight as
+    // "24:00" under some locales.
+    const f = new Intl.DateTimeFormat("en-CA", {
+      timeZone: zone,
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+    tsFormatters.set(zone, f);
+    return f;
+  } catch {
+    // Unrecognised IANA name (old engine, or a zone we've never heard of).
+    return null;
+  }
+}
+
+/**
+ * Unix seconds → `MM-DD HH:mm:ss` in `zone`, the display zone the server cut
+ * the day window on.
+ *
+ * Rendering these in the browser's zone instead is what makes an itemised view
+ * look wrong to anyone outside the display zone: the range is a day label in
+ * `requestlog.BucketLocation()`, so a request at 00:30 CST inside a 08-17 range
+ * prints as "08-16 16:30" for a UTC reader and reads as the server having
+ * returned a row from outside the range it was asked for. The amount is right;
+ * the date attribution is not, and this panel exists to be reconciled against.
+ *
+ * Falls back to the browser's zone only when the server sent no zone or an
+ * unusable one — a caller that has a zone should always pass it.
+ */
+export function formatTimestampIn(ts: number, zone?: string): string {
+  const d = new Date((ts || 0) * 1000);
+  const f = zone ? tsFormatter(zone) : null;
+  if (f) {
+    const parts = f.formatToParts(d);
+    const at = (t: Intl.DateTimeFormatPartTypes) =>
+      parts.find((p) => p.type === t)?.value ?? "";
+    return `${at("month")}-${at("day")} ${at("hour")}:${at("minute")}:${at("second")}`;
+  }
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 export interface RangePreset {
   label: string;
   range: () => { from: string; to: string };
