@@ -122,8 +122,13 @@ func (t *TeamHandler) createInvoice(c *gin.Context) {
 	}
 	// Same validation as the personal flow — a team fapiao is not a different
 	// document, only a different funding source.
-	if b.CNYAmount <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "cny_amount must be positive"})
+	//
+	// Validate what will actually be billed, not what was typed. The amount is
+	// quantised to fen below, and anything under half a fen quantises to zero —
+	// which the store rejects as non-positive, surfacing a user's typo as a 500.
+	amountCNY := round2(b.CNYAmount)
+	if amountCNY < minInvoiceCNY {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cny_amount must be at least ¥0.01"})
 		return
 	}
 	if !isLikelyEmail(b.ContactEmail) {
@@ -140,7 +145,7 @@ func (t *TeamHandler) createInvoice(c *gin.Context) {
 		return
 	}
 
-	inv, err := t.DB.CreateWorkspaceInvoice(c.Request.Context(), ws.ID, t.adminToken(c), round2(b.CNYAmount),
+	inv, err := t.DB.CreateWorkspaceInvoice(c.Request.Context(), ws.ID, t.adminToken(c), amountCNY,
 		db.InvoiceTitle{
 			Name: b.Title.Name, TaxNo: b.Title.TaxNo, Address: b.Title.Address,
 			Phone: b.Title.Phone, Bank: b.Title.Bank, BankAccount: b.Title.BankAccount,

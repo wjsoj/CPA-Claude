@@ -154,3 +154,20 @@ func TestInvoiceDownloadRefusesRejectedTeamInvoice(t *testing.T) {
 		t.Fatalf("rejected invoice served a PDF: %s", w.Body.String())
 	}
 }
+
+// The personal endpoint quantises the same way the team one does, and had the
+// same defect: a positive amount under half a fen became zero on the way to the
+// store, whose "must be positive" rejection the handler did not recognise as a
+// user error and reported as a 500.
+func TestPersonalInvoiceRejectsSubFenAmount(t *testing.T) {
+	e, _, _ := newInvoiceTest(t)
+
+	body := map[string]any{
+		"cny_amount":    0.001,
+		"contact_email": "a@b.c",
+		"title":         map[string]any{"name": "x", "tax_no": "91110108MA01ABCDEF"},
+	}
+	if w := do(e, "POST", "/api/wallet/invoices", tokFunder, body); w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (%s)", w.Code, w.Body)
+	}
+}

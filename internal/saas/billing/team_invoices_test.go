@@ -147,6 +147,10 @@ func TestTeamInvoiceValidation(t *testing.T) {
 		"bad email":    {"cny_amount": 10, "contact_email": "nope", "title": map[string]any{"name": "x", "tax_no": "91110108MA01ABCDEF"}},
 		"empty title":  {"cny_amount": 10, "contact_email": "a@b.c", "title": map[string]any{"name": " ", "tax_no": "91110108MA01ABCDEF"}},
 		"short tax_no": {"cny_amount": 10, "contact_email": "a@b.c", "title": map[string]any{"name": "x", "tax_no": "123"}},
+		// Positive, but under half a fen — round2 sends exactly 0 to the store,
+		// which rejects it as non-positive. Validating the typed value instead of
+		// the quantised one reported this typo as a 500.
+		"sub-fen amount": {"cny_amount": 0.001, "contact_email": "a@b.c", "title": map[string]any{"name": "x", "tax_no": "91110108MA01ABCDEF"}},
 	} {
 		if w := do(e, "POST", "/api/team/invoices", tokAdmin, body); w.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400 (%s)", name, w.Code, w.Body)

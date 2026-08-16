@@ -427,8 +427,10 @@ func (h *InvoiceHandler) create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
 		return
 	}
-	if b.CNYAmount <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "cny_amount must be positive"})
+	// Checked after quantisation, not before: see minInvoiceCNY.
+	cny := round2(b.CNYAmount)
+	if cny < minInvoiceCNY {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cny_amount must be at least ¥0.01"})
 		return
 	}
 	if !isLikelyEmail(b.ContactEmail) {
@@ -444,7 +446,6 @@ func (h *InvoiceHandler) create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title.tax_no required (统一社会信用代码, 15-20 位字母数字)"})
 		return
 	}
-	cny := round2(b.CNYAmount)
 
 	inv, err := h.DB.CreateInvoice(c.Request.Context(), tok, cny, db.InvoiceTitle{
 		Name: b.Title.Name, TaxNo: b.Title.TaxNo, Address: b.Title.Address,
