@@ -390,6 +390,15 @@ type PaymentConfig struct {
 	ReturnURL string `yaml:"return_url,omitempty"` // optional post-pay redirect
 }
 
+// DefaultCNYPerUSD is the USD→CNY rate a deployment falls back to when it has
+// configured none and no live rate is available.
+//
+// Exported because it is not only applyDefaults' business: the usage-statement
+// export ends its own rate chain here too, and every yuan figure on that
+// document is one multiplication by this number. Two copies of the literal
+// would let a bumped default quietly bill and invoice at different rates.
+const DefaultCNYPerUSD = 7.2
+
 // ExchangeConfig — live USD/CNY rate cache.
 type ExchangeConfig struct {
 	URL                string  `yaml:"url,omitempty"`
@@ -550,7 +559,7 @@ func applyDefaults(c *Config, path string) {
 		c.SaaS.Exchange.RefreshIntervalMin = 60
 	}
 	if c.SaaS.Exchange.FallbackCNYPerUSD <= 0 {
-		c.SaaS.Exchange.FallbackCNYPerUSD = 7.2
+		c.SaaS.Exchange.FallbackCNYPerUSD = DefaultCNYPerUSD
 	}
 	if c.SaaS.Invoice.PDFDir == "" {
 		c.SaaS.Invoice.PDFDir = filepath.Join(dir, "invoices")

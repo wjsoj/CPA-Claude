@@ -607,7 +607,6 @@ func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToke
 		CostUSD:     costUSD,
 		BilledUSD:   billed,
 		Multiplier:  multiplier,
-		CNYPerUSD:   s.settleCNYRate(),
 		Status:      200,
 		DurationMs:  dur.Milliseconds(),
 		Stream:      true,

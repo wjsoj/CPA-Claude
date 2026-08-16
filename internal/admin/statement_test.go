@@ -169,14 +169,14 @@ func TestStatementRangeForTargetWalksNewestFirst(t *testing.T) {
 	// rows for our token, interleaved with a foreign token's row that must
 	// be skipped entirely.
 	entries := []requestlog.Record{
-		{TS: now.Add(-1 * time.Hour), ClientToken: masked, BilledUSD: 1, CNYPerUSD: 7},
-		{TS: now.Add(-2 * time.Hour), ClientToken: "sk-oth…9999", BilledUSD: 100, CNYPerUSD: 7},
-		{TS: now.Add(-3 * time.Hour), ClientToken: masked, BilledUSD: 1, CNYPerUSD: 7},
-		{TS: now.Add(-4 * time.Hour), ClientToken: masked, BilledUSD: 1, CNYPerUSD: 7},
+		{TS: now.Add(-1 * time.Hour), ClientToken: masked, BilledUSD: 1,},
+		{TS: now.Add(-2 * time.Hour), ClientToken: "sk-oth…9999", BilledUSD: 100,},
+		{TS: now.Add(-3 * time.Hour), ClientToken: masked, BilledUSD: 1,},
+		{TS: now.Add(-4 * time.Hour), ClientToken: masked, BilledUSD: 1,},
 	}
 	// ¥10 needs two of our ¥7 rows (7, then 14 >= 10) — the walk must stop at
 	// the second matching row, not consume the third.
-	start, end, achieved, err := statementRangeForTarget(entries, masked, 10, 0, now)
+	start, end, achieved, err := statementRangeForTarget(entries, masked, 10, 7, now)
 	if err != nil {
 		t.Fatalf("statementRangeForTarget: %v", err)
 	}
@@ -199,9 +199,9 @@ func TestStatementRangeForTargetUnreachable(t *testing.T) {
 	masked := maskToken(testToken)
 	now := time.Now()
 	entries := []requestlog.Record{
-		{TS: now.Add(-time.Hour), ClientToken: masked, BilledUSD: 1, CNYPerUSD: 7},
+		{TS: now.Add(-time.Hour), ClientToken: masked, BilledUSD: 1,},
 	}
-	_, _, achieved, err := statementRangeForTarget(entries, masked, 100, 0, now)
+	_, _, achieved, err := statementRangeForTarget(entries, masked, 100, 7, now)
 	if !errors.Is(err, errStatementTargetUnreachable) {
 		t.Fatalf("err = %v, want errStatementTargetUnreachable", err)
 	}
@@ -221,7 +221,7 @@ func TestStatementRangeForTargetIgnoresRowsAtOrAfterEnd(t *testing.T) {
 	now := time.Date(2026, 8, 16, 0, 19, 0, 0, time.UTC)
 	mk := func(ts time.Time) requestlog.Record {
 		return requestlog.Record{
-			TS: ts, ClientToken: masked, BilledUSD: 1, CNYPerUSD: 10, Status: 200,
+			TS: ts, ClientToken: masked, BilledUSD: 1, Status: 200,
 		}
 	}
 	// Newest-first, as the query returns them: four rows dated later today than
@@ -233,7 +233,7 @@ func TestStatementRangeForTargetIgnoresRowsAtOrAfterEnd(t *testing.T) {
 		mk(now.Add(-3 * time.Hour)), mk(now.Add(-4 * time.Hour)),
 	}
 
-	start, end, achieved, err := statementRangeForTarget(entries, masked, 25, 0, now)
+	start, end, achieved, err := statementRangeForTarget(entries, masked, 25, 10, now)
 	if err != nil {
 		t.Fatalf("statementRangeForTarget: %v", err)
 	}
@@ -253,8 +253,7 @@ func TestStatementRangeForTargetIgnoresRowsAtOrAfterEnd(t *testing.T) {
 		if rec.TS.Before(start) || !rec.TS.Before(end) {
 			continue
 		}
-		cny, _ := rec.BilledCNY()
-		printed += cny
+		printed += rec.BilledOrCost() * 10
 	}
 	if printed < 25 {
 		t.Errorf("rows in [start, end) sum to %v, under the ¥25 target the document is captioned with", printed)

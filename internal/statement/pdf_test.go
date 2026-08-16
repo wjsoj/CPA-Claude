@@ -6,9 +6,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/signintech/gopdf"
 )
 
-func sample(lines int, _ float64) *Statement {
+func sample(lines int, rate float64) *Statement {
 	base := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
 	s := &Statement{
 		TokenMasked:       "sk-ant…9f2c",
@@ -17,6 +19,7 @@ func sample(lines int, _ float64) *Statement {
 		FromDay:           "2026-08-01",
 		ToDay:             "2026-08-15",
 		TZName:            "Asia/Shanghai",
+		CNYPerUSD:         rate,
 		GeneratedAt:       base,
 		LifetimeRequests:  91234,
 		LifetimeBilledCNY: 2963.48,
@@ -24,19 +27,29 @@ func sample(lines int, _ float64) *Statement {
 	models := []string{"claude-opus-4-7", "gpt-5.6-sol", "claude-sonnet-5"}
 	for i := range lines {
 		ln := Line{
-			TS:            base.Add(time.Duration(i) * time.Minute),
-			Provider:      "anthropic",
-			Model:         models[i%len(models)],
-			Input:         int64(1200 + i*7),
-			Output:        int64(340 + i*3),
-			CacheRead:     int64(i * 11),
-			CacheCreate:   int64(i * 2),
-			BilledCNY:     0.0884 + float64(i)*0.0007,
-			RateWasStored: true,
-			Status:        200,
+			TS:        base.Add(time.Duration(i) * time.Minute),
+			Provider:  "anthropic",
+			Model:     models[i%len(models)],
+			Input:     int64(1200 + i*7),
+			Output:    int64(340 + i*3),
+			CacheRead: int64(i * 11),
+			BilledCNY: 0.0884 + float64(i)*0.0007,
+			Status:    200,
 		}
 		s.Lines = append(s.Lines, ln)
-		s.Observe(ln.Model, ln.BilledCNY, true)
+		s.Observe(ln.Model, ln.BilledCNY)
+	}
+	s.Rollup()
+	return s
+}
+
+// tokenlessSample is the historical shape: rows written before token counts
+// were recorded at all, so every count is a structural zero rather than a
+// request that genuinely used nothing.
+func tokenlessSample(lines int) *Statement {
+	s := sample(lines, 7.18)
+	for i := range s.Lines {
+		s.Lines[i].Input, s.Lines[i].Output, s.Lines[i].CacheRead = 0, 0, 0
 	}
 	s.Rollup()
 	return s
@@ -87,48 +100,117 @@ func TestPageCountIsResolved(t *testing.T) {
 	}
 }
 
-// Rows predating per-row rate capture had their yuan derived at today's rate
-// rather than their own. That is a real caveat on the total, so it must appear
-// on the page — and must vanish once every row carries its own rate, rather
-// than becoming permanent furniture.
-func TestUnratedRowsAreDisclosedThenVanish(t *testing.T) {
-	s := sample(5, 0)
+// Every yuan figure on the page is one multiplication by a rate that is not
+// recorded anywhere in the request log, so the same range exported after the
+// market moves totals differently. The document is only self-consistent if it
+// states which rate produced these numbers.
+func TestExportRateIsPrintedOnTheDocument(t *testing.T) {
+	s := sample(5, 7.1842)
 	r := &renderer{s: s}
-	if got := r.unratedNote(); got != "" {
-		t.Errorf("fully-rated statement must carry no note, got %q", got)
+
+	var rateRow string
+	for _, kv := range r.identityRows() {
+		if kv[0] == "换算汇率" {
+			rateRow = kv[1]
+		}
+	}
+	if rateRow == "" {
+		t.Fatalf("identity rows = %+v, missing the 换算汇率 row", r.identityRows())
+	}
+	if !strings.Contains(rateRow, "7.1842") {
+		t.Errorf("rate row = %q, want it to state the 7.1842 rate actually used", rateRow)
 	}
 
-	s.UnratedRequests = 12
-	if got := r.unratedNote(); !strings.Contains(got, "12") {
-		t.Errorf("note = %q, want it to name the 12 affected requests", got)
+	// And the standing note that explains why two exports can disagree.
+	buf, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
 	}
-	if _, err := Render(s); err != nil {
-		t.Fatalf("Render with unrated rows: %v", err)
+	if len(buf) == 0 {
+		t.Fatal("empty output")
+	}
+
+	// With no rate supplied there is nothing truthful to print, and inventing
+	// "1 USD = 0.0000 CNY" would be worse than staying silent.
+	for _, kv := range (&renderer{s: sample(5, 0)}).identityRows() {
+		if kv[0] == "换算汇率" {
+			t.Errorf("a statement with no rate must not print one, got %q", kv[1])
+		}
 	}
 }
 
-// The detail table is yuan-only: no USD column, no rate column.
+// The detail table is yuan-only: no USD column, no rate column. And it never
+// carries a cache-write column — OpenAI's usage block has no such field, so it
+// could only ever print zero.
 func TestDetailTableIsCNYOnly(t *testing.T) {
-	r := &renderer{s: sample(3, 0)}
-	cols := r.detailCols()
-	if n := len(cols); n != 7 {
-		t.Errorf("detail columns = %d, want 7", n)
-	}
-	var total float64
-	for _, c := range cols {
-		total += c.w
-		if strings.Contains(c.title, "USD") || strings.Contains(c.title, "$") {
-			t.Errorf("column %q still names USD", c.title)
+	for _, s := range []*Statement{sample(3, 7.18), tokenlessSample(3)} {
+		r := &renderer{s: s}
+		cols := r.detailCols()
+		var total float64
+		for _, c := range cols {
+			total += c.w
+			if strings.Contains(c.title, "USD") || strings.Contains(c.title, "$") {
+				t.Errorf("column %q still names USD", c.title)
+			}
+			if strings.Contains(c.title, "缓存写") {
+				t.Errorf("column %q is back — the upstream API never reports it", c.title)
+			}
+		}
+		// Columns must tile the content box exactly, or the right-aligned
+		// amounts drift off the page edge.
+		if d := total - contentW; d > 0.01 || d < -0.01 {
+			t.Errorf("columns (%d of them) sum to %v, want contentW %v", len(cols), total, contentW)
 		}
 	}
-	// Columns must tile the content box exactly, or the right-aligned amounts
-	// drift off the page edge.
-	if d := total - contentW; d > 0.01 || d < -0.01 {
-		t.Errorf("columns sum to %v, want contentW %v", total, contentW)
-	}
-	for _, c := range r.modelCols() {
+	for _, c := range (&renderer{s: sample(3, 7.18)}).modelCols() {
 		if strings.Contains(c.title, "USD") {
 			t.Errorf("model column %q still names USD", c.title)
+		}
+	}
+}
+
+// Ranges older than token-count capture have no counts to print — the numbers
+// never existed upstream. Printing three columns of zeroes would assert those
+// requests consumed nothing, so the columns are dropped instead; and they must
+// come back the moment any row has a count.
+func TestTokenColumnsAppearOnlyWhenThereIsData(t *testing.T) {
+	titles := func(s *Statement) string {
+		return strings.Join(colTitles((&renderer{s: s}).detailCols()), "|")
+	}
+
+	withData := titles(sample(5, 7.18))
+	for _, want := range []string{"输入", "输出", "缓存读"} {
+		if !strings.Contains(withData, want) {
+			t.Errorf("columns %q must include %q when rows carry counts", withData, want)
+		}
+	}
+
+	empty := titles(tokenlessSample(5))
+	for _, unwanted := range []string{"输入", "输出", "缓存读"} {
+		if strings.Contains(empty, unwanted) {
+			t.Errorf("columns %q must drop %q when every row's counts are zero", empty, unwanted)
+		}
+	}
+	// The columns that remain must be the ones worth widening.
+	for _, want := range []string{"时间", "模型", "金额"} {
+		if !strings.Contains(empty, want) {
+			t.Errorf("columns %q lost %q", empty, want)
+		}
+	}
+
+	// A single nonzero count anywhere in the range is enough to bring them back:
+	// a mixed range must not be rendered as if it had no data at all.
+	mixed := tokenlessSample(5)
+	mixed.Lines[3].Output = 12
+	mixed.Rollup()
+	if !strings.Contains(titles(mixed), "输出") {
+		t.Errorf("columns %q dropped the token columns despite one row carrying counts", titles(mixed))
+	}
+
+	// Both layouts must render.
+	for _, s := range []*Statement{sample(5, 7.18), tokenlessSample(5)} {
+		if _, err := Render(s); err != nil {
+			t.Fatalf("Render: %v", err)
 		}
 	}
 }
@@ -201,7 +283,7 @@ func TestRollupCoversRangeNotJustPrintedLines(t *testing.T) {
 	// 100 in-range requests, of which only 3 are retained as printable lines.
 	for i := range 100 {
 		model := []string{"claude-opus-4-7", "gpt-5.6-sol"}[i%2]
-		s.Observe(model, 0.25, true)
+		s.Observe(model, 0.25)
 		if i < 3 {
 			s.Lines = append(s.Lines, Line{Model: model, BilledCNY: 0.25})
 		}
@@ -225,7 +307,7 @@ func TestRollupCoversRangeNotJustPrintedLines(t *testing.T) {
 
 	// And with no lines at all, which is exactly the preview's shape.
 	p := &Statement{}
-	p.Observe("claude-opus-4-7", 1.5, true)
+	p.Observe("claude-opus-4-7", 1.5)
 	p.Rollup()
 	if len(p.ByModel) != 1 || p.ByModel[0].BilledCNY != 1.5 {
 		t.Errorf("ByModel with no Lines = %+v, want one row totalling 1.5", p.ByModel)
@@ -448,5 +530,56 @@ func TestByTargetRangeLineStatesExactBoundaries(t *testing.T) {
 	}
 	if strings.Contains(line, "0001-01-01") {
 		t.Errorf("fallback range line = %q, must not print a zero time", line)
+	}
+}
+
+// drawnBy renders one section of the document and returns every string it put
+// on the page, in order. The PDF's own bytes cannot be searched — the font is
+// a subset with a private encoding — so this is the only way to assert that a
+// figure actually reached the paper rather than merely sitting in a field.
+func drawnBy(t *testing.T, s *Statement, section func(*renderer)) []string {
+	t.Helper()
+	pdf := &gopdf.GoPdf{}
+	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: pageW, H: pageH}})
+	if err := pdf.AddTTFFontData(fontFamily, fontSC); err != nil {
+		t.Fatalf("load font: %v", err)
+	}
+	var got []string
+	r := &renderer{pdf: pdf, s: s, drawn: &got}
+	r.newPage()
+	section(r)
+	return got
+}
+
+// A range whose request-log rows are gone but whose debit the ledger still
+// holds is the exact case the reconciliation exists for, and it is also the
+// case where Lines is empty. The empty-range hint must not stand in for the
+// closing block: printing "该区间内没有计费请求" and nothing else swallows a
+// real charge, and contradicts the JSON preview, which reports the gap.
+func TestEmptyDetailStillClosesOnTheLedgerFigure(t *testing.T) {
+	s := &Statement{
+		TokenMasked: "sk-ant…9f2c", FromDay: "2026-08-01", ToDay: "2026-08-15",
+		TZName: "Asia/Shanghai", CNYPerUSD: 7, GeneratedAt: time.Now(),
+		BilledCNY: 0, UnitemisedCNY: 21, ChargedCNY: 21,
+	}
+	s.Rollup()
+
+	drawn := strings.Join(drawnBy(t, s, (*renderer).detailTable), "\n")
+	if !strings.Contains(drawn, "该区间内没有计费请求") {
+		t.Errorf("an empty range must still say so; drew:\n%s", drawn)
+	}
+	for _, want := range []string{"未能明细化的消费", "区间实际扣款", "¥21.00"} {
+		if !strings.Contains(drawn, want) {
+			t.Errorf("missing %q from a statement whose only spend is unitemised; drew:\n%s", want, drawn)
+		}
+	}
+
+	// And with nothing to reconcile, the hint still closes on a total rather
+	// than trailing off — a ¥0.00 range is a claim the document should make
+	// explicitly.
+	s.UnitemisedCNY, s.ChargedCNY = 0, 0
+	drawn = strings.Join(drawnBy(t, s, (*renderer).detailTable), "\n")
+	if !strings.Contains(drawn, "合计") {
+		t.Errorf("empty range without a gap must still print 合计; drew:\n%s", drawn)
 	}
 }

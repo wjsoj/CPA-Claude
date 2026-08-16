@@ -343,12 +343,8 @@ export function StatementDialog({
                   </div>
                 )}
 
-                {!!preview.unrated_requests && (
-                  <p className="mt-3 text-[11px] leading-relaxed opacity-60">
-                    其中 {fmtInt(preview.unrated_requests)} 笔早于逐笔汇率记录功能上线，金额按当前汇率折算，
-                    可能与当时实际结算略有出入。对账单上会注明。
-                  </p>
-                )}
+                {/* 金额由美元账本按导出时汇率折算，汇率印在对账单上（见 statement/pdf.go
+                    的「换算汇率」行），因此这里不再单列早期无汇率记录的请求。 */}
 
                 {preview.truncated && (
                   <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-[color:var(--warning)]">

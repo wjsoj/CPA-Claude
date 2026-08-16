@@ -16,12 +16,24 @@ import (
 
 	"github.com/wjsoj/CPA-Claude/internal/config"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
+	"github.com/wjsoj/CPA-Claude/internal/statement"
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/clienttoken"
 	"github.com/wjsoj/cc-core/requestlog"
 )
 
 const testToken = "sk-test-statement-0123456789abcdef"
+
+// statementCfg pins the export rate so the fixtures' arithmetic is legible:
+// every $1 row is worth exactly ¥7. Without SaaS there is no live rate handler,
+// so this is the configured fallback the handler falls through to — and the
+// yuan figures below are only stable because it is set.
+func statementCfg(dir string) *config.Config {
+	return &config.Config{
+		LogDir: dir, LogRetentionDays: 90,
+		SaaS: config.SaaSConfig{Exchange: config.ExchangeConfig{FallbackCNYPerUSD: 7}},
+	}
+}
 
 // writeLog lays down a requests-YYYY-MM-DD.jsonl the query path will pick up.
 func writeLog(t *testing.T, dir string, day time.Time, recs []requestlog.Record) {
@@ -60,12 +72,12 @@ func statementFixture(t *testing.T) (*gin.Engine, string) {
 				TS: day.Add(-2 * time.Hour), ClientToken: masked,
 				Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 				Input: 1000, Output: 200, CacheRead: 50, CacheCreate: 10,
-				CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+				CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 			},
 			{
 				TS: day.Add(-2 * time.Hour), ClientToken: "sk-oth…9999",
 				Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-				CostUSD: 2000, BilledUSD: 100, CNYPerUSD: 7, Status: 200,
+				CostUSD: 2000, BilledUSD: 100, Status: 200,
 			},
 		})
 	}
@@ -78,7 +90,7 @@ func statementFixture(t *testing.T) (*gin.Engine, string) {
 	}
 
 	h := New(
-		&config.Config{LogDir: dir, LogRetentionDays: 90},
+		statementCfg(dir),
 		auth.NewPool(nil, nil, time.Minute, false, ""),
 		nil, nil, tokens,
 	)
@@ -126,7 +138,7 @@ func TestStatementPreviewTotalsOnlyOwnRows(t *testing.T) {
 	if p.Requests != 2 {
 		t.Errorf("requests = %d, want 2", p.Requests)
 	}
-	// $1 a day at a stored rate of 7 → ¥7 a day.
+	// $1 a day at the fixture rate of ¥7 → ¥7 a day.
 	if p.BilledCNY != 14 {
 		t.Errorf("billed_cny = %v, want 14 (the foreign rows must not count)", p.BilledCNY)
 	}
@@ -154,7 +166,7 @@ func TestStatementCountsLegacyRows(t *testing.T) {
 	writeLog(t, dir, today, []requestlog.Record{{
 		TS: today.Add(-time.Hour), ClientToken: maskToken(testToken),
 		Provider: "openai", Model: "gpt-5.6-sol", AuthID: "a2", AuthKind: "apikey",
-		CostUSD: 7, Status: 200, // pre-v0.8.61: no BilledUSD, and no rate either
+		CostUSD: 7, Status: 200, // pre-v0.8.61: the charge sits in CostUSD
 	}})
 
 	w := postJSON(t, r, "/status/api/statement", statementBody{
@@ -167,17 +179,13 @@ func TestStatementCountsLegacyRows(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// ¥7 from the modern row, plus the legacy row's $7 at the fixture's
-	// fallback rate of 0 (no billing handler) — so it contributes nothing to
-	// the yuan total but must still be counted and disclosed.
-	if p.BilledCNY != 7 {
-		t.Errorf("billed_cny = %v, want 7", p.BilledCNY)
+	// $1 from the modern row and $7 from the legacy one, both at ¥7 per dollar.
+	// Reading BilledUSD raw would price the legacy row at zero and report ¥7.
+	if p.BilledCNY != 56 {
+		t.Errorf("billed_cny = %v, want 56 ($8 at ¥7) — the legacy row's charge lives in cost_usd", p.BilledCNY)
 	}
 	if p.Requests != 2 {
 		t.Errorf("requests = %d, want 2 — the legacy row must still be counted", p.Requests)
-	}
-	if p.UnratedRequests != 1 {
-		t.Errorf("unrated_requests = %d, want 1 — the rateless row must be disclosed", p.UnratedRequests)
 	}
 }
 
@@ -233,11 +241,11 @@ func TestStatementSurfacesLedgerGap(t *testing.T) {
 	loc := requestlog.BucketLocation()
 	today := time.Now().In(loc)
 
-	// One surviving log row: $1 at a stored rate of 7 → ¥7.
+	// One surviving log row: $1 at the fixture rate of ¥7 → ¥7.
 	writeLog(t, dir, today, []requestlog.Record{{
 		TS: today.Add(-2 * time.Hour), ClientToken: masked,
 		Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 	}})
 
 	tokens := clienttoken.OpenInMemory()
@@ -261,7 +269,7 @@ func TestStatementSurfacesLedgerGap(t *testing.T) {
 		t.Fatalf("seed charge: %v", err)
 	}
 
-	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
+	h := New(statementCfg(dir),
 		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens).
 		WithSaaS(sdb, nil)
 	r := gin.New()
@@ -305,7 +313,7 @@ func TestStatementReportsNoGapWhenLedgerAgrees(t *testing.T) {
 	writeLog(t, dir, today, []requestlog.Record{{
 		TS: today.Add(-2 * time.Hour), ClientToken: maskToken(testToken),
 		Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 	}})
 	tokens := clienttoken.OpenInMemory()
 	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "对账测试", Group: "default"}); err != nil {
@@ -326,7 +334,7 @@ func TestStatementReportsNoGapWhenLedgerAgrees(t *testing.T) {
 		t.Fatalf("seed charge: %v", err)
 	}
 
-	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
+	h := New(statementCfg(dir),
 		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens).
 		WithSaaS(sdb, nil)
 	r := gin.New()
@@ -362,7 +370,7 @@ func TestStatementByTargetLocatesWindow(t *testing.T) {
 		writeLog(t, dir, day, []requestlog.Record{{
 			TS: day.Add(-2 * time.Hour), ClientToken: masked,
 			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-			CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+			CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 		}})
 	}
 
@@ -383,7 +391,7 @@ func TestStatementByTargetLocatesWindow(t *testing.T) {
 		t.Fatalf("seed order: %v", err)
 	}
 
-	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
+	h := New(statementCfg(dir),
 		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens).
 		WithSaaS(sdb, nil)
 	r := gin.New()
@@ -425,7 +433,7 @@ func TestStatementByTargetRejectsUnreachableSpend(t *testing.T) {
 	writeLog(t, dir, today, []requestlog.Record{{
 		TS: today.Add(-time.Hour), ClientToken: masked,
 		Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 	}})
 	tokens := clienttoken.OpenInMemory()
 	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "目标测试", Group: "default"}); err != nil {
@@ -445,7 +453,7 @@ func TestStatementByTargetRejectsUnreachableSpend(t *testing.T) {
 		t.Fatalf("seed order: %v", err)
 	}
 
-	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
+	h := New(statementCfg(dir),
 		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens).
 		WithSaaS(sdb, nil)
 	r := gin.New()
@@ -474,7 +482,7 @@ func TestStatementTargetAndDateRangeAreMutuallyExclusive(t *testing.T) {
 // refused outright without SaaS because the cap was the Alipay-paid total.
 func TestStatementByTargetWorksWithoutSaaS(t *testing.T) {
 	r, _ := statementFixture(t) // no WithSaaS call — billing disabled
-	// The fixture bills $1/day at a stored rate of 7, so ¥7 is one day's spend.
+	// The fixture bills $1/day at the fixture rate of ¥7, so ¥7 is one day's spend.
 	w := postJSON(t, r, "/status/api/statement", statementBody{Token: testToken, TargetCNY: 7})
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — spend alone bounds a target; body = %s", w.Code, w.Body.String())
@@ -498,17 +506,71 @@ func TestStatementRejectsAbsurdRange(t *testing.T) {
 	}
 }
 
-// A row whose rate was never captured must be counted and disclosed rather
-// than silently dropped: the request happened and the money moved, even if the
-// yuan figure for it is a reconstruction.
-func TestStatementDisclosesUnratedRows(t *testing.T) {
-	r, dir := statementFixture(t)
+// With no billing handler and no configured exchange rate there is nothing left
+// to look a rate up in, and the conversion is a plain multiplication — so a zero
+// here does not degrade the document, it empties it. Every figure would print as
+// ¥0.00 on a page whose whole purpose is to state what was spent, and nothing on
+// it would look broken enough for a reader to distrust the total.
+//
+// The per-row rate the log used to carry was an accidental safety net for this;
+// with it gone the fallback chain is the only thing standing between a
+// misconfigured deployment and a statement of zero.
+func TestStatementRateNeverCollapsesToZero(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
 	loc := requestlog.BucketLocation()
 	today := time.Now().In(loc)
 	writeLog(t, dir, today, []requestlog.Record{{
 		TS: today.Add(-time.Hour), ClientToken: maskToken(testToken),
 		Provider: "openai", Model: "gpt-5.6-sol", AuthID: "a2", AuthKind: "apikey",
-		CostUSD: 3, BilledUSD: 3, Status: 200, // no CNYPerUSD
+		CostUSD: 40, BilledUSD: 2, Status: 200,
+	}})
+	tokens := clienttoken.OpenInMemory()
+	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "汇率兜底", Group: "default"}); err != nil {
+		t.Fatalf("add token: %v", err)
+	}
+
+	// Nothing configured at all: no SaaS handler, no exchange fallback. This is
+	// the shape a plain non-billing deployment loads with when applyDefaults
+	// never ran over the config.
+	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
+		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens)
+	if got := h.statementRate(); got != defaultStatementCNYPerUSD {
+		t.Errorf("statementRate() = %v with no billing and no config, want the %v default",
+			got, defaultStatementCNYPerUSD)
+	}
+
+	r := gin.New()
+	r.POST("/status/api/statement", h.handleStatementPreview)
+	w := postJSON(t, r, "/status/api/statement", statementBody{
+		Token: testToken, From: dayLabel(0), To: dayLabel(0),
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var p statementPreview
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := 2 * defaultStatementCNYPerUSD; p.BilledCNY != want {
+		t.Errorf("billed_cny = %v, want %v ($2 at the default rate) — a ¥0 statement is the failure mode here",
+			p.BilledCNY, want)
+	}
+	if p.LifetimeBilledCNY != 2*defaultStatementCNYPerUSD {
+		t.Errorf("lifetime_billed_cny = %v, want it converted at the same rate", p.LifetimeBilledCNY)
+	}
+}
+
+// The configured fallback outranks the compiled-in default, and one rate covers
+// every row: two rows of the same dollar amount can never print differently.
+func TestStatementUsesConfiguredRateForEveryRow(t *testing.T) {
+	r, dir := statementFixture(t) // fallback_cny_per_usd = 7
+	loc := requestlog.BucketLocation()
+	today := time.Now().In(loc)
+	writeLog(t, dir, today, []requestlog.Record{{
+		TS: today.Add(-time.Hour), ClientToken: maskToken(testToken),
+		Provider: "openai", Model: "gpt-5.6-sol", AuthID: "a2", AuthKind: "apikey",
+		CostUSD: 60, BilledUSD: 3, Status: 200,
 	}})
 
 	w := postJSON(t, r, "/status/api/statement", statementBody{
@@ -521,12 +583,9 @@ func TestStatementDisclosesUnratedRows(t *testing.T) {
 	if p.Requests != 2 {
 		t.Errorf("requests = %d, want 2", p.Requests)
 	}
-	if p.UnratedRequests != 1 {
-		t.Errorf("unrated_requests = %d, want 1", p.UnratedRequests)
-	}
-	// The rated row still contributes its full ¥7.
-	if p.BilledCNY != 7 {
-		t.Errorf("billed_cny = %v, want 7", p.BilledCNY)
+	// $1 + $3 at the configured ¥7, not at the ¥7.2 default.
+	if p.BilledCNY != 28 {
+		t.Errorf("billed_cny = %v, want 28 — the configured rate must outrank the built-in default", p.BilledCNY)
 	}
 }
 
@@ -566,13 +625,13 @@ func TestStatementIsNotCrowdedOutByABusierToken(t *testing.T) {
 	loc := requestlog.BucketLocation()
 	now := time.Now().In(loc)
 
-	// Ours: 40 older requests, $0.50 each at a stored rate of 7 → ¥140 total.
+	// Ours: 40 older requests, $0.50 each at the fixture rate of ¥7 → ¥140 total.
 	ours := make([]requestlog.Record, 0, 40)
 	for i := range 40 {
 		ours = append(ours, requestlog.Record{
 			TS: now.AddDate(0, 0, -20).Add(time.Duration(i) * time.Minute), ClientToken: masked,
 			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-			CostUSD: 10, BilledUSD: 0.5, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+			CostUSD: 10, BilledUSD: 0.5, Multiplier: 0.05, Status: 200,
 		})
 	}
 	writeLog(t, dir, now.AddDate(0, 0, -20), ours)
@@ -584,7 +643,7 @@ func TestStatementIsNotCrowdedOutByABusierToken(t *testing.T) {
 		theirs = append(theirs, requestlog.Record{
 			TS: now.AddDate(0, 0, -1).Add(time.Duration(i) * time.Second), ClientToken: "sk-oth…9999",
 			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-			CostUSD: 10, BilledUSD: 50, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+			CostUSD: 10, BilledUSD: 50, Multiplier: 0.05, Status: 200,
 		})
 	}
 	writeLog(t, dir, now.AddDate(0, 0, -1), theirs)
@@ -601,7 +660,7 @@ func TestStatementIsNotCrowdedOutByABusierToken(t *testing.T) {
 	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "报销测试", Group: "default"}); err != nil {
 		t.Fatalf("add token: %v", err)
 	}
-	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
+	h := New(statementCfg(dir),
 		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens)
 	r := gin.New()
 	r.POST("/status/api/statement", h.handleStatementPreview)
@@ -628,13 +687,16 @@ func TestStatementIsNotCrowdedOutByABusierToken(t *testing.T) {
 	}
 }
 
-// The row cap is the one branch that can refuse an export outright, so the
-// advice it gives has to be actionable. A date-range export scans the range it
-// was asked for, which means narrowing the range really does get under the cap
-// — when the scan covered the whole retention window regardless, the same
-// message told users to do something that changed nothing at all, and an
-// account big enough to trip the cap could never export anything again.
-func TestStatementRowCapIsEscapableByNarrowingTheRange(t *testing.T) {
+// The row cap is the one branch that can refuse an export outright, and it now
+// belongs to the target-amount mode alone: only that mode has to materialise a
+// window it hasn't located yet. A date range reads its totals off the cube and
+// prints at most MaxDetailLines rows, so no volume of traffic can put one out
+// of reach — which is what the 413 used to do to exactly the accounts that most
+// needed a statement.
+//
+// The refusal's advice is "export by date range instead", so that has to work
+// on the very archive the target mode just refused.
+func TestStatementRowCapAppliesOnlyToTargetMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	dir := t.TempDir()
 	masked := maskToken(testToken)
@@ -650,7 +712,7 @@ func TestStatementRowCapIsEscapableByNarrowingTheRange(t *testing.T) {
 				TS:          time.Date(day.Year(), day.Month(), day.Day(), 3, i, 0, 0, loc),
 				ClientToken: masked, Provider: "anthropic", Model: "claude-opus-4-7",
 				AuthID: "a1", AuthKind: "oauth",
-				CostUSD: 2, BilledUSD: 0.1, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+				CostUSD: 2, BilledUSD: 0.1, Multiplier: 0.05, Status: 200,
 			})
 		}
 		writeLog(t, dir, day, recs)
@@ -665,35 +727,340 @@ func TestStatementRowCapIsEscapableByNarrowingTheRange(t *testing.T) {
 	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "上限测试", Group: "default"}); err != nil {
 		t.Fatalf("add token: %v", err)
 	}
-	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
+	h := New(statementCfg(dir),
 		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens)
 	r := gin.New()
 	r.POST("/status/api/statement", h.handleStatementPreview)
 
-	// Three days is over the cap: refused.
+	// 90 rows against a cap of 50: the target walk cannot see far enough back
+	// to place the window honestly, so it refuses.
 	w := postJSON(t, r, "/status/api/statement", statementBody{
-		Token: testToken, From: dayLabel(-2), To: dayLabel(0),
+		Token: testToken, TargetCNY: 20,
 	})
 	if w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("wide range status = %d, want 413; body = %s", w.Code, w.Body.String())
+		t.Fatalf("target status = %d, want 413; body = %s", w.Code, w.Body.String())
 	}
-	if !bytes.Contains(w.Body.Bytes(), []byte("缩短日期区间")) {
-		t.Errorf("413 body = %s, want it to advise narrowing the range", w.Body.String())
+	if !bytes.Contains(w.Body.Bytes(), []byte("改用日期区间导出")) {
+		t.Errorf("413 body = %s, want it to point at the date-range export", w.Body.String())
 	}
 
-	// Taking that advice has to actually work.
+	// Taking that advice has to actually work, over all three days — the same
+	// 90 rows, well past the cap, which the aggregate path never materialises.
 	w = postJSON(t, r, "/status/api/statement", statementBody{
-		Token: testToken, From: dayLabel(0), To: dayLabel(0),
+		Token: testToken, From: dayLabel(-2), To: dayLabel(0),
 	})
 	if w.Code != http.StatusOK {
-		t.Fatalf("narrowed range status = %d, want 200 — the advice must be actionable; body = %s",
+		t.Fatalf("date-range status = %d, want 200 — the advice must be actionable; body = %s",
 			w.Code, w.Body.String())
 	}
 	var p statementPreview
 	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if p.Requests != 30 {
-		t.Errorf("requests = %d, want the 30 rows of the single day asked for", p.Requests)
+	if p.Requests != 90 {
+		t.Errorf("requests = %d, want all 90 rows of the three days asked for", p.Requests)
+	}
+	if p.BilledCNY != 63 {
+		t.Errorf("billed_cny = %v, want 63 (90 × $0.1 × ¥7)", p.BilledCNY)
+	}
+}
+
+// A date-range export reads its range total and its per-model table off the
+// pre-summed cube instead of adding up the rows. That is only sound because
+// cc-core's aggSelect folds Record.BilledOrCost per row before summing, and
+// because both paths share the attempt_only = 0 baseline — neither of which
+// this package controls. If either ever drifts, an export silently misstates
+// what somebody is claiming back, with nothing on the page looking wrong.
+//
+// So the two are computed over one seeded range and compared: the handler's
+// aggregate answer against a plain row-by-row sum of the very rows the
+// itemised section would print.
+func TestStatementAggregateMatchesRowByRowSum(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	masked := maskToken(testToken)
+	loc := requestlog.BucketLocation()
+	now := time.Now().In(loc)
+
+	// Dyadic amounts, so "equal" can mean exactly equal rather than "close":
+	// the two paths sum in different orders (SQLite vs Go) and only exactly
+	// representable values are guaranteed to land on the same float.
+	amounts := []float64{0.5, 0.25, 0.125, 2, 1}
+	models := []string{"claude-opus-4-7", "gpt-5.6-sol", "claude-sonnet-5"}
+	for d := range 4 {
+		day := now.AddDate(0, 0, -d)
+		recs := make([]requestlog.Record, 0, 8)
+		for i := range 5 {
+			rec := requestlog.Record{
+				TS:          time.Date(day.Year(), day.Month(), day.Day(), 4, i, 0, 0, loc),
+				ClientToken: masked, Provider: "anthropic", Model: models[i%len(models)],
+				AuthID: "a1", AuthKind: "oauth",
+				Input: 100, Output: 20, CacheRead: 5,
+				BilledUSD: amounts[i], CostUSD: 40, Status: 200,
+			}
+			if i == 3 {
+				// Legacy shape: the charge sits in cost_usd with billed_usd
+				// unset. This is the row aggSelect's CASE exists for.
+				rec.BilledUSD, rec.CostUSD = 0, amounts[i]
+			}
+			recs = append(recs, rec)
+		}
+		// Excluded by both paths, and it must be excluded by both identically.
+		recs = append(recs, requestlog.Record{
+			TS:          time.Date(day.Year(), day.Month(), day.Day(), 5, 0, 0, 0, loc),
+			ClientToken: masked, Provider: "anthropic", Model: "claude-opus-4-7",
+			AuthID: "a1", AuthKind: "oauth", BilledUSD: 99, Status: 503, AttemptOnly: true,
+		})
+		// A neighbour's row, on the same days and the same models.
+		recs = append(recs, requestlog.Record{
+			TS:          time.Date(day.Year(), day.Month(), day.Day(), 6, 0, 0, 0, loc),
+			ClientToken: "sk-oth…9999", Provider: "anthropic", Model: "gpt-5.6-sol",
+			AuthID: "a1", AuthKind: "oauth", BilledUSD: 64, Status: 200,
+		})
+		writeLog(t, dir, day, recs)
+	}
+	openReadyStore(t, dir) // the cube path production actually runs
+
+	tokens := clienttoken.OpenInMemory()
+	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "等价性", Group: "default"}); err != nil {
+		t.Fatalf("add token: %v", err)
+	}
+	h := New(statementCfg(dir), auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens)
+	r := gin.New()
+	r.POST("/status/api/statement", h.handleStatementPreview)
+
+	from, to := dayLabel(-2), dayLabel(0) // three of the four seeded days
+	w := postJSON(t, r, "/status/api/statement", statementBody{Token: testToken, From: from, To: to})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var p statementPreview
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// The reference: every row the export would itemise, summed by hand at the
+	// same rate, exactly as buildStatement used to do it for every figure.
+	const rate = 7 // statementCfg's configured fallback
+	ref, err := requestlog.Query(requestlog.Filter{
+		Dir: dir, ClientToken: masked, FromDay: from, ToDay: to, Limit: 100000,
+	})
+	if err != nil {
+		t.Fatalf("reference query: %v", err)
+	}
+	var wantRequests int64
+	var wantCNY float64
+	wantByModel := map[string]statementModelRow{}
+	for _, rec := range ref.Entries {
+		cny := rec.BilledOrCost() * rate
+		wantRequests++
+		wantCNY += cny
+		row := wantByModel[rec.Model]
+		row.Model, row.Requests, row.BilledCNY = rec.Model, row.Requests+1, row.BilledCNY+cny
+		wantByModel[rec.Model] = row
+	}
+	if wantRequests == 0 {
+		t.Fatal("reference scan found nothing — the fixture never reached the query path")
+	}
+
+	if p.Requests != wantRequests {
+		t.Errorf("requests = %d, row-by-row says %d", p.Requests, wantRequests)
+	}
+	if p.BilledCNY != wantCNY {
+		t.Errorf("billed_cny = %v, row-by-row says %v", p.BilledCNY, wantCNY)
+	}
+	if len(p.ByModel) != len(wantByModel) {
+		t.Fatalf("by_model has %d rows, row-by-row says %d: %+v", len(p.ByModel), len(wantByModel), p.ByModel)
+	}
+	var tableCNY float64
+	for _, got := range p.ByModel {
+		want, ok := wantByModel[got.Model]
+		if !ok {
+			t.Errorf("by_model carries %q, which no row produced", got.Model)
+			continue
+		}
+		if got.Requests != want.Requests || got.BilledCNY != want.BilledCNY {
+			t.Errorf("by_model[%s] = %d req / ¥%v, row-by-row says %d req / ¥%v",
+				got.Model, got.Requests, got.BilledCNY, want.Requests, want.BilledCNY)
+		}
+		tableCNY += got.BilledCNY
+	}
+	// The table sits directly above the total on the page; a reader adds it up.
+	if tableCNY != p.BilledCNY {
+		t.Errorf("by_model sums to %v but the range total is %v", tableCNY, p.BilledCNY)
+	}
+	// The neighbour bills $64 a row, so any leakage would be unmissable.
+	if p.BilledCNY > 200 {
+		t.Errorf("billed_cny = %v — another token's spend leaked in", p.BilledCNY)
+	}
+}
+
+// statementCtx drives buildStatement directly, which is the only way to see
+// the itemised rows: the PDF embeds them through a subsetted font and the
+// preview reports only how many there are.
+func statementCtx(t *testing.T, h *Handler, body statementBody, withLines bool) (*statement.Statement, bool) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/status/api/statement.pdf", bytes.NewReader(raw))
+	c.Request.Header.Set("Content-Type", "application/json")
+	s, ok := h.buildStatement(c, withLines)
+	if !ok {
+		t.Fatalf("buildStatement refused: %d %s", w.Code, w.Body.String())
+	}
+	return s, ok
+}
+
+// When a range holds more requests than the document can print, the rows it
+// keeps must be the newest ones.
+//
+// The loop used to walk oldest-to-newest and stop at MaxDetailLines, so a
+// reimbursement claim spanning the 2026-08-09 cutover printed three thousand
+// rows synthesised from wallet transactions — no model, no token counts —
+// and none of the recent traffic the claim was actually about. Keeping the
+// newest is the fix; printing them in reverse would be a different bug, so
+// chronological order is asserted too.
+func TestDetailLinesKeepTheNewestRows(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	masked := maskToken(testToken)
+	loc := requestlog.BucketLocation()
+	day := time.Now().In(loc)
+
+	const total = statement.MaxDetailLines + 5
+	base := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
+	recs := make([]requestlog.Record, 0, total)
+	for i := range total {
+		recs = append(recs, requestlog.Record{
+			TS: base.Add(time.Duration(i) * time.Second), ClientToken: masked,
+			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
+			Input: 10, Output: 2, BilledUSD: 0.5, Status: 200,
+		})
+	}
+	writeLog(t, dir, day, recs)
+	openReadyStore(t, dir)
+
+	tokens := clienttoken.OpenInMemory()
+	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "截断", Group: "default"}); err != nil {
+		t.Fatalf("add token: %v", err)
+	}
+	h := New(statementCfg(dir), auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens)
+
+	oldestKept := base.Add(time.Duration(total-statement.MaxDetailLines) * time.Second)
+	newest := base.Add(time.Duration(total-1) * time.Second)
+
+	for _, tc := range []struct {
+		name string
+		body statementBody
+	}{
+		{"date range", statementBody{Token: testToken, From: dayLabel(0), To: dayLabel(0)}},
+		// The same rule on the target path, whose walk is a separate loop.
+		// Every row is needed to reach ¥10510.5 (3005 × $0.5 × 7).
+		{"by target", statementBody{Token: testToken, TargetCNY: float64(total) * 0.5 * 7}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := statementCtx(t, h, tc.body, true)
+			if s.Requests != total {
+				t.Fatalf("requests = %d, want all %d in range", s.Requests, total)
+			}
+			if len(s.Lines) != statement.MaxDetailLines {
+				t.Fatalf("lines = %d, want the %d cap", len(s.Lines), statement.MaxDetailLines)
+			}
+			if !s.LinesTruncated {
+				t.Error("a truncated listing must say so on the document")
+			}
+			if got := s.Lines[len(s.Lines)-1].TS; !got.Equal(newest) {
+				t.Errorf("last line at %s, want the newest request %s", got, newest)
+			}
+			if got := s.Lines[0].TS; !got.Equal(oldestKept) {
+				t.Errorf("first line at %s, want %s — the %d newest rows are the ones worth printing",
+					got, oldestKept, statement.MaxDetailLines)
+			}
+			for i := 1; i < len(s.Lines); i++ {
+				if s.Lines[i].TS.Before(s.Lines[i-1].TS) {
+					t.Fatalf("line %d (%s) predates line %d (%s) — the page reads forward",
+						i, s.Lines[i].TS, i-1, s.Lines[i-1].TS)
+				}
+			}
+		})
+	}
+}
+
+// The two floors under the reconciliation gap earn their keep here.
+//
+// Without them the condition is `gap > 0`, and every existing test still
+// passes — a discrepancy of a fraction of a cent is arithmetic noise, but it
+// still renders, as a line reading "未能明细化的消费 ¥0.00" that asserts
+// something is missing while stating that nothing is. Both floors are checked,
+// because either alone would let one of these two cases through.
+func TestSubCentLedgerGapIsNotReported(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name      string
+		chargeUSD float64
+	}{
+		// Below ledgerGapEpsilonUSD: float noise, not a request.
+		{"below the usd epsilon", 1 + 5e-5},
+		// Over the USD epsilon but under half a fen once converted at ¥7:
+		// $0.0005 is ¥0.0035, which prints as ¥0.00.
+		{"rounds to zero yuan", 1 + 5e-4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			loc := requestlog.BucketLocation()
+			today := time.Now().In(loc)
+			writeLog(t, dir, today, []requestlog.Record{{
+				TS: today.Add(-2 * time.Hour), ClientToken: maskToken(testToken),
+				Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
+				CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
+			}})
+			tokens := clienttoken.OpenInMemory()
+			if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "噪声", Group: "default"}); err != nil {
+				t.Fatalf("add token: %v", err)
+			}
+			sdb, err := saasdb.Open(filepath.Join(t.TempDir(), "saas.db"))
+			if err != nil {
+				t.Fatalf("open saas db: %v", err)
+			}
+			t.Cleanup(func() { _ = sdb.Close() })
+			ctx := context.Background()
+			if _, err := sdb.EnsureWallet(ctx, testToken); err != nil {
+				t.Fatalf("EnsureWallet: %v", err)
+			}
+			if _, err := sdb.ExecContext(ctx,
+				`INSERT INTO wallet_tx (token, kind, amount_usd, ref, note, created_at) VALUES (?, 'charge', ?, '', '', ?)`,
+				testToken, -tc.chargeUSD, today.Add(-90*time.Minute).Unix()); err != nil {
+				t.Fatalf("seed charge: %v", err)
+			}
+
+			h := New(statementCfg(dir),
+				auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens).
+				WithSaaS(sdb, nil)
+			r := gin.New()
+			r.POST("/status/api/statement", h.handleStatementPreview)
+
+			w := postJSON(t, r, "/status/api/statement", statementBody{
+				Token: testToken, From: dayLabel(0), To: dayLabel(0),
+			})
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			var p statementPreview
+			if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if p.UnitemisedCNY != 0 {
+				t.Errorf("unitemised_cny = %v, want 0 — it would print as ¥%.2f, a line that contradicts itself",
+					p.UnitemisedCNY, p.UnitemisedCNY)
+			}
+			if p.ChargedCNY != p.BilledCNY {
+				t.Errorf("charged_cny = %v, want it presented as the itemised %v rather than a fen nobody can explain",
+					p.ChargedCNY, p.BilledCNY)
+			}
+		})
 	}
 }

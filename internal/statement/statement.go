@@ -2,11 +2,13 @@
 // of what a client token actually spent over a date range, as a PDF.
 //
 // Every amount traces to a request-log row: the charge the wallet was debited
-// (requestlog.Record.BilledOrCost) converted at the USD→CNY rate that row was
-// settled at (Record.CNYPerUSD). Because the rate is a per-row historical fact
-// rather than a display-time lookup, the same range exported months apart
-// totals identically, and no figure on the page depends on what the market is
-// doing when you print it. That is the whole reason the rate is stored.
+// (requestlog.Record.BilledOrCost) converted at one USD→CNY rate for the whole
+// document (Statement.CNYPerUSD, the deployment's rate at export time). The
+// request log carries no per-row rate, so there is nothing historical to
+// convert at — which means the same range exported after the market moves
+// totals differently. The rate is therefore printed on the page: a reader can
+// see which one produced these figures, and reproduce them, rather than being
+// left to guess why two copies disagree.
 //
 // The document is denominated in CNY only. Users pay in CNY and read their
 // balance in CNY; the USD the ledger happens to use internally is an
@@ -24,10 +26,11 @@
 //     same place and the same font as an ordinary date-range statement's
 //     range — never hidden, never presented as if the caller had picked
 //     those dates on purpose.
-//   - The target itself is capped, server-side, at the account's real
-//     Alipay-paid total. A target above that would let someone manufacture
-//     a bigger "consumption" figure than they ever paid for; the cap makes
-//     the document at most a receipt for money that changed hands.
+//   - Real spend is the only ceiling, and it is a hard one: every line is a
+//     charge that really happened, so no amount of asking can conjure a row.
+//     (It was briefly also capped at the account's Alipay-paid total. That cap
+//     is gone — a wallet funded by operator credit reported a ceiling of zero,
+//     so an account could not export a statement of its own consumption.)
 //
 // If the account's entire retained log doesn't add up to the requested
 // target even once every row is counted, the statement is refused outright
@@ -50,22 +53,24 @@ import (
 const MaxDetailLines = 3000
 
 // Line is one billable request.
+//
+// There is deliberately no cache-write count. OpenAI's usage block has no such
+// concept — it reports cached_tokens (a read) and nothing else — and this
+// deployment's traffic is overwhelmingly OpenAI, so the column was structurally
+// zero rather than merely empty. A column that can never carry a value is worse
+// than no column: it reads as "this request wrote no cache" when the truth is
+// "the upstream never said".
 type Line struct {
-	TS          time.Time
-	Provider    string
-	Model       string
-	Input       int64
-	Output      int64
-	CacheRead   int64
-	CacheCreate int64
-	// BilledCNY is what this request cost, in yuan, at its own settle-time
-	// rate. Zero on requests that failed before settling.
+	TS        time.Time
+	Provider  string
+	Model     string
+	Input     int64
+	Output    int64
+	CacheRead int64
+	// BilledCNY is what this request cost, in yuan, at Statement.CNYPerUSD.
+	// Zero on requests that failed before settling.
 	BilledCNY float64
-	// RateWasStored is false when the row predates per-row rate capture and
-	// BilledCNY had to be derived at the deployment's current rate. Counted,
-	// not shown per row — see Statement.UnratedRequests.
-	RateWasStored bool
-	Status        int
+	Status    int
 }
 
 // ModelRow is the per-model rollup printed above the itemised lines.
@@ -75,7 +80,8 @@ type ModelRow struct {
 	BilledCNY float64
 }
 
-// Statement is everything the renderer needs. Fill it via Observe + Rollup.
+// Statement is everything the renderer needs. Fill the range totals via either
+// Observe (row by row) or SetRangeTotals (pre-summed), then Rollup.
 type Statement struct {
 	// Identity of the holder. TokenMasked is the same mask the request log
 	// stores; the full token never appears here, so a statement is safe to
@@ -117,6 +123,14 @@ type Statement struct {
 	// show the ceiling without a second round trip.
 	TotalPaidCNY float64
 
+	// CNYPerUSD is the single rate every yuan figure on this document was
+	// converted at. Printed in the identity block: with no per-row rate in the
+	// request log there is nothing that pins these figures to the moment they
+	// were charged, so the document has to state which rate produced them or a
+	// reader comparing two exports of the same range has no way to explain the
+	// difference. Never zero — see the fallback chain in internal/admin.
+	CNYPerUSD float64
+
 	// Range totals. Requests counts every request in range, including those
 	// dropped from Lines by MaxDetailLines.
 	Requests  int64
@@ -154,42 +168,50 @@ type Statement struct {
 	// itemised total was checked against anything.
 	ChargedCNY float64
 
-	// UnratedRequests counts in-range rows written before per-row rate capture
-	// existed, whose yuan amount had to be derived at the current rate instead
-	// of their own. Non-zero only during the retention window following that
-	// rollout; the renderer footnotes it while it lasts and says nothing once
-	// it reaches zero, rather than carrying a permanent caveat for a
-	// transitional condition.
-	UnratedRequests int64
-
-	// ByModel is finalised by Rollup from the Observe tally. It covers every
+	// ByModel is finalised by Rollup from the tally below. It covers every
 	// request in the range, not just the ones retained in Lines, so it sums to
 	// BilledCNY and agrees with both the summary block and the closing total.
 	ByModel []ModelRow
-	// byModel accumulates that tally. Unexported so the only way to fill it is
-	// Observe, which every in-range row goes through.
+	// byModel accumulates that tally. Unexported so the only ways to fill it
+	// are Observe, which every in-range row goes through, and SetRangeTotals,
+	// which replaces it wholesale from a pre-summed source.
 	byModel map[string]*ModelRow
 
 	Lines []Line
 	// LinesTruncated reports that Lines is a prefix of the range rather than
 	// all of it. The renderer discloses this on the page when set.
 	LinesTruncated bool
+	// HasTokenDetail is set by Rollup: true when at least one retained Line
+	// carries a nonzero token count. Rows written before 2026-08-09 have no
+	// token counts at all — the numbers never existed at the source and cannot
+	// be recovered — so an old range would otherwise print three columns of
+	// zeroes. The renderer drops those columns entirely instead, because a
+	// table of zeroes claims the requests consumed nothing.
+	HasTokenDetail bool
 }
+
+// There are exactly two ways to fill the range totals and the per-model table,
+// and a caller picks one:
+//
+//   - Observe, once per in-range row, when the caller is walking rows anyway.
+//   - SetRangeTotals, when the same figures are already available pre-summed
+//     and no row needs to be materialised to get them.
+//
+// They are alternatives, never a pair: SetRangeTotals replaces the tally rather
+// than adding to it, so a caller that reaches for both cannot double-count —
+// the last call simply wins.
 
 // Observe tallies one in-range request into the range totals and the per-model
 // rollup.
 //
-// Callers must call it for every request in the range — including the ones
-// MaxDetailLines drops from Lines, and including the preview path that keeps no
-// lines at all. Deriving the table from Lines instead (as this did) left the
-// preview's rollup empty and, on a truncated statement, printed a per-model
-// table that summed to less than the total directly beneath it.
-func (s *Statement) Observe(model string, billedCNY float64, rateWasStored bool) {
+// Callers on this path must call it for every request in the range — including
+// the ones MaxDetailLines drops from Lines, and including the preview path that
+// keeps no lines at all. Deriving the table from Lines instead (as this did)
+// left the preview's rollup empty and, on a truncated statement, printed a
+// per-model table that summed to less than the total directly beneath it.
+func (s *Statement) Observe(model string, billedCNY float64) {
 	s.Requests++
 	s.BilledCNY += billedCNY
-	if !rateWasStored {
-		s.UnratedRequests++
-	}
 	if s.byModel == nil {
 		s.byModel = make(map[string]*ModelRow)
 	}
@@ -206,9 +228,60 @@ func (s *Statement) Observe(model string, billedCNY float64, rateWasStored bool)
 	r.BilledCNY += billedCNY
 }
 
-// Rollup finalises ByModel from the Observe tally, sorted by spend descending
-// so the models that dominate the bill lead the table.
+// SetRangeTotals fills the range totals and the per-model tally from figures
+// that were already summed elsewhere — a pre-aggregated query, in the caller
+// that has one — so a statement over a hundred thousand requests costs no more
+// than a statement over ten.
+//
+// It replaces whatever was tallied before rather than adding to it. Observe and
+// this are two ways of computing the same three things, so the failure mode
+// worth designing out is a caller that runs both and prints double; overwriting
+// makes that impossible without an error path a request handler would have to
+// decide what to do with.
+//
+// byModel must cover the whole range, and its BilledCNY must sum to billedCNY,
+// for the same reason Observe must see every row: the table sits directly above
+// the total and a reader adds it up.
+//
+// Rollup still has to be called afterwards — it is what sorts the table and
+// decides whether the itemised section has token columns.
+func (s *Statement) SetRangeTotals(requests int64, billedCNY float64, byModel []ModelRow) {
+	s.Requests = requests
+	s.BilledCNY = billedCNY
+	s.byModel = make(map[string]*ModelRow, len(byModel))
+	for _, r := range byModel {
+		row := r
+		if row.Model == "" {
+			row.Model = "(unknown)"
+		}
+		if prev, ok := s.byModel[row.Model]; ok {
+			// Defensive: two input rows naming one model would otherwise leave
+			// the table summing to less than the total printed beneath it.
+			prev.Requests += row.Requests
+			prev.BilledCNY += row.BilledCNY
+			continue
+		}
+		s.byModel[row.Model] = &row
+	}
+}
+
+// Rollup finalises ByModel from whichever tally filled it — Observe's or
+// SetRangeTotals' — sorted by spend descending
+// so the models that dominate the bill lead the table, and decides whether the
+// itemised section has token counts worth a column at all.
+//
+// It must be called after Lines is filled — HasTokenDetail is read off the rows
+// that will actually be printed, not off the range totals, since those are the
+// only numbers the columns would show.
 func (s *Statement) Rollup() {
+	s.HasTokenDetail = false
+	for _, ln := range s.Lines {
+		if ln.Input != 0 || ln.Output != 0 || ln.CacheRead != 0 {
+			s.HasTokenDetail = true
+			break
+		}
+	}
+
 	rows := make([]ModelRow, 0, len(s.byModel))
 	for _, r := range s.byModel {
 		rows = append(rows, *r)

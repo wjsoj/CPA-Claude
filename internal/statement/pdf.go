@@ -91,6 +91,12 @@ type renderer struct {
 	y          float64
 	page       int
 	totalPages int
+	// drawn, when non-nil, records every string written to the page. Only
+	// tests set it: the output embeds a subsetted font with a private
+	// encoding, so searching the PDF bytes for "¥21.00" finds nothing whether
+	// the line was printed or not, and a test of "does this figure reach the
+	// page" would otherwise have no way to fail. One nil check per draw.
+	drawn *[]string
 }
 
 // --- primitives ---------------------------------------------------------
@@ -100,6 +106,9 @@ func (r *renderer) setFont(size float64) { _ = r.pdf.SetFont(fontFamily, "", siz
 func (r *renderer) ink(gray uint8) { r.pdf.SetTextColor(gray, gray, gray) }
 
 func (r *renderer) text(x, y float64, s string) {
+	if r.drawn != nil {
+		*r.drawn = append(*r.drawn, s)
+	}
 	r.pdf.SetXY(x, y)
 	_ = r.pdf.Cell(nil, s)
 }
@@ -252,6 +261,16 @@ func (r *renderer) identityRows() [][2]string {
 			[2]string{"统计区间", fmt.Sprintf("%s 至 %s（%s，含首尾两日）", r.s.FromDay, r.s.ToDay, orDash(r.s.TZName))},
 		)
 	}
+	// The rate is part of the document's identity, not a footnote: the ledger
+	// is denominated in USD and nothing in the request log records the rate a
+	// charge settled at, so every yuan figure here is this one multiplication.
+	// Printing it is what lets two copies of the same range be reconciled
+	// against each other after the rate has moved.
+	if r.s.CNYPerUSD > 0 {
+		rows = append(rows,
+			[2]string{"换算汇率", fmt.Sprintf("1 USD = %s CNY（导出时汇率）", strconv.FormatFloat(r.s.CNYPerUSD, 'f', 4, 64))},
+		)
+	}
 	return rows
 }
 
@@ -302,16 +321,7 @@ func (r *renderer) summary() {
 		r.ink(25)
 		r.text(x, r.y+29, it[1])
 	}
-	r.y += boxH + 8
-
-	if note := r.unratedNote(); note != "" {
-		r.setFont(smallSize)
-		r.ink(120)
-		r.text(margin, r.y, note)
-		r.y += rowH + 6
-	} else {
-		r.y += 4
-	}
+	r.y += boxH + 12
 }
 
 // summaryItems is the summary box's three figures. On a target-derived
@@ -331,20 +341,6 @@ func (r *renderer) summaryItems() [][2]string {
 	}
 }
 
-// unratedNote appears only while rows written before per-row rate capture are
-// still inside the retention window. Those rows' yuan amounts had to be derived
-// at today's rate rather than their own, which is a real (if shrinking) caveat
-// on the total — and saying so beats a permanent footnote that outlives the
-// condition by years. Empty once every row in range carries its own rate.
-func (r *renderer) unratedNote() string {
-	if r.s.UnratedRequests <= 0 {
-		return ""
-	}
-	return fmt.Sprintf(
-		"注：本区间内有 %s 笔请求早于逐笔汇率记录功能上线，其金额按当前汇率折算，可能与当时实际结算略有出入。",
-		fmtInt(r.s.UnratedRequests))
-}
-
 func (r *renderer) lifetimeLabel() string {
 	if r.s.LifetimeDays > 0 {
 		return fmt.Sprintf("该令牌累计消费（近 %d 天）", r.s.LifetimeDays)
@@ -360,15 +356,36 @@ func (r *renderer) modelCols() []col {
 	}
 }
 
+// detailCols is the itemised table's layout, in two shapes.
+//
+// There is no 缓存写 column in either: OpenAI's usage block has no cache-write
+// concept (only cached_tokens, a read), and this deployment relays OpenAI
+// almost exclusively, so the column was structurally zero rather than
+// occasionally empty.
+//
+// The three token columns are dropped whole when no printed row carries a
+// count. Rows older than 2026-08-09 have none — the counts never existed
+// upstream and cannot be reconstructed — and a table of zeroes asserts that
+// the requests consumed nothing, which is a stronger and falser claim than
+// saying nothing. The freed width goes to 模型 and 金额, where it is readable.
+//
+// Both variants must tile contentW exactly; a shortfall drifts the
+// right-aligned amounts off the page edge.
 func (r *renderer) detailCols() []col {
+	if !r.s.HasTokenDetail {
+		return []col{
+			{title: "时间", w: 120},
+			{title: "模型", w: 283.28},
+			{title: "金额 (元)", w: 120, right: true},
+		}
+	}
 	return []col{
 		{title: "时间", w: 100},
-		{title: "模型", w: 163},
-		{title: "输入", w: 52, right: true},
-		{title: "输出", w: 52, right: true},
-		{title: "缓存读", w: 56, right: true},
-		{title: "缓存写", w: 56, right: true},
-		{title: "金额 (元)", w: 44.28, right: true},
+		{title: "模型", w: 190},
+		{title: "输入", w: 58, right: true},
+		{title: "输出", w: 58, right: true},
+		{title: "缓存读", w: 62, right: true},
+		{title: "金额 (元)", w: 55.28, right: true},
 	}
 }
 
@@ -399,26 +416,31 @@ func (r *renderer) totalsLabel() string { return r.totalLines()[0].label }
 func (r *renderer) detailTable() {
 	r.sectionTitle(r.detailTitle())
 
+	cols := r.detailCols()
+
+	// No rows to itemise still closes on the totals block. It used to return
+	// here, which meant that when the log had lost the range's lines but the
+	// ledger still held the debit, the page printed "该区间内没有计费请求" and
+	// nothing else — swallowing a real charge, in exactly the direction the
+	// reconciliation exists to prevent, while the JSON preview reported the
+	// gap and the PDF denied it.
 	if len(r.s.Lines) == 0 {
 		r.setFont(bodySize)
 		r.ink(130)
 		r.text(margin, r.y, "该区间内没有计费请求。")
 		r.y += rowH
+		r.totalsRow(cols)
 		return
 	}
 
-	cols := r.detailCols()
+
 	r.tableHead(cols)
 	for _, ln := range r.s.Lines {
-		vals := []string{
-			ln.TS.Format("01-02 15:04:05"),
-			orDash(ln.Model),
-			fmtInt(ln.Input),
-			fmtInt(ln.Output),
-			fmtInt(ln.CacheRead),
-			fmtInt(ln.CacheCreate),
-			cny4(ln.BilledCNY),
+		vals := []string{ln.TS.Format("01-02 15:04:05"), orDash(ln.Model)}
+		if r.s.HasTokenDetail {
+			vals = append(vals, fmtInt(ln.Input), fmtInt(ln.Output), fmtInt(ln.CacheRead))
 		}
+		vals = append(vals, cny4(ln.BilledCNY))
 		r.row(cols, vals)
 	}
 	r.totalsRow(cols)
@@ -503,6 +525,14 @@ func (r *renderer) footerNote() {
 	notes := []string{
 		"本对账单由系统依据请求日志自动生成，列示该令牌在所选区间内实际发生的 API 调用及其扣费金额。",
 		"金额为实际结算金额，已按该令牌适用倍率计算，与账户扣款一致。",
+	}
+	// Said plainly rather than left to be inferred from the rate row above: the
+	// underlying ledger is in USD, so re-exporting the same range after the
+	// rate moves yields a different yuan total. A reader holding two copies
+	// needs to know that is expected rather than an error in one of them.
+	if r.s.CNYPerUSD > 0 {
+		notes = append(notes,
+			"人民币金额按导出时汇率（见上方“换算汇率”）由实际结算的美元金额折算，不同时间导出的同一区间总额可能因汇率变动而略有差异。")
 	}
 	if r.s.UnitemisedCNY > 0 {
 		notes = append(notes,

@@ -63,20 +63,3 @@ func (s *Server) displayMultiplier(provider string, groupMult float64) float64 {
 	}
 	return groupMult
 }
-
-// settleCNYRate is the USD→CNY rate stamped onto every request-log row.
-//
-// Wallets are USD-denominated but users pay and read their spend in CNY, so
-// every yuan figure a customer sees is a conversion. Recording the rate at
-// settle time is what makes that figure reproducible: the same date range
-// exported months apart yields the same total, and a row's yuan amount stays
-// what it was when the money moved rather than tracking today's market.
-//
-// Zero when billing is off or the rate has never loaded, which readers must
-// treat as "unknown" rather than free — see requestlog.Record.BilledCNY.
-func (s *Server) settleCNYRate() float64 {
-	if s == nil || s.billing == nil || s.billing.Rate == nil {
-		return 0
-	}
-	return s.billing.Rate.CNYPerUSD()
-}

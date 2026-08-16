@@ -1225,7 +1225,6 @@ recoveredFromSignature:
 		CostUSD:       costUSD,
 		BilledUSD:     billedMain,
 		Multiplier:    multiplier,
-		CNYPerUSD:     s.settleCNYRate(),
 		Status:        resp.StatusCode,
 		DurationMs:    time.Since(start).Milliseconds(),
 		Stream:        stream,
@@ -1630,7 +1629,6 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		CostUSD:       costUSD,
 		BilledUSD:     billedMain,
 		Multiplier:    multiplier,
-		CNYPerUSD:     s.settleCNYRate(),
 		Status:        resp.StatusCode,
 		DurationMs:    time.Since(start).Milliseconds(),
 		Stream:        stream,
@@ -2011,7 +2009,6 @@ func (s *Server) recordSubUsage(a *auth.Auth, authKind, clientToken, clientName,
 			CostUSD:     cost,
 			BilledUSD:   billed,
 			Multiplier:  mult,
-			CNYPerUSD:   s.settleCNYRate(),
 			Status:      status,
 			// DurationMs/Stream/Attempts intentionally zero: this row is a
 			// sub-call summary, not an independent request — adding wall

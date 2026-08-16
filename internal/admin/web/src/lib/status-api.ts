@@ -313,8 +313,6 @@ export interface StatementPreview {
    * target mode.
    */
   total_paid_cny?: number;
-  /** In-range rows predating per-row rate capture, converted at today's rate. */
-  unrated_requests?: number;
   /** Rows the PDF will itemise; fewer than `requests` when `truncated`. */
   detail_lines: number;
   truncated: boolean;
