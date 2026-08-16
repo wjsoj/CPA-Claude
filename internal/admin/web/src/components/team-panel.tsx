@@ -1,9 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Users, Plus, RefreshCw, Trash2, Wallet } from "lucide-react";
+import {
+  Users,
+  Plus,
+  RefreshCw,
+  Trash2,
+  Wallet,
+  FileText,
+  Download,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -21,11 +35,29 @@ import {
   teamRemoveMember,
   teamLedger,
   teamTopup,
+  teamInvoiceSummary,
+  teamInvoices,
+  teamCreateInvoice,
+  teamDownloadInvoicePDF,
+  previewAllocations,
   type TeamMe,
   type TeamMember,
   type TeamLedgerRow,
+  type TeamInvoice,
+  type TeamInvoiceSummary,
 } from "@/lib/team-api";
+import type { InvoiceTitle } from "@/lib/status-api";
+import {
+  InvoiceTitleFields,
+  LabeledInput,
+  SummaryCell,
+  emptyInvoiceTitle,
+  fmtCNY,
+  invoiceStatusBadge,
+  taxNoIsValid,
+} from "@/components/invoice-common";
 import { confirmDialog } from "@/hooks/use-confirm";
+import { cn } from "@/lib/utils";
 
 const usd = (n: number) => `$${n.toFixed(4)}`;
 const cap = (n: number) => (n > 0 ? `$${n.toFixed(2)}` : "∞");
@@ -100,6 +132,8 @@ export function TeamPanel({ token }: { token: string }) {
       <TopupRow token={token} onDone={load} />
 
       <MembersTable token={token} members={members} onChange={load} />
+
+      <TeamInvoiceSection token={token} />
 
       {ledger.length > 0 && <LedgerTable rows={ledger} />}
     </div>
@@ -391,4 +425,447 @@ function kindLabel(k: string): string {
     default:
       return k;
   }
+}
+
+// ---- Team invoicing ---------------------------------------------------
+//
+// One invoice for the whole workspace. The quota is not the group pool — it is
+// the sum of what each member could still invoice on their own, and raising a
+// team invoice spends those quotas in join order. The per-member table is what
+// the admin decides the amount from, so it is shown in full rather than folded
+// into the headline card.
+
+function TeamInvoiceSection({ token }: { token: string }) {
+  const [summary, setSummary] = useState<TeamInvoiceSummary | null>(null);
+  const [invoices, setInvoices] = useState<TeamInvoice[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [showDialog, setShowDialog] = useState(false);
+  const [err, setErr] = useState("");
+
+  const refresh = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const [s, l] = await Promise.all([teamInvoiceSummary(token), teamInvoices(token)]);
+      setSummary(s);
+      setInvoices(l.invoices || []);
+      setErr("");
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const total = summary?.total;
+  const noQuota = !total || total.available_cny <= 0;
+
+  return (
+    <section className="space-y-3 rounded-lg border border-border/60 bg-card/40 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <FileText className="h-4 w-4 text-primary" />
+          <span className="font-semibold">团队发票</span>
+          {summary && (
+            <Badge variant="secondary" className="font-mono text-[10px]">
+              {summary.workspace.name}
+            </Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => void refresh()} disabled={loading}>
+            <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+          </Button>
+          <Button size="sm" onClick={() => setShowDialog(true)} disabled={noQuota}>
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            申请开票
+          </Button>
+        </div>
+      </div>
+
+      {err && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          团队发票加载失败：{err}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <SummaryCell label="累计实付 CNY" value={total?.paid_cny} highlight />
+        <SummaryCell label="已开票 CNY" value={total?.issued_cny} />
+        <SummaryCell label="待处理 CNY" value={total?.locked_cny} muted />
+        <SummaryCell label="可开票合计 CNY" value={total?.available_cny} highlight />
+      </div>
+
+      <p className="font-mono text-[11px] text-muted-foreground">
+        额度按各成员已支付的 CNY 订单累计(不随汇率波动),团队票按成员加入先后依次扣减其可开票额度(同时加入的按令牌排序)。pending 与
+        issued 都会占用额度;驳回后自动归还。
+      </p>
+
+      <MemberQuotaTable members={summary?.members || []} />
+
+      {invoices.length === 0 ? (
+        <div className="py-3 text-center text-sm text-muted-foreground">暂无团队发票记录</div>
+      ) : (
+        <div className="space-y-2">
+          {invoices.map((v) => (
+            <TeamInvoiceRow key={v.id} v={v} token={token} />
+          ))}
+        </div>
+      )}
+
+      <TeamInvoiceDialog
+        open={showDialog}
+        onClose={() => setShowDialog(false)}
+        token={token}
+        summary={summary}
+        onCreated={refresh}
+      />
+    </section>
+  );
+}
+
+function MemberQuotaTable({ members }: { members: TeamInvoiceSummary["members"] }) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border/60">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>成员</TableHead>
+            <TableHead className="text-right">实付</TableHead>
+            <TableHead className="text-right">已开票</TableHead>
+            <TableHead className="text-right">待处理</TableHead>
+            <TableHead className="text-right">可开票</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {members.map((m) => (
+            <TableRow key={m.masked}>
+              <TableCell>
+                <div className="font-mono text-xs">{m.masked}</div>
+                {m.label && <div className="text-xs text-muted-foreground">{m.label}</div>}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">{fmtCNY(m.paid_cny)}</TableCell>
+              <TableCell className="text-right font-mono text-xs">{fmtCNY(m.issued_cny)}</TableCell>
+              <TableCell className="text-right font-mono text-xs text-muted-foreground">
+                {fmtCNY(m.locked_cny)}
+              </TableCell>
+              <TableCell
+                className={cn(
+                  "text-right font-mono text-xs",
+                  m.available_cny > 0 ? "text-primary" : "text-muted-foreground",
+                )}
+              >
+                {fmtCNY(m.available_cny)}
+              </TableCell>
+            </TableRow>
+          ))}
+          {members.length === 0 && (
+            <TableRow>
+              <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
+                暂无成员额度
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function TeamInvoiceRow({ v, token }: { v: TeamInvoice; token: string }) {
+  const [busy, setBusy] = useState(false);
+  const allocations = v.allocations || [];
+
+  const download = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const blob = await teamDownloadInvoicePDF(token, v.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `team-invoice-${v.id}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error("下载失败", {
+        description: e instanceof ApiError ? e.message : String(e),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-border/60 bg-background/40 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-sm">#{v.id}</span>
+            <span className="font-mono text-sm">{fmtCNY(v.cny_amount)}</span>
+            <span className="truncate text-sm">{v.title_name}</span>
+            {invoiceStatusBadge(v.status)}
+          </div>
+          <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+            {fmtUnix(v.created_at)}
+            {v.contact_email ? ` · ${v.contact_email}` : ""}
+            {v.status === "issued" && v.issued_at ? ` · 开具于 ${fmtUnix(v.issued_at)}` : ""}
+          </div>
+          {v.status === "rejected" && v.note && (
+            <div className="mt-1 text-[11px] text-destructive">驳回原因：{v.note}</div>
+          )}
+          {v.status !== "rejected" && v.note && (
+            <div className="mt-1 text-[11px] text-muted-foreground">备注：{v.note}</div>
+          )}
+        </div>
+        {v.status === "issued" && v.downloadable !== false && (
+          <Button variant="outline" size="sm" disabled={busy} onClick={download} className="gap-1.5">
+            {busy ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            下载
+          </Button>
+        )}
+      </div>
+      {allocations.length > 0 && (
+        <details className="mt-1.5">
+          <summary className="cursor-pointer text-[11px] text-muted-foreground">
+            分摊明细（{allocations.length} 位成员）
+          </summary>
+          <div className="mt-1 space-y-0.5">
+            {allocations.map((a, i) => (
+              <div key={`${a.masked}-${i}`} className="flex justify-between gap-3 text-[11px]">
+                <span className="truncate font-mono text-muted-foreground">
+                  {a.masked}
+                  {a.label ? ` · ${a.label}` : ""}
+                </span>
+                <span className="font-mono">{fmtCNY(a.cny_amount)}</span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function fmtUnix(ts: number | undefined): string {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleString();
+}
+
+function TeamInvoiceDialog({
+  open,
+  onClose,
+  token,
+  summary,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  token: string;
+  summary: TeamInvoiceSummary | null;
+  onCreated: () => void;
+}) {
+  const [amount, setAmount] = useState("");
+  const [contactEmail, setContactEmail] = useState(
+    () => localStorage.getItem("cpa.invoice.email") || "",
+  );
+  const [selected, setSelected] = useState<InvoiceTitle>(emptyInvoiceTitle);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setAmount(summary ? Math.max(0, summary.total.available_cny).toFixed(2) : "");
+      setSelected(emptyInvoiceTitle());
+      setBusy(false);
+    }
+  }, [open, summary]);
+
+  const amountNum = Number(amount) || 0;
+  const available = summary?.total.available_cny ?? 0;
+  const tooHigh = amountNum > available + 0.005;
+  const taxNoValid = taxNoIsValid(selected.tax_no);
+
+  // Mirrors the server's split so the admin sees whose quota this will spend
+  // before submitting.
+  const preview = useMemo(
+    () => previewAllocations(summary?.members || [], amountNum),
+    [summary, amountNum],
+  );
+
+  const submit = async () => {
+    if (busy) return;
+    if (!selected.name.trim()) {
+      toast.error("请填写公司名称 (抬头)");
+      return;
+    }
+    if (!taxNoValid) {
+      toast.error("请填写有效的统一社会信用代码", { description: "18 位字母 / 数字 (大写)" });
+      return;
+    }
+    if (!contactEmail.includes("@")) {
+      toast.error("请填写有效的联系邮箱");
+      return;
+    }
+    if (amountNum <= 0) {
+      toast.error("开票金额必须大于 0");
+      return;
+    }
+    if (tooHigh || preview.short_cny > 0.005) {
+      toast.error(`金额超过可开票合计 ${fmtCNY(available)}`);
+      return;
+    }
+    setBusy(true);
+    try {
+      await teamCreateInvoice(token, {
+        cny_amount: amountNum,
+        title: selected as unknown as Record<string, unknown>,
+        contact_email: contactEmail.trim(),
+      });
+      localStorage.setItem("cpa.invoice.email", contactEmail.trim());
+      toast.success("团队发票申请已提交");
+      onCreated();
+      onClose();
+    } catch (e) {
+      toast.error("提交失败", { description: e instanceof ApiError ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>
+            申请团队发票{summary ? ` · ${summary.workspace.name}` : ""}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div>
+            <label className="eyebrow text-[10px] opacity-70">开票金额 (CNY)</label>
+            <div className="mt-1 flex items-baseline gap-2">
+              <span className="font-mono text-xl">¥</span>
+              <Input
+                type="number"
+                inputMode="decimal"
+                min="0.01"
+                step="0.01"
+                value={amount}
+                onInput={(e) => setAmount((e.target as HTMLInputElement).value)}
+                className={cn("flex-1 font-mono text-2xl tabular", tooHigh && "border-destructive")}
+              />
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-2 font-mono text-[11px] text-muted-foreground">
+              <span>可开票合计 {fmtCNY(available)}</span>
+              <button
+                type="button"
+                className="text-primary hover:underline"
+                onClick={() => setAmount(available.toFixed(2))}
+              >
+                全部
+              </button>
+            </div>
+            {tooHigh && (
+              <div className="mt-1 text-[11px] text-destructive">
+                超出团队可开票合计 {fmtCNY(available)},请调低金额。
+              </div>
+            )}
+          </div>
+
+          <AllocationPreview rows={preview.rows} short={preview.short_cny} total={amountNum} />
+
+          <InvoiceTitleFields token={token} open={open} value={selected} onChange={setSelected} />
+
+          <LabeledInput
+            label="接收发票邮箱"
+            required
+            value={contactEmail}
+            onChange={setContactEmail}
+            placeholder="invoice@example.com"
+            type="email"
+          />
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={onClose}>
+              取消
+            </Button>
+            <Button
+              onClick={submit}
+              // short_cny is the same refusal as tooHigh reached the other way:
+              // the preview walks the members and comes up short even when the
+              // headline total looks sufficient (a member's quota moved under
+              // us). submit() rejects both, so the button has to disable on
+              // both — otherwise it invites a click it will only ever toast at.
+              disabled={busy || tooHigh || amountNum <= 0 || preview.short_cny > 0.005}
+              className="gap-1.5"
+            >
+              {busy && <RefreshCw className="h-4 w-4 animate-spin" />}
+              提交申请
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AllocationPreview({
+  rows,
+  short,
+  total,
+}: {
+  rows: ReturnType<typeof previewAllocations>["rows"];
+  short: number;
+  total: number;
+}) {
+  if (total <= 0) {
+    return (
+      <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+        填写金额后这里会显示这张票将用掉哪些成员的额度。
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        {/* 后端按 (created_at, token) 排序，而 created_at 是整秒：批量拉人建组时
+            全组同一秒加入，实际顺序就是令牌序，文案不能只说"加入顺序"。 */}
+        <span className="eyebrow text-[10px] opacity-70">分摊预览（按成员加入先后，同时加入的按令牌排序）</span>
+        <span className="font-mono text-[11px] text-muted-foreground">
+          合计 {fmtCNY(total - short)}
+        </span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="text-[11px] text-muted-foreground">没有成员还有可开票额度。</div>
+      ) : (
+        <div className="space-y-0.5">
+          {rows.map((r, i) => (
+            <div key={`${r.masked}-${i}`} className="flex items-center justify-between gap-3 text-[11px]">
+              <span className="truncate font-mono text-muted-foreground">
+                {r.masked}
+                {r.label ? ` · ${r.label}` : ""}
+              </span>
+              <span className="font-mono">
+                {fmtCNY(r.cny_amount)}
+                <span className="ml-1 opacity-60">/ {fmtCNY(r.available_cny)}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {short > 0.005 && (
+        <div className="mt-1.5 text-[11px] text-destructive">
+          还差 {fmtCNY(short)} 无成员额度可扣,请调低金额。
+        </div>
+      )}
+    </div>
+  );
 }

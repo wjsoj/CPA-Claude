@@ -232,6 +232,41 @@ CREATE INDEX IF NOT EXISTS idx_alipay_orders_token_status
 CREATE INDEX IF NOT EXISTS idx_alipay_orders_status_created
     ON alipay_orders(status, created_at);
 `,
+	// 6: team invoicing (团队统一开票). A workspace admin issues ONE fapiao for
+	// the whole group; the CNY it consumes is drawn from each member's own
+	// invoiceable pool, because that pool is derived from who actually paid.
+	//
+	//   - invoices.workspace_id = 0 keeps every pre-existing row (and every
+	//     future personal request) on exactly the legacy path. > 0 marks a team
+	//     invoice, whose `token` column is the ADMIN who filed it — the real
+	//     quota sources live in invoice_allocations. That split is why
+	//     InvoiceableCNY has to say `workspace_id = 0` when it sums a token's
+	//     own invoices: without it the filing admin would be charged twice,
+	//     once for the whole face value and once for their allocation.
+	//   - invoice_allocations is immutable. A rejected invoice frees its
+	//     members' quota by virtue of the status join (only pending|issued
+	//     count), never by deleting rows, so the allocation table stays a
+	//     complete audit record of what was drawn from whom.
+	//   - The partial index skips the personal rows, which are the vast
+	//     majority and are already served by idx_invoices_token. Being partial
+	//     is what makes the readers' redundant-looking `AND workspace_id > 0`
+	//     load-bearing: SQLite only picks a partial index when a WHERE term
+	//     provably implies its predicate, and `workspace_id = ?` on a bound
+	//     parameter proves nothing at plan time. The key is `id DESC` rather
+	//     than `created_at DESC` because both readers order by id — a
+	//     created_at key would be chosen and then sorted anyway.
+	`
+ALTER TABLE invoices ADD COLUMN workspace_id INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX idx_invoices_ws ON invoices(workspace_id, id DESC) WHERE workspace_id > 0;
+
+CREATE TABLE invoice_allocations (
+    invoice_id INTEGER NOT NULL,
+    token      TEXT    NOT NULL,
+    cny_amount REAL    NOT NULL,
+    PRIMARY KEY (invoice_id, token)
+) WITHOUT ROWID;
+CREATE INDEX idx_inv_alloc_token ON invoice_allocations(token);
+`,
 }
 
 func (db *DB) migrate() error {

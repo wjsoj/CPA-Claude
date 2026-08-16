@@ -70,10 +70,11 @@ func (s *Server) mountBillingRoutes(engine *gin.Engine) {
 	// order-creation machinery for pool top-ups.
 	if s.saasDB != nil {
 		team := &billing.TeamHandler{
-			DB:      s.saasDB,
-			Billing: s.billing,
-			LogDir:  s.cfg.LogDir,
-			Auth:    s.makeBearerAuth(),
+			DB:       s.saasDB,
+			Billing:  s.billing,
+			Invoices: s.invoice,
+			LogDir:   s.cfg.LogDir,
+			Auth:     s.makeBearerAuth(),
 			TokenExists: func(tok string) bool {
 				_, ok := s.tokens.Lookup(tok)
 				return ok

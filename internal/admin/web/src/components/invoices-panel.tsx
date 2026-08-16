@@ -16,6 +16,7 @@ import {
   Download,
   Filter,
   Search,
+  Users,
 } from "lucide-react";
 import { api, getToken, ADMIN_BASE } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -51,6 +52,12 @@ interface AdminInvoice {
   created_at: number;
   issued_at: number;
   rejected_at: number;
+  // Team invoices are raised by a group admin for a whole workspace: one
+  // invoice, its face value drawn from several members' quotas. `allocations`
+  // is that split (empty / absent on a personal invoice).
+  workspace_id?: number;
+  workspace_name?: string;
+  allocations?: Array<{ masked: string; label?: string; cny_amount: number }>;
 }
 
 const fmtCNY = (n: number): string =>
@@ -222,7 +229,18 @@ export function InvoicesPanel({ refreshTick }: { refreshTick: number }) {
                 >
                   <td className="px-3 py-2 font-mono">#{v.id}</td>
                   <td className="px-3 py-2">
-                    <div className="font-mono text-xs">{v.token}</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-xs">{v.token}</span>
+                      {v.workspace_id ? (
+                        <Badge
+                          variant="outline"
+                          className="gap-1 border-primary/40 text-primary text-[10px] font-mono"
+                        >
+                          <Users className="h-3 w-3" />
+                          {v.workspace_name || `ws#${v.workspace_id}`}
+                        </Badge>
+                      ) : null}
+                    </div>
                     {v.label && <div className="text-[11px] text-muted-foreground">{v.label}</div>}
                   </td>
                   <td className="px-3 py-2 max-w-[260px] truncate">{v.title_name}</td>
@@ -422,6 +440,29 @@ function DetailDialog({ target, onClose }: { target: AdminInvoice | null; onClos
           {target.rejected_at > 0 && <Row k="Rejected" v={fmtUnix(target.rejected_at)} mono />}
           {target.note && <Row k="Note" v={target.note} />}
         </dl>
+        {target.workspace_id ? (
+          <div className="mt-3 rounded-md border border-border/60 bg-muted/20 p-3">
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Users className="h-3.5 w-3.5" />
+              Team invoice · {target.workspace_name || `ws#${target.workspace_id}`}
+            </div>
+            {(target.allocations || []).length === 0 ? (
+              <div className="text-xs text-muted-foreground">No allocation detail returned.</div>
+            ) : (
+              <div className="space-y-0.5">
+                {(target.allocations || []).map((a, i) => (
+                  <div key={`${a.masked}-${i}`} className="flex justify-between gap-3 text-xs">
+                    <span className="truncate font-mono text-muted-foreground">
+                      {a.masked}
+                      {a.label ? ` · ${a.label}` : ""}
+                    </span>
+                    <span className="font-mono">{fmtCNY(a.cny_amount)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
       </DialogContent>
     </Dialog>
   );

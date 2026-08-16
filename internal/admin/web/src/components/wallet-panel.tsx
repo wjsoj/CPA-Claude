@@ -5,7 +5,7 @@
 // transactions, and orders, with a Recharge button that opens a modal
 // driving the Z-Pay top-up flow.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   CreditCard,
@@ -22,7 +22,7 @@ import {
   Trash2,
   FileText,
   Download,
-  Search,
+  Users,
   ShieldCheck,
 } from "lucide-react";
 import {
@@ -40,7 +40,6 @@ import {
   loadInvoiceSummary,
   loadInvoices,
   createInvoice,
-  suggestInvoiceTitles,
   downloadInvoicePDF,
   type WalletBalance,
   type WalletTx,
@@ -61,6 +60,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { confirmDialog } from "@/hooks/use-confirm";
+import {
+  InvoiceTitleFields,
+  LabeledInput,
+  SummaryCell,
+  emptyInvoiceTitle,
+  invoiceStatusBadge,
+  taxNoIsValid,
+} from "@/components/invoice-common";
 import { cn, fmtInt } from "@/lib/utils";
 
 function fmtUSD(v: number): string {
@@ -1034,36 +1041,6 @@ function InvoiceSection({ token }: { token: string }) {
   );
 }
 
-function SummaryCell({
-  label,
-  value,
-  highlight,
-  muted,
-}: {
-  label: string;
-  value: number | undefined;
-  highlight?: boolean;
-  muted?: boolean;
-}) {
-  return (
-    <div
-      className={cn(
-        "rounded-md border px-3 py-2",
-        highlight
-          ? "border-primary/40 bg-primary/5"
-          : muted
-            ? "border-border/60 bg-muted/30"
-            : "border-border",
-      )}
-    >
-      <div className="text-[10px] eyebrow opacity-70">{label}</div>
-      <div className="mt-0.5 font-mono text-lg tabular">
-        {value === undefined ? "···" : `¥${value.toFixed(2)}`}
-      </div>
-    </div>
-  );
-}
-
 function InvoiceRow({ v, token }: { v: Invoice; token: string }) {
   const [busy, setBusy] = useState(false);
 
@@ -1085,17 +1062,34 @@ function InvoiceRow({ v, token }: { v: Invoice; token: string }) {
     }
   };
 
+  // A team invoice is raised by the group admin for the whole workspace; only
+  // part of its face value came out of this token's quota, so the amount shown
+  // is the allocated share and the face value is spelled out beside it.
+  const isTeam = v.scope === "team";
+  const allocated = typeof v.allocated_cny === "number" ? v.allocated_cny : v.cny_amount;
+
   return (
     <div className="flex items-center justify-between gap-3 rounded-md border border-border/60 bg-background/40 px-3 py-2">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-mono text-sm">#{v.id}</span>
-          <span className="font-mono text-sm">¥{v.cny_amount.toFixed(2)}</span>
+          <span className="font-mono text-sm">{fmtCNY(allocated)}</span>
+          {isTeam && (
+            <Badge
+              variant="outline"
+              className="gap-1 border-primary/40 text-primary text-[10px] font-mono"
+            >
+              <Users className="h-3 w-3" />
+              团队票{v.workspace_name ? ` · ${v.workspace_name}` : ""}
+            </Badge>
+          )}
           <span className="text-sm truncate">{v.title_name}</span>
           {invoiceStatusBadge(v.status)}
         </div>
         <div className="mt-0.5 text-[11px] text-muted-foreground font-mono">
-          {fmtTime(v.created_at)} · {v.contact_email}
+          {fmtTime(v.created_at)}
+          {v.contact_email ? ` · ${v.contact_email}` : ""}
+          {isTeam && <span> · 票面合计 {fmtCNY(v.cny_amount)}(本人分摊 {fmtCNY(allocated)})</span>}
           {v.note && <span className="opacity-70"> · {v.note}</span>}
         </div>
       </div>
@@ -1107,29 +1101,6 @@ function InvoiceRow({ v, token }: { v: Invoice; token: string }) {
       )}
     </div>
   );
-}
-
-function invoiceStatusBadge(s: Invoice["status"]) {
-  switch (s) {
-    case "issued":
-      return (
-        <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 text-[11px] font-mono">
-          <CheckCircle2 className="h-3 w-3" /> issued
-        </span>
-      );
-    case "pending":
-      return (
-        <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400 text-[11px] font-mono">
-          <Clock3 className="h-3 w-3" /> pending
-        </span>
-      );
-    case "rejected":
-      return (
-        <span className="inline-flex items-center gap-1 text-destructive text-[11px] font-mono">
-          <XCircle className="h-3 w-3" /> rejected
-        </span>
-      );
-  }
 }
 
 function InvoiceDialog({
@@ -1147,90 +1118,22 @@ function InvoiceDialog({
 }) {
   const [amount, setAmount] = useState("");
   const [contactEmail, setContactEmail] = useState(() => localStorage.getItem("cpa.invoice.email") || "");
-  const [search, setSearch] = useState("");
-  const [picks, setPicks] = useState<InvoiceTitle[]>([]);
-  const [selected, setSelected] = useState<InvoiceTitle>({
-    name: "",
-    tax_no: "",
-    address: "",
-    phone: "",
-    bank: "",
-    bank_account: "",
-  });
+  const [selected, setSelected] = useState<InvoiceTitle>(emptyInvoiceTitle);
   const [busy, setBusy] = useState(false);
-  const [searching, setSearching] = useState(false);
-  const [searched, setSearched] = useState(false);
-  // Suppresses the dropdown after the user picks a candidate — the picked
-  // name flows back into `search`, which would otherwise re-fire the
-  // debounced fetch and re-open the list. Cleared once the user types again.
-  const [pickedLock, setPickedLock] = useState(false);
-  const debRef = useRef<number | null>(null);
 
   // Reset when reopened.
   useEffect(() => {
     if (open) {
       setAmount(summary ? Math.max(0, summary.available_cny).toFixed(2) : "");
-      setSearch("");
-      setPicks([]);
-      setSelected({ name: "", tax_no: "", address: "", phone: "", bank: "", bank_account: "" });
+      setSelected(emptyInvoiceTitle());
       setBusy(false);
-      setSearched(false);
-      setSearching(false);
-      setPickedLock(false);
     }
   }, [open, summary]);
-
-  // Debounced title suggestion — kicks 350ms after the user stops typing.
-  useEffect(() => {
-    if (!open) return;
-    if (debRef.current) window.clearTimeout(debRef.current);
-    if (!search.trim()) {
-      setPicks([]);
-      setSearched(false);
-      setSearching(false);
-      return;
-    }
-    if (pickedLock) return; // hold the dropdown closed until the user edits again
-    setSearching(true);
-    debRef.current = window.setTimeout(async () => {
-      try {
-        const r = await suggestInvoiceTitles(token, search);
-        setPicks(r.titles || []);
-      } catch {
-        setPicks([]);
-      } finally {
-        setSearching(false);
-        setSearched(true);
-      }
-    }, 350);
-    return () => {
-      if (debRef.current) window.clearTimeout(debRef.current);
-    };
-  }, [search, token, open]);
-
-  const apply = (t: InvoiceTitle) => {
-    setSelected((prev) => ({
-      ...prev,
-      name: t.name,
-      tax_no: t.tax_no ?? prev.tax_no,
-      address: t.address ?? prev.address,
-      phone: t.phone ?? prev.phone,
-      bank: t.bank ?? prev.bank,
-      bank_account: t.bank_account ?? prev.bank_account,
-    }));
-    setSearch(t.name);
-    setPicks([]);
-    setSearching(false);
-    setSearched(false);
-    setPickedLock(true);
-  };
 
   const amountNum = Number(amount) || 0;
   const available = summary?.available_cny ?? 0;
   const tooHigh = amountNum > available + 0.005;
-
-  const taxNoTrim = (selected.tax_no || "").trim().toUpperCase();
-  const taxNoValid = /^[0-9A-Z]{15,20}$/.test(taxNoTrim);
+  const taxNoValid = taxNoIsValid(selected.tax_no);
 
   const submit = async () => {
     if (busy) return;
@@ -1307,90 +1210,13 @@ function InvoiceDialog({
             </div>
           </div>
 
-          <div>
-            <label className="eyebrow text-[10px] opacity-70">
-              抬头名称 (公司全称) <span className="text-destructive">*</span>
-            </label>
-            <div className="relative mt-1">
-              <Input
-                placeholder="搜索或手动输入抬头…"
-                value={search}
-                onInput={(e) => {
-                  const v = (e.target as HTMLInputElement).value;
-                  setSearch(v);
-                  setSelected((prev) => ({ ...prev, name: v }));
-                  setPickedLock(false);
-                }}
-                className="font-mono pr-8"
-              />
-              <Search className="h-4 w-4 absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            </div>
-            {picks.length > 0 && (
-              <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-border/60 bg-background divide-y divide-border/40">
-                {picks.map((p, i) => (
-                  <button
-                    type="button"
-                    key={`${p.name}-${i}`}
-                    onClick={() => apply(p)}
-                    className="w-full text-left px-3 py-1.5 hover:bg-muted/40 flex items-center justify-between gap-2"
-                  >
-                    <span className="truncate text-sm">{p.name}</span>
-                    <span className="text-[10px] font-mono opacity-60">
-                      {p.source === "local" ? "已存" : "在线"}
-                      {p.tax_no ? ` · ${p.tax_no.slice(0, 6)}…` : ""}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="mt-1 text-[11px] text-muted-foreground">
-              {searching
-                ? "正在搜索…"
-                : searched && picks.length === 0
-                  ? "未匹配到企业,可手动输入公司全称与统一社会信用代码"
-                  : !search.trim()
-                    ? "输入公司名称关键词以从企业库匹配,或直接手动填写下方字段"
-                    : null}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <LabeledInput
-              label="统一社会信用代码"
-              required
-              value={selected.tax_no || ""}
-              onChange={(v) =>
-                setSelected((p) => ({ ...p, tax_no: v.toUpperCase().replace(/\s+/g, "") }))
-              }
-              placeholder="18 位字母 / 数字"
-              invalid={Boolean((selected.tax_no || "").trim()) && !taxNoValid}
-            />
-            <LabeledInput
-              label="联系电话 (可选)"
-              value={selected.phone || ""}
-              onChange={(v) => setSelected((p) => ({ ...p, phone: v }))}
-            />
-          </div>
-          <LabeledInput
-            label="注册地址 (可选)"
-            value={selected.address || ""}
-            onChange={(v) => setSelected((p) => ({ ...p, address: v }))}
+          <InvoiceTitleFields
+            token={token}
+            open={open}
+            value={selected}
+            onChange={setSelected}
           />
-          <div className="grid grid-cols-2 gap-3">
-            <LabeledInput
-              label="开户银行 (可选)"
-              value={selected.bank || ""}
-              onChange={(v) => setSelected((p) => ({ ...p, bank: v }))}
-            />
-            <LabeledInput
-              label="银行账户 (可选)"
-              value={selected.bank_account || ""}
-              onChange={(v) => setSelected((p) => ({ ...p, bank_account: v }))}
-            />
-          </div>
-          <p className="text-[11px] text-muted-foreground -mt-1">
-            开具增值税普通发票只需公司名称 + 统一社会信用代码;专用发票请补全其余字段(以贵司财务提供的开票信息为准)。
-          </p>
+
           <LabeledInput
             label="接收发票邮箱"
             required
@@ -1414,38 +1240,3 @@ function InvoiceDialog({
     </Dialog>
   );
 }
-
-function LabeledInput({
-  label,
-  value,
-  onChange,
-  placeholder,
-  type,
-  required,
-  invalid,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  type?: string;
-  required?: boolean;
-  invalid?: boolean;
-}) {
-  return (
-    <div>
-      <label className="eyebrow text-[10px] opacity-70">
-        {label}
-        {required && <span className="text-destructive"> *</span>}
-      </label>
-      <Input
-        type={type || "text"}
-        value={value}
-        placeholder={placeholder}
-        onInput={(e) => onChange((e.target as HTMLInputElement).value)}
-        className={cn("mt-1 font-mono text-sm", invalid && "border-destructive")}
-      />
-    </div>
-  );
-}
-

@@ -48,7 +48,9 @@ func (h *Handler) handleListInvoices(c *gin.Context) {
 	}
 	status := strings.TrimSpace(c.Query("status")) // "", pending, issued, rejected
 	q := c.Query("q")
-	invs, err := h.wallets.ListInvoices(c.Request.Context(), status, q, 500)
+	wsID, _ := strconv.ParseInt(strings.TrimSpace(c.Query("workspace_id")), 10, 64)
+	ctx := c.Request.Context()
+	invs, err := h.wallets.ListInvoices(ctx, status, q, wsID, 500)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -61,22 +63,47 @@ func (h *Handler) handleListInvoices(c *gin.Context) {
 			}
 		}
 	}
+	// Batched: a page of 500 invoices must not become 500 allocation queries.
+	teamIDs := make([]int64, 0, len(invs))
+	for _, v := range invs {
+		if v.IsTeam() {
+			teamIDs = append(teamIDs, v.ID)
+		}
+	}
+	allocsByInvoice, err := h.wallets.AllocationsByInvoice(ctx, teamIDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	out := make([]gin.H, 0, len(invs))
 	for _, v := range invs {
+		// For a team invoice `token` is the admin who filed it, not the sole
+		// payer — allocations is where the money actually came from.
+		allocs := make([]gin.H, 0, len(allocsByInvoice[v.ID]))
+		for _, a := range allocsByInvoice[v.ID] {
+			allocs = append(allocs, gin.H{
+				"token":      maskToken(a.Token),
+				"label":      labels[a.Token],
+				"cny_amount": a.CNYAmount,
+			})
+		}
 		out = append(out, gin.H{
-			"id":            v.ID,
-			"token":         maskToken(v.Token),
-			"label":         labels[v.Token],
-			"cny_amount":    v.CNYAmount,
-			"title_name":    v.TitleName,
-			"title":         parseJSONMap(v.TitleSnapshot),
-			"contact_email": v.ContactEmail,
-			"status":        v.Status,
-			"pdf_uploaded":  v.PDFPath != "",
-			"note":          v.Note,
-			"created_at":    v.CreatedAt.Unix(),
-			"issued_at":     unixOrZero(v.IssuedAt),
-			"rejected_at":   unixOrZero(v.RejectedAt),
+			"id":             v.ID,
+			"token":          maskToken(v.Token),
+			"label":          labels[v.Token],
+			"cny_amount":     v.CNYAmount,
+			"title_name":     v.TitleName,
+			"title":          parseJSONMap(v.TitleSnapshot),
+			"contact_email":  v.ContactEmail,
+			"status":         v.Status,
+			"pdf_uploaded":   v.PDFPath != "",
+			"note":           v.Note,
+			"created_at":     v.CreatedAt.Unix(),
+			"issued_at":      unixOrZero(v.IssuedAt),
+			"rejected_at":    unixOrZero(v.RejectedAt),
+			"workspace_id":   v.WorkspaceID,
+			"workspace_name": v.WorkspaceName,
+			"allocations":    allocs,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"invoices": out})

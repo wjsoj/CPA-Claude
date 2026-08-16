@@ -527,6 +527,13 @@ export interface Invoice {
   issued_at?: number;
   rejected_at?: number;
   downloadable?: boolean;
+  // Team invoices (raised by a group admin for the whole workspace) show up in
+  // the member's own list too, because part of the face value was drawn from
+  // this token's quota. `allocated_cny` is that share — `cny_amount` stays the
+  // invoice's full face value.
+  scope?: "personal" | "team";
+  allocated_cny?: number;
+  workspace_name?: string;
   title?: {
     name?: string;
     tax_no?: string;

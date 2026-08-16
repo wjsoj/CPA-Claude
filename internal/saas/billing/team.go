@@ -32,6 +32,11 @@ type TeamHandler struct {
 	TokenExists func(token string) bool
 	// TokenLabel returns a display name for a token (may be empty).
 	TokenLabel func(token string) string
+	// Invoices is the personal invoice surface, borrowed for its ops-mail
+	// wiring so a team request notifies the operator the same way. nil when
+	// invoicing isn't configured — the team invoice routes still work, the
+	// operator just finds the request in the panel instead of the inbox.
+	Invoices *InvoiceHandler
 }
 
 const (
@@ -50,6 +55,7 @@ func (t *TeamHandler) Routes(g *gin.RouterGroup) {
 	g.GET("/ledger", t.ledger)
 	g.GET("/requests", t.requests)
 	g.POST("/topup", t.topup)
+	t.invoiceRoutes(g)
 }
 
 // authMW resolves the bearer token, verifies it administers a workspace, and

@@ -396,7 +396,17 @@ func (h *InvoiceHandler) list(c *gin.Context) {
 	}
 	out := make([]gin.H, 0, len(invs))
 	for _, v := range invs {
-		out = append(out, invoiceUserView(v))
+		row := invoiceUserView(&v.Invoice)
+		// A team invoice shows up in every contributing member's history, so
+		// the row has to say whose quota it spent and how much of it was
+		// theirs — the face value alone would misread as a personal charge.
+		row["scope"] = "personal"
+		if v.IsTeam() {
+			row["scope"] = "team"
+			row["workspace_name"] = v.WorkspaceName
+		}
+		row["allocated_cny"] = round2(v.AllocatedCNY)
+		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, gin.H{"invoices": out})
 }
@@ -451,12 +461,16 @@ func (h *InvoiceHandler) create(c *gin.Context) {
 
 	// Best-effort ops notification. Failure here doesn't fail the
 	// request — the admin can still see it in the panel.
-	go h.notifyOps(inv)
+	go h.notifyOps(inv, "")
 
 	c.JSON(http.StatusOK, invoiceUserView(inv))
 }
 
-func (h *InvoiceHandler) notifyOps(inv *db.Invoice) {
+// notifyOps mails the operator about a new request. wsName is the workspace a
+// team invoice was filed for — non-empty makes the mail say so, because the
+// operator's next step differs: a team invoice's amount came out of several
+// members' pools and the reject/issue decision affects all of them.
+func (h *InvoiceHandler) notifyOps(inv *db.Invoice, wsName string) {
 	if h.Resend == nil || h.OpsEmail == "" {
 		return
 	}
@@ -468,23 +482,40 @@ func (h *InvoiceHandler) notifyOps(inv *db.Invoice) {
 		TaxNo string `json:"tax_no"`
 	}
 	_ = json.Unmarshal([]byte(inv.TitleSnapshot), &snap)
-	subj := fmt.Sprintf("[CPA-Claude] 新发票申请 ¥%.2f — %s", inv.CNYAmount, inv.TitleName)
+
+	kind, subjTag, wsLine, allocList := "用户", "", "", ""
+	if inv.IsTeam() {
+		kind, subjTag = "工作区管理员", "[团队] "
+		wsLine = fmt.Sprintf("<li>工作区: <b>%s</b> (#%d)</li>", wsName, inv.WorkspaceID)
+		if allocs, err := h.DB.InvoiceAllocations(ctx, inv.ID); err == nil {
+			var b strings.Builder
+			b.WriteString("<p>成员分摊:</p><ul>")
+			for _, a := range allocs {
+				fmt.Fprintf(&b, "<li><code>%s</code> — ¥%.2f</li>", maskToken(a.Token), a.CNYAmount)
+			}
+			b.WriteString("</ul>")
+			allocList = b.String()
+		}
+	}
+	subj := fmt.Sprintf("[CPA-Claude] %s新发票申请 ¥%.2f — %s", subjTag, inv.CNYAmount, inv.TitleName)
 	body := fmt.Sprintf(
-		"<p>用户申请了新的发票:</p>"+
+		"<p>%s申请了新的发票:</p>"+
 			"<ul>"+
 			"<li>发票编号: <b>#%d</b></li>"+
 			"<li>金额: <b>¥%.2f</b></li>"+
+			"%s"+
 			"<li>抬头: %s</li>"+
 			"<li>统一社会信用代码: <code>%s</code></li>"+
 			"<li>联系邮箱: %s</li>"+
 			"<li>申请时间: %s</li>"+
 			"<li>Token: <code>%s</code></li>"+
 			"</ul>"+
+			"%s"+
 			"<p>抬头快照:<br><pre>%s</pre></p>"+
 			"<p>请到管理员面板 → Invoices 处理。</p>",
-		inv.ID, inv.CNYAmount, inv.TitleName, snap.TaxNo, inv.ContactEmail,
+		kind, inv.ID, inv.CNYAmount, wsLine, inv.TitleName, snap.TaxNo, inv.ContactEmail,
 		inv.CreatedAt.Format("2006-01-02 15:04:05"),
-		maskToken(inv.Token), prettyJSON(inv.TitleSnapshot))
+		maskToken(inv.Token), allocList, prettyJSON(inv.TitleSnapshot))
 	_ = h.Resend.Send(ctx, resend.Email{
 		To:      []string{h.OpsEmail},
 		Subject: subj,
@@ -504,7 +535,10 @@ func (h *InvoiceHandler) download(c *gin.Context) {
 		return
 	}
 	inv, err := h.DB.GetInvoice(c.Request.Context(), id)
-	if err != nil || inv.Token != tok {
+	// Ownership is either "you filed it" or "your quota paid for part of it".
+	// Withholding the PDF from a member whose invoiceable balance was spent on
+	// it is not defensible.
+	if err != nil || (inv.Token != tok && !h.hasAllocation(c, inv, tok)) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -521,6 +555,23 @@ func (h *InvoiceHandler) download(c *gin.Context) {
 	c.Header("Content-Type", "application/pdf")
 	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
 	c.File(inv.PDFPath)
+}
+
+// hasAllocation reports whether tok contributed quota to a team invoice.
+func (h *InvoiceHandler) hasAllocation(c *gin.Context, inv *db.Invoice, tok string) bool {
+	if !inv.IsTeam() {
+		return false
+	}
+	allocs, err := h.DB.InvoiceAllocations(c.Request.Context(), inv.ID)
+	if err != nil {
+		return false
+	}
+	for _, a := range allocs {
+		if a.Token == tok {
+			return true
+		}
+	}
+	return false
 }
 
 // invoiceUserView is the JSON shape returned to the end user. Excludes
