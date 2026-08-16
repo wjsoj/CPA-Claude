@@ -415,47 +415,6 @@ func TestStatementByTargetLocatesWindow(t *testing.T) {
 	}
 }
 
-// A target above what the account ever actually paid for is refused outright
-// — the whole point of the ceiling.
-func TestStatementByTargetRejectsAboveTotalPaid(t *testing.T) {
-	dir := t.TempDir()
-	masked := maskToken(testToken)
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
-	writeLog(t, dir, today, []requestlog.Record{{
-		TS: today.Add(-time.Hour), ClientToken: masked,
-		Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
-	}})
-	tokens := clienttoken.OpenInMemory()
-	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "目标测试", Group: "default"}); err != nil {
-		t.Fatalf("add token: %v", err)
-	}
-	sdb, err := saasdb.Open(filepath.Join(t.TempDir(), "saas.db"))
-	if err != nil {
-		t.Fatalf("open saas db: %v", err)
-	}
-	t.Cleanup(func() { _ = sdb.Close() })
-	ctx := context.Background()
-	if _, err := sdb.ExecContext(ctx,
-		`INSERT INTO alipay_orders (out_trade_no, token, cny_amount, usd_credit, rate, status, trade_no, qr_code, created_at, paid_at)
-		 VALUES ('t1', ?, 10, 1, 10, 'paid', '', '', ?, ?)`,
-		testToken, today.Unix(), today.Unix()); err != nil {
-		t.Fatalf("seed order: %v", err)
-	}
-
-	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
-		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens).
-		WithSaaS(sdb, nil)
-	r := gin.New()
-	r.POST("/status/api/statement", h.handleStatementPreview)
-
-	w := postJSON(t, r, "/status/api/statement", statementBody{Token: testToken, TargetCNY: 50})
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 (target exceeds the ¥10 ever paid)", w.Code)
-	}
-}
-
 // A target the retained log can't reach, even summing every row, is refused
 // rather than served as a statement that falls short of what it claims.
 func TestStatementByTargetRejectsUnreachableSpend(t *testing.T) {
@@ -510,13 +469,22 @@ func TestStatementTargetAndDateRangeAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// A target amount needs a real ceiling to check against; without SaaS
-// billing there is no Alipay-paid total to check it against.
-func TestStatementTargetWithoutSaaSRejected(t *testing.T) {
+// A target amount is bounded by real spend, which the request log knows on its
+// own, so the export does not need a billing database behind it. It used to be
+// refused outright without SaaS because the cap was the Alipay-paid total.
+func TestStatementByTargetWorksWithoutSaaS(t *testing.T) {
 	r, _ := statementFixture(t) // no WithSaaS call — billing disabled
-	w := postJSON(t, r, "/status/api/statement", statementBody{Token: testToken, TargetCNY: 10})
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 when SaaS billing is off", w.Code)
+	// The fixture bills $1/day at a stored rate of 7, so ¥7 is one day's spend.
+	w := postJSON(t, r, "/status/api/statement", statementBody{Token: testToken, TargetCNY: 7})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — spend alone bounds a target; body = %s", w.Code, w.Body.String())
+	}
+	var p statementPreview
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !p.ByTarget || p.BilledCNY < 7 {
+		t.Errorf("by_target = %v, billed_cny = %v, want a target statement of at least ¥7", p.ByTarget, p.BilledCNY)
 	}
 }
 
@@ -562,59 +530,100 @@ func TestStatementDisclosesUnratedRows(t *testing.T) {
 	}
 }
 
-// Claiming exactly the full paid amount is this feature's most obvious use:
-// the dialog shows the paid total rounded to two decimals and the user types
-// that figure straight back. The ceiling is a float sum over the order rows,
-// and 9.9 + 1 + 19.9 lands at 30.799999999999997 — a strict > comparison would
-// refuse the request while quoting the user two identical numbers.
-func TestStatementByTargetAllowsExactlyTheDisplayedPaidTotal(t *testing.T) {
+// openReadyStore opens the SQL index and waits for its first pass, so the test
+// exercises the path production actually runs. Every other statement test here
+// runs the JSONL fallback, which is why none of them could catch the bug below.
+func openReadyStore(t *testing.T, dir string) {
+	t.Helper()
+	st, err := requestlog.OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(st.Close)
+	deadline := time.Now().Add(15 * time.Second)
+	for !st.Ready() {
+		if time.Now().After(deadline) {
+			t.Fatal("index never became ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A busy neighbour must not push a token's own history out of its statement.
+//
+// The scan used to be fleet-wide and capped, so the cap was spent on whoever
+// was loudest most recently. In production that meant a token with 165,047
+// requests had 33,699 of them itemised — the newest six days — and a statement
+// that read as complete while reporting ¥80 of ¥1,648 actually spent. The cap
+// is per-token now, so a neighbour's volume cannot displace anything.
+//
+// statementMaxRows is lowered rather than writing half a million rows: the
+// defect only exists above the cap, so the cap is what the test has to cross.
+func TestStatementIsNotCrowdedOutByABusierToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	dir := t.TempDir()
 	masked := maskToken(testToken)
 	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	now := time.Now().In(loc)
 
-	// Plenty of spend, so only the ceiling check can reject this.
-	writeLog(t, dir, today, []requestlog.Record{{
-		TS: today.Add(-time.Hour), ClientToken: masked,
-		Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
-		CostUSD: 20, BilledUSD: 10, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
-	}})
+	// Ours: 40 older requests, $0.50 each at a stored rate of 7 → ¥140 total.
+	ours := make([]requestlog.Record, 0, 40)
+	for i := range 40 {
+		ours = append(ours, requestlog.Record{
+			TS: now.AddDate(0, 0, -20).Add(time.Duration(i) * time.Minute), ClientToken: masked,
+			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
+			CostUSD: 10, BilledUSD: 0.5, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+		})
+	}
+	writeLog(t, dir, now.AddDate(0, 0, -20), ours)
+
+	// Theirs: 300 newer requests. Under a fleet-wide cap these are the rows
+	// that survive, and ours are the rows that vanish.
+	theirs := make([]requestlog.Record, 0, 300)
+	for i := range 300 {
+		theirs = append(theirs, requestlog.Record{
+			TS: now.AddDate(0, 0, -1).Add(time.Duration(i) * time.Second), ClientToken: "sk-oth…9999",
+			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
+			CostUSD: 10, BilledUSD: 50, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+		})
+	}
+	writeLog(t, dir, now.AddDate(0, 0, -1), theirs)
+
+	openReadyStore(t, dir)
+
+	// Well under the 340 rows in the archive, so a fleet-wide scan would be
+	// truncated long before it reached ours — but comfortably above our 40.
+	orig := statementMaxRows
+	statementMaxRows = 100
+	t.Cleanup(func() { statementMaxRows = orig })
 
 	tokens := clienttoken.OpenInMemory()
-	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "目标测试", Group: "default"}); err != nil {
+	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "报销测试", Group: "default"}); err != nil {
 		t.Fatalf("add token: %v", err)
 	}
-	sdb, err := saasdb.Open(filepath.Join(t.TempDir(), "saas.db"))
-	if err != nil {
-		t.Fatalf("open saas db: %v", err)
-	}
-	t.Cleanup(func() { _ = sdb.Close() })
-	ctx := context.Background()
-	for i, amt := range []float64{9.9, 1, 19.9} {
-		if _, err := sdb.ExecContext(ctx,
-			`INSERT INTO alipay_orders (out_trade_no, token, cny_amount, usd_credit, rate, status, trade_no, qr_code, created_at, paid_at)
-			 VALUES (?, ?, ?, 1, 10, 'paid', '', '', ?, ?)`,
-			fmt.Sprintf("eps%d", i), testToken, amt, today.Unix(), today.Unix()); err != nil {
-			t.Fatalf("seed order: %v", err)
-		}
-	}
-
 	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
-		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens).
-		WithSaaS(sdb, nil)
+		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens)
 	r := gin.New()
 	r.POST("/status/api/statement", h.handleStatementPreview)
 
-	// 30.80 is what the dialog displays; the stored sum is a few ulp below it.
-	w := postJSON(t, r, "/status/api/statement", statementBody{Token: testToken, TargetCNY: 30.80})
+	w := postJSON(t, r, "/status/api/statement", statementBody{
+		Token: testToken, From: dayLabel(-30), To: dayLabel(0),
+	})
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 when claiming the displayed paid total; body = %s",
-			w.Code, w.Body.String())
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-
-	// The tolerance is half a fen, not a licence to exceed the real total.
-	w = postJSON(t, r, "/status/api/statement", statementBody{Token: testToken, TargetCNY: 30.81})
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 for a target a fen above the paid total", w.Code)
+	var p statementPreview
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.Requests != 40 {
+		t.Errorf("requests = %d, want all 40 of ours — a neighbour's 300 newer rows must not displace them", p.Requests)
+	}
+	if p.BilledCNY < 139.99 || p.BilledCNY > 140.01 {
+		t.Errorf("billed_cny = %v, want ¥140 (40 × $0.5 × 7)", p.BilledCNY)
+	}
+	// The neighbour bills $50 a row; any leakage would be impossible to miss.
+	if p.LifetimeBilledCNY < 139.99 || p.LifetimeBilledCNY > 140.01 {
+		t.Errorf("lifetime_billed_cny = %v, want ¥140 — no other token's spend may appear", p.LifetimeBilledCNY)
 	}
 }

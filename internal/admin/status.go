@@ -325,15 +325,27 @@ func (h *Handler) handleStatusDashboard(c *gin.Context) {
 		return
 	}
 
-	// 14-day window. Bounds are day-truncated: reqCacheKey serializes
-	// From/To at second precision, so a wall-clock `to` would make every
-	// call a distinct cache key — i.e. the cache would never hit and each
-	// poll would re-scan 14 days of log files.
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	from14 := today.AddDate(0, 0, -13)
-	to := today.Add(24 * time.Hour)
+	// 14-day window, stated as day labels rather than instants. Two reasons,
+	// and the second is worth more than it looks:
+	//
+	//  - agg_cube is keyed on bday, so a label window is answered by grouping
+	//    ~6.5k pre-summed rows instead of scanning the archive row by row.
+	//    Measured on production: 1.69s → 2ms.
+	//  - the labels are in the display zone, which is the zone ByDay's keys
+	//    are already bucketed in. The old bounds were UTC-truncated while the
+	//    buckets they selected were Shanghai days, so the two edges of the
+	//    window disagreed with the series it returned by the zone offset.
+	//
+	// Day granularity also keeps the cache key stable, which is what the
+	// previous truncation was for — reqCacheKey serializes From/To at second
+	// precision, so a wall-clock bound would miss the cache on every poll.
+	loc := requestlog.BucketLocation()
+	todayLoc := time.Now().In(loc)
 	if res, err := h.cachedQueryShared(requestlog.Filter{
-		Dir: h.cfg.LogDir, From: from14, To: to, Limit: 1,
+		Dir:     h.cfg.LogDir,
+		FromDay: todayLoc.AddDate(0, 0, -13).Format("2006-01-02"),
+		ToDay:   todayLoc.Format("2006-01-02"),
+		Limit:   1,
 	}, statusCacheTTL); err == nil {
 		out.Requests14d = statusDashboardRequests{
 			Summary:  res.Summary,
@@ -640,18 +652,28 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 		results = append(results, r)
 	}
 
-	// Log scan: walk the full archive once and bucket per token. The same
-	// entries feed the Recent ledger (newest-first, first page of
-	// statusRecentLimit), the 24h aggregate, the per-day cost/request
-	// series for the last N days, and a recent_total count so the paging
-	// UI knows how many total entries exist.
+	// One pair of narrow queries per token, rather than one scan of everybody
+	// and a bucketing loop.
+	//
+	// This handler used to pull a fleet-wide slab of 200k rows and sort them
+	// into per-token buckets in Go. On production that measured a p95 of 44.6s
+	// — of which only ~5s was SQL. The rest was deserialising 200k Records
+	// into the heap and collecting them again, which is why the process sat at
+	// 816MB and why no amount of indexing would have helped: the fix is not to
+	// read the rows at all. The cap also meant the buckets only ever saw the
+	// most recent ~6 days of a busy relay, so per-token totals were wrong on
+	// top of being expensive.
+	//
+	// Per token the panel needs four things, and two queries cover them:
+	//
+	//   1. day-label window → Summary.Count (recent_total), ByDay (the daily
+	//      series) and the newest statusRecentLimit rows, all at once. Day
+	//      labels put the aggregates on agg_cube (measured 4.75s → 6ms) while
+	//      Entries ride idx_req_ct.
+	//   2. rolling 24h → its own query, because a 24h window is not day
+	//      aligned and therefore cannot come off the cube. It still narrows to
+	//      one token on the index, so it reads one day of one account.
 	if h.cfg.LogDir != "" && len(maskedIdx) > 0 {
-		type bucket struct {
-			agg         requestlog.Aggregate
-			recent      []statusRecentEntry
-			recentTotal int
-			daily       map[string]*statusDailyEntry
-		}
 		seedDays := make([]string, 0, statusDailyWindowDays)
 		// Day labels follow the configured display zone so this rollup lines
 		// up with the admin overview's ByDay buckets (default UTC).
@@ -660,101 +682,93 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 			d := today.AddDate(0, 0, -i)
 			seedDays = append(seedDays, d.Format("2006-01-02"))
 		}
-		buckets := make(map[string]*bucket, len(maskedIdx))
-		for k := range maskedIdx {
-			b := &bucket{daily: make(map[string]*statusDailyEntry, statusDailyWindowDays)}
-			for _, day := range seedDays {
-				b.daily[day] = &statusDailyEntry{Date: day}
-			}
-			buckets[k] = b
-		}
-		cutoff24h := time.Now().Add(-24 * time.Hour)
+		// Truncated to the minute because reqCacheKey serializes From at second
+		// precision: a wall-clock bound would mint a new key on every call and
+		// the 24h query would never hit the cache.
+		cutoff24h := time.Now().Add(-24 * time.Hour).Truncate(time.Minute)
 		// Display-time remap: the log stores a snapshot of the auth label at
 		// request time. When an auth is renamed, callers expect the UI to show
 		// the current label (the audit trail is keyed by AuthID). Resolve once
 		// per call and rewrite on emit; stale entries whose AuthID has been
 		// deleted fall back to the snapshot value.
 		labelIdx := h.pool.LabelIndex()
-		// Bound the scan to the retention window (files older than that are
-		// pruned anyway; the bound is defensive against prune failures and
-		// short retention configs). From is day-truncated so the cache key
-		// stays stable across calls. Limit is a safety cap; real deployments
-		// won't hit it. The shared result is read-only — we only copy fields
-		// out of it below.
+		// Bound the window to the retention period (older files are pruned
+		// anyway; the bound is defensive against prune failures and short
+		// retention configs).
 		retention := h.cfg.LogRetentionDays
 		if retention <= 0 {
 			retention = 90
 		}
-		res, err := h.cachedQueryShared(requestlog.Filter{
-			Dir:   h.cfg.LogDir,
-			From:  time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -(retention - 1)),
-			Limit: 200000,
-		}, statusCacheTTL)
-		if err == nil {
-			for _, rec := range res.Entries {
-				b, ok := buckets[rec.ClientToken]
-				if !ok {
-					continue
-				}
-				b.recentTotal++
-				if !rec.TS.Before(cutoff24h) {
-					b.agg.Count++
-					b.agg.InputTokens += rec.Input
-					b.agg.OutputTokens += rec.Output
-					b.agg.CacheReadTokens += rec.CacheRead
-					b.agg.CacheCreateTokens += rec.CacheCreate
-					b.agg.CostUSD += rec.CostUSD
-					b.agg.TotalDurationMs += rec.DurationMs
-					if rec.Status >= 400 || rec.Error != "" {
-						b.agg.Errors++
+		fromDay := today.AddDate(0, 0, -(retention - 1)).Format("2006-01-02")
+		toDay := today.Format("2006-01-02")
+
+		for masked, i := range maskedIdx {
+			// One query answers three of the four fields: the day-label window
+			// puts Summary and ByDay on agg_cube, and Entries come off
+			// idx_req_ct already ordered newest-first, so LIMIT is the page.
+			if res, err := h.cachedQueryShared(requestlog.Filter{
+				Dir:         h.cfg.LogDir,
+				ClientToken: masked,
+				FromDay:     fromDay,
+				ToDay:       toDay,
+				Limit:       statusRecentLimit,
+			}, statusCacheTTL); err == nil {
+				results[i].RecentTotal = int(res.Summary.Count)
+
+				daily := make([]statusDailyEntry, 0, len(seedDays))
+				for _, day := range seedDays {
+					e := statusDailyEntry{Date: day}
+					// ByDay is keyed on bday — the display-zone label seedDays
+					// is built from — so the two line up without re-bucketing.
+					if a, ok := res.ByDay[day]; ok {
+						e.CostUSD, e.Requests = a.CostUSD, a.Count
 					}
+					daily = append(daily, e)
 				}
-				dayKey := rec.TS.In(requestlog.BucketLocation()).Format("2006-01-02")
-				if d, ok := b.daily[dayKey]; ok {
-					d.CostUSD += rec.CostUSD
-					d.Requests++
-				}
-				if len(b.recent) < statusRecentLimit {
-					label, kind := rec.AuthLabel, rec.AuthKind
-					if cur, ok := labelIdx[rec.AuthID]; ok {
-						label = cur.Label
-						kind = authKindString(cur.Kind)
+				results[i].Daily = daily
+
+				if len(res.Entries) > 0 {
+					recent := make([]statusRecentEntry, 0, len(res.Entries))
+					for _, rec := range res.Entries {
+						label, kind := rec.AuthLabel, rec.AuthKind
+						if cur, ok := labelIdx[rec.AuthID]; ok {
+							label, kind = cur.Label, authKindString(cur.Kind)
+						}
+						recent = append(recent, statusRecentEntry{
+							TS:         rec.TS,
+							Provider:   rec.Provider,
+							Model:      rec.Model,
+							Input:      rec.Input,
+							Output:     rec.Output,
+							CacheRead:  rec.CacheRead,
+							CacheWrite: rec.CacheCreate,
+							CostUSD:    rec.CostUSD,
+							BilledUSD:  rec.BilledUSD,
+							Multiplier: rec.Multiplier,
+							Status:     rec.Status,
+							DurationMs: rec.DurationMs,
+							Stream:     rec.Stream,
+							AuthLabel:  label,
+							AuthKind:   kind,
+						})
 					}
-					b.recent = append(b.recent, statusRecentEntry{
-						TS:         rec.TS,
-						Provider:   rec.Provider,
-						Model:      rec.Model,
-						Input:      rec.Input,
-						Output:     rec.Output,
-						CacheRead:  rec.CacheRead,
-						CacheWrite: rec.CacheCreate,
-						CostUSD:    rec.CostUSD,
-						BilledUSD:  rec.BilledUSD,
-						Multiplier: rec.Multiplier,
-						Status:     rec.Status,
-						DurationMs: rec.DurationMs,
-						Stream:     rec.Stream,
-						AuthLabel:  label,
-						AuthKind:   kind,
-					})
+					results[i].Recent = recent
 				}
 			}
-		}
-		for m, b := range buckets {
-			i := maskedIdx[m]
-			if b.agg.Count > 0 {
-				a := b.agg
+
+			// The rolling 24h window is not day aligned, so it is the one
+			// figure the cube cannot answer. It still narrows to a single
+			// token on the index, reading one account's last day instead of
+			// the whole fleet's retention period.
+			if res, err := h.cachedQueryShared(requestlog.Filter{
+				Dir:         h.cfg.LogDir,
+				ClientToken: masked,
+				From:        cutoff24h,
+				Limit:       1,
+			}, statusCacheTTL); err == nil && res.Summary.Count > 0 {
+				a := res.Summary
 				results[i].Window24h = &a
 			}
-			if len(b.recent) > 0 {
-				results[i].Recent = b.recent
-			}
-			results[i].RecentTotal = b.recentTotal
-			daily := make([]statusDailyEntry, 0, len(seedDays))
-			for _, day := range seedDays {
-				daily = append(daily, *b.daily[day])
-			}
-			results[i].Daily = daily
 		}
 	}
 
@@ -818,28 +832,49 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 		offset = 0
 	}
 
-	f := requestlog.Filter{Dir: h.cfg.LogDir, Limit: 100000}
-	applyDateBounds(&f, body.From, body.To)
-	// Shared read-only cache: the lookup pager re-issues the same filter
-	// for every page flip; without caching each flip re-scans the archive.
-	// User-supplied bounds are day-granular (parseDateBound), so keys stay
-	// stable across calls.
-	res, err := h.cachedQueryShared(f, statusCacheTTL)
+	// The token goes into the filter, not into a loop over somebody else's
+	// rows: req carries idx_req_ct(client_token, ts DESC, id DESC) WHERE
+	// attempt_only = 0, whose order is exactly this endpoint's, so one page
+	// is an index seek rather than a scan.
+	//
+	// This used to pull a fleet-wide Limit: 100000 slab and drop every row
+	// belonging to anyone else, on the assumption that "real deployments stay
+	// well under it". A relay doing ~33k requests a day reaches 100k in three
+	// days, so the cap silently became a three-day horizon for every token,
+	// and the page cost 2.9s to build out of rows it then threw away.
+	base := requestlog.Filter{Dir: h.cfg.LogDir, ClientToken: masked}
+	applyDateBounds(&base, body.From, body.To)
+
+	// Two queries, because one cannot answer both: PageOnly skips the
+	// aggregate pass (that is the point of it), and the pager needs a total.
+	// The counting one asks for a single row and reads only Summary.Count,
+	// so it rides the cube whenever the bounds are day labels.
+	pageF := base
+	pageF.Limit, pageF.Offset, pageF.PageOnly = limit, offset, true
+
+	countF := base
+	countF.Limit = 1
+
+	// Shared read-only cache: the pager re-issues these filters on every page
+	// flip. Keys carry ClientToken/Limit/Offset/PageOnly already, so the two
+	// shapes never collide and one token's page can never be served to another.
+	res, err := h.cachedQueryShared(pageF, statusCacheTTL)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	// Query already sorts res.Entries newest-first. Filter by masked token,
-	// then paginate. Res.Entries may be truncated to f.Limit (100k) — which
-	// is a guard for absurd archives; real deployments stay well under it.
+	total := len(res.Entries) + offset // fallback if the count query fails
+	if cnt, cerr := h.cachedQueryShared(countF, statusCacheTTL); cerr == nil {
+		total = int(cnt.Summary.Count)
+	} else {
+		log.Warnf("status history: count query failed for %s: %v", masked, cerr)
+	}
+
 	// Auth label/kind are remapped from current pool state so renames show
 	// up in the ledger; snapshots survive as fallback for deleted auths.
 	labelIdx := h.pool.LabelIndex()
-	all := make([]statusRecentEntry, 0, 128)
+	all := make([]statusRecentEntry, 0, len(res.Entries))
 	for _, rec := range res.Entries {
-		if rec.ClientToken != masked {
-			continue
-		}
 		label, kind := rec.AuthLabel, rec.AuthKind
 		if cur, ok := labelIdx[rec.AuthID]; ok {
 			label = cur.Label
@@ -863,15 +898,7 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 			AuthKind:   kind,
 		})
 	}
-	total := len(all)
-	if offset >= total {
-		all = nil
-	} else {
-		all = all[offset:]
-	}
-	if len(all) > limit {
-		all = all[:limit]
-	}
+	// No slicing: SQL already applied LIMIT/OFFSET, so `all` is the page.
 	c.JSON(http.StatusOK, statusHistoryResp{
 		Entries: all,
 		Total:   total,

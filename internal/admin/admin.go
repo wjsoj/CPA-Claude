@@ -124,7 +124,13 @@ type byAuthCacheEntry struct {
 
 const lifetimeCacheTTL = 15 * time.Second
 const requestsCacheTTL = 15 * time.Second
-const requestsCacheMax = 16
+// requestsCacheMax bounds the shared query cache. It was 16 back when the
+// cache held a handful of fleet-wide filters; entries are now keyed per client
+// token, so the live set scales with how many people are looking at their own
+// ledger at once and 16 would thrash on a deployment with more users than that.
+// Entries are page-sized rather than full-archive slabs now, so a larger table
+// is also far cheaper than the old one.
+const requestsCacheMax = 256
 
 // statusCacheTTL is the freshness bound for the anonymous /status
 // endpoints. Deliberately longer than the admin panel's 15s: the page is
@@ -1642,11 +1648,27 @@ func (h *Handler) cachedQueryShared(f requestlog.Filter, ttl time.Duration) (*re
 		}
 
 		h.reqCacheMu.Lock()
-		if h.reqCache == nil || len(h.reqCache) >= requestsCacheMax {
-			// Coarse eviction: when the cache grows unbounded (e.g., varied
-			// user filters from the Requests tab), drop everything. The hot
-			// Overview polls refill the two common keys within 10s.
-			h.reqCache = make(map[string]reqCacheEntry, 4)
+		if h.reqCache == nil {
+			h.reqCache = make(map[string]reqCacheEntry, 8)
+		}
+		if len(h.reqCache) >= requestsCacheMax {
+			// Drop what has already expired before resorting to dropping
+			// everything. Keys are per-token now, so an active deployment
+			// legitimately holds one entry per token looking at its own
+			// ledger; clearing the whole table on arrival of the Nth token
+			// evicted the other N-1 mid-poll and put every one of them back
+			// on a cold query. Sweeping expired entries first keeps the
+			// working set and only falls back to the blunt reset when the
+			// live set genuinely exceeds the cap.
+			now := time.Now()
+			for k, v := range h.reqCache {
+				if now.Sub(v.at) > ttl {
+					delete(h.reqCache, k)
+				}
+			}
+			if len(h.reqCache) >= requestsCacheMax {
+				h.reqCache = make(map[string]reqCacheEntry, 8)
+			}
 		}
 		h.reqCache[key] = reqCacheEntry{at: time.Now(), result: res}
 		h.reqCacheMu.Unlock()

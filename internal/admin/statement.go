@@ -200,38 +200,28 @@ func (h *Handler) buildStatement(c *gin.Context, withLines bool) (*statement.Sta
 
 	loc := requestlog.BucketLocation()
 
-	// A target amount requires a real ceiling to check against — the token's
-	// own Alipay-paid total — which requires SaaS billing. Checked before
-	// anything else in target mode so a deployment with billing off gets a
-	// clear reason rather than an "unreachable" error that blames the log.
+	// A target amount is bounded by what the account actually spent, and by
+	// nothing else.
+	//
+	// It used to also be capped at the token's Alipay-paid total, on the theory
+	// that nobody should be able to name a figure larger than money that
+	// changed hands. That guard turned out to be both redundant and wrong.
+	// Redundant because every line on the document is a charge that really
+	// happened: statementRangeForTarget refuses outright when the retained log
+	// cannot reach the target, so the spend itself is already a hard ceiling
+	// and no amount of asking can conjure a row. Wrong because a wallet funded
+	// by operator credit rather than by Alipay reported a ceiling of zero, so
+	// an account that had genuinely spent ¥1,543 could not export a ¥1,500
+	// statement of its own real consumption.
+	//
+	// The document is a consumption record, not a receipt — its own footnote
+	// says so and points at the invoice flow for the other thing. What it
+	// asserts is "these requests happened and cost this much", which is true
+	// however the balance behind them was funded.
 	var totalPaidCNY float64
-	if byTarget {
-		if h.wallets == nil {
-			c.AbortWithStatusJSON(http.StatusBadRequest,
-				gin.H{"error": "该部署未启用钱包计费，无法按目标金额生成对账单"})
-			return nil, false
-		}
-		var err error
-		totalPaidCNY, err = h.wallets.TotalPaidCNY(c.Request.Context(), tok)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return nil, false
-		}
-		// Compared with a half-fen tolerance rather than exactly. The ceiling is
-		// a float sum over the order rows, and claiming the full paid amount is
-		// this feature's most obvious use — the dialog shows the total rounded to
-		// two decimals and the user types that back. A sum that lands a few ulp
-		// low (9.9+1+19.9 = 30.799999999999997, displayed ¥30.80) would then
-		// refuse the request while quoting two identical figures at them.
-		if body.TargetCNY > totalPaidCNY+targetCeilingEpsilonCNY {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
-				"目标金额 ¥%.2f 超过该账户实付充值总额 ¥%.2f，无法生成", body.TargetCNY, totalPaidCNY)})
-			return nil, false
-		}
-	} else if h.wallets != nil {
-		// Not required for a date-range statement, but cheap and lets the
-		// export dialog show the ceiling before the user ever switches into
-		// target mode. Failure here is not fatal to the statement itself.
+	if h.wallets != nil {
+		// Still surfaced to the dialog as context, just no longer a gate.
+		// Failure is not fatal to the statement itself.
 		if v, err := h.wallets.TotalPaidCNY(c.Request.Context(), tok); err == nil {
 			totalPaidCNY = v
 		}
@@ -252,16 +242,45 @@ func (h *Handler) buildStatement(c *gin.Context, withLines bool) (*statement.Sta
 	if retention <= 0 {
 		retention = 90
 	}
-	// One scan serves both windows. The filter is deliberately identical to
-	// the one handleStatusQuery issues, so the statement rides that endpoint's
-	// warm cache instead of forcing its own pass over the archive.
+	// One scan serves both windows: the range being exported, and the running
+	// total across the whole retained log.
+	//
+	// The token is part of the filter. This used to issue a filter deliberately
+	// identical to handleStatusQuery's — fleet-wide, capped at 200k rows — so
+	// the two could share a cache entry, and then drop every row belonging to
+	// somebody else. On a relay doing ~33k requests a day that cap reaches back
+	// six days, so a token with 165k requests over three weeks had 20% of its
+	// spend itemised and the rest silently invisible: a statement that read as
+	// complete while understating what the account actually spent. Sharing a
+	// scan with another endpoint is not worth a wrong number on a document
+	// someone files for reimbursement.
+	//
+	// FromDay rather than From: a day label is what agg_cube is keyed on, so
+	// Summary comes off the pre-aggregated cube while Entries come off
+	// idx_req_ct(client_token, ts DESC, id DESC). A From timestamp would look
+	// equivalent and quietly force both onto a row-by-row scan — and if both
+	// are supplied the timestamp wins and the label is discarded.
+	fromDayRetention := time.Now().In(loc).AddDate(0, 0, -(retention - 1)).Format("2006-01-02")
 	res, err := h.cachedQueryShared(requestlog.Filter{
-		Dir:   h.cfg.LogDir,
-		From:  time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -(retention - 1)),
-		Limit: 200000,
+		Dir:         h.cfg.LogDir,
+		ClientToken: masked,
+		FromDay:     fromDayRetention,
+		Limit:       statementMaxRows,
 	}, statusCacheTTL)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return nil, false
+	}
+	// Summary.Count is the true number of matching rows; Entries is what the
+	// cap let through. A statement built from a truncated scan would understate
+	// spend exactly the way the fleet-wide cap used to, so say so rather than
+	// quietly totalling a subset.
+	if res.Summary.Count > int64(len(res.Entries)) {
+		log.Warnf("statement: %s has %d rows in the retained window but the scan capped at %d — statement refused",
+			masked, res.Summary.Count, len(res.Entries))
+		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": fmt.Sprintf(
+			"该令牌在留存窗口内有 %d 条记录，超过单次对账单的处理上限 %d 条，请缩短日期区间后重试",
+			res.Summary.Count, statementMaxRows)})
 		return nil, false
 	}
 
@@ -425,7 +444,15 @@ func (h *Handler) reconcileAgainstLedger(
 	// Only a shortfall is meaningful. The log accounting for more than the
 	// ledger means something else (an unbilled attempt row, a refund) and is
 	// not evidence of a missing charge, so it is never shown as one.
-	if gap := chargedUSD - rangeUSD; gap > ledgerGapEpsilonUSD {
+	//
+	// The gap also has to survive being written down: the threshold is in USD,
+	// but the figure is printed in yuan to two decimals, so a gap of a few
+	// hundredths of a cent cleared the USD floor and then rendered as a line
+	// reading "未能明细化的消费 ¥0.00" — an entry asserting that nothing is
+	// missing, which is worse than no entry at all. Half a fen is where a
+	// discrepancy becomes something a reader can actually see.
+	gap := chargedUSD - rangeUSD
+	if gap > ledgerGapEpsilonUSD && gap*rate >= unitemisedFloorCNY {
 		s.UnitemisedCNY = gap * rate
 	} else {
 		// Within noise: present the ledger total as exactly the itemised one so
@@ -439,11 +466,22 @@ func (h *Handler) reconcileAgainstLedger(
 // under a hundredth of a cent is rounding, not a missing request.
 const ledgerGapEpsilonUSD = 1e-4
 
-// targetCeilingEpsilonCNY is the tolerance on the target-vs-paid-total check:
-// half a fen, the smallest amount anyone can actually pay. Wide enough to
-// absorb float error in the summed order rows, far too narrow to let a target
-// exceed the money that changed hands by anything expressible in currency.
-const targetCeilingEpsilonCNY = 0.005
+// unitemisedFloorCNY is the smallest gap worth printing: half a fen, the point
+// at which it stops rounding to ¥0.00 on the document.
+const unitemisedFloorCNY = 0.005
+
+// statementMaxRows bounds one statement's scan. Every row is materialised to
+// convert it at its own stored rate — agg_cube carries no cny_rate, so the
+// money cannot come off the cube — and Record is a wide struct, so this is
+// the real memory ceiling of an export: roughly 300 bytes a row, ~150MB here.
+//
+// It is a per-token bound, not the fleet-wide one it replaced, so it stands
+// for a genuinely enormous single account rather than six days of everybody.
+// Crossing it refuses the export instead of truncating it.
+// A var, not a const, so a test can lower it: the failure it guards against
+// only appears once the cap is crossed, and a test that had to write half a
+// million rows to reach it would never be written.
+var statementMaxRows = 500000
 
 // statementDefaultDays is the range the dialog opens on when the caller sends
 // none — long enough to cover a typical monthly reimbursement cycle.
