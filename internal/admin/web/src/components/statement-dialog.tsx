@@ -349,7 +349,7 @@ export function StatementDialog({
                 {preview.truncated && (
                   <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-[color:var(--warning)]">
                     <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
-                    区间内共 {fmtInt(preview.requests)} 笔请求，明细部分只列示前{" "}
+                    区间内共 {fmtInt(preview.requests)} 笔请求，明细部分只列示最近{" "}
                     {fmtInt(preview.detail_lines)} 笔；合计金额仍覆盖全部请求。
                   </p>
                 )}

@@ -400,12 +400,16 @@ func (r *renderer) modelTable() {
 }
 
 // detailTitle names the itemised section, disclosing on its face when the rows
-// below are only a prefix of the range.
+// below are only part of the range.
+//
+// "最近" rather than "前": truncation keeps the newest rows, so the itemised
+// block starts partway into the range. Saying "前" would have the reader look
+// for the range's opening day among rows that deliberately do not include it.
 func (r *renderer) detailTitle() string {
 	if !r.s.LinesTruncated {
 		return "请求明细"
 	}
-	return fmt.Sprintf("请求明细（列示前 %s 笔，区间共 %s 笔）",
+	return fmt.Sprintf("请求明细（列示最近 %s 笔，区间共 %s 笔）",
 		fmtInt(int64(len(r.s.Lines))), fmtInt(r.s.Requests))
 }
 
