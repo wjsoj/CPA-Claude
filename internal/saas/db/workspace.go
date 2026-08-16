@@ -433,10 +433,19 @@ func (db *DB) MemberPoolAvail(ctx context.Context, token string) float64 {
 	if disabled != 0 || wsBal <= 0 {
 		return 0
 	}
+	// Only sum what a cap will actually be measured against. Zero means "no
+	// cap" (see the schema comment on the columns), and these aggregates were
+	// running unconditionally for members who have neither — two scans of the
+	// member's month-to-date charges per request, thrown away immediately
+	// afterwards.
 	now := time.Now()
 	var usedDay, usedMonth float64
-	_ = db.QueryRowContext(ctx, `SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`, token, dayStartUnix(now)).Scan(&usedDay)
-	_ = db.QueryRowContext(ctx, `SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`, token, monthStartUnix(now)).Scan(&usedMonth)
+	if dailyCap > 0 {
+		_ = db.QueryRowContext(ctx, `SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`, token, dayStartUnix(now)).Scan(&usedDay)
+	}
+	if monthlyCap > 0 {
+		_ = db.QueryRowContext(ctx, `SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`, token, monthStartUnix(now)).Scan(&usedMonth)
+	}
 	avail := wsBal
 	if dailyCap > 0 {
 		if left := dailyCap - usedDay; left < avail {
@@ -515,9 +524,19 @@ func (db *DB) ChargeMemberFirst(ctx context.Context, token string, cost float64,
 			return 0, 0, wErr
 		}
 		if wErr == nil && disabled == 0 && wsBal > 0 {
+			// Skipped when the corresponding cap is unset. This runs inside
+			// BEGIN IMMEDIATE, which is a whole-database write lock, and the
+			// month-to-date sum grows with every charge the member makes — so
+			// for an uncapped member these were lengthening the lock that
+			// serialises every write in the deployment, to compute two numbers
+			// nothing then read.
 			var usedDay, usedMonth float64
-			_ = conn.QueryRowContext(ctx, `SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`, token, dayStartUnix(now)).Scan(&usedDay)
-			_ = conn.QueryRowContext(ctx, `SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`, token, monthStartUnix(now)).Scan(&usedMonth)
+			if dailyCap > 0 {
+				_ = conn.QueryRowContext(ctx, `SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`, token, dayStartUnix(now)).Scan(&usedDay)
+			}
+			if monthlyCap > 0 {
+				_ = conn.QueryRowContext(ctx, `SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`, token, monthStartUnix(now)).Scan(&usedMonth)
+			}
 			avail := wsBal
 			if dailyCap > 0 {
 				if left := dailyCap - usedDay; left < avail {

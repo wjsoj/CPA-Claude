@@ -22,7 +22,11 @@ interface AdminOrdersResp {
   orders: AdminPaidOrder[];
   total_cny: number;
   total_usd: number;
+  /** Rows in this page — capped by the limit, so not a lifetime figure. */
   count: number;
+  /** Every paid order there is, aggregated server-side rather than counted
+   *  off the page. Use this wherever the label says "paid orders". */
+  paid_count: number;
 }
 
 const fmtCNY = (n: number): string =>
@@ -64,7 +68,7 @@ export function PaymentsPanel({ refreshTick }: { refreshTick: number }) {
           <h2 className="font-display text-3xl md:text-4xl tracking-tight">
             Top-up ledger{" "}
             <span className="text-muted-foreground">
-              · {data ? `${data.count} paid order${data.count === 1 ? "" : "s"}` : "···"}
+              · {data ? `${data.paid_count} paid order${data.paid_count === 1 ? "" : "s"}` : "···"}
             </span>
           </h2>
           <p className="mt-2 text-sm text-muted-foreground max-w-2xl">
@@ -104,8 +108,10 @@ export function PaymentsPanel({ refreshTick }: { refreshTick: number }) {
           <div className="metric-cell">
             <div className="relative z-10">
               <div className="eyebrow mb-2.5">Order count</div>
+              {/* paid_count, not count: this cell sits beside two lifetime
+                  money totals, and count is only the rows on this page. */}
               <div className="font-mono text-2xl md:text-[2rem] leading-none font-medium tracking-tight tabular">
-                {data?.count ?? "···"}
+                {data?.paid_count ?? "···"}
               </div>
             </div>
             <span aria-hidden className="metric-cell-corner" />

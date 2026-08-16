@@ -28,10 +28,12 @@ import {
 // or a target amount — the server walks backward from the newest request
 // until spend reaches the figure entered and reports whatever window that
 // turned out to be. The target mode is not "make the total say whatever I
-// need": the server caps it at the account's real Alipay-paid total
-// (`total_paid_cny`) and refuses outright if even the whole retained log
-// can't reach it, and the resulting document is captioned as target-derived
-// rather than presented as an ordinary date-range export.
+// need": every line is a charge that really happened, the server refuses
+// outright if the whole retained log can't reach the figure, and the
+// resulting document is captioned as target-derived rather than presented
+// as an ordinary date-range export. Real spend is the only ceiling — an
+// account funded by operator credit rather than by Alipay is still exporting
+// its own consumption.
 
 function todayLocal(): string {
   const d = new Date();
@@ -281,11 +283,11 @@ export function StatementDialog({
               </div>
               <p className="text-[11px] leading-relaxed opacity-60">
                 系统会从最近的请求向前回溯，直到列示金额达到该数值为止，并在对账单上如实标注这不是常规日期区间。
-                {typeof preview?.total_paid_cny === "number" && (
+                {typeof preview?.lifetime_billed_cny === "number" && (
                   <>
                     {" "}
-                    该账户累计实付充值{" "}
-                    <span className="mono">{fmtCNY(preview.total_paid_cny)}</span>
+                    该账户近 {preview.lifetime_days ?? 90} 天累计消费{" "}
+                    <span className="mono">{fmtCNY(preview.lifetime_billed_cny)}</span>
                     ，目标金额不能超过这个数。
                   </>
                 )}

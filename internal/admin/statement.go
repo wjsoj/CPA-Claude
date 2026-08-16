@@ -34,10 +34,16 @@ import (
 // renders whatever window that turned out to be — see the ByTarget doc on
 // statement.Statement for how that stays honest rather than becoming "a total
 // dialled to whatever a claimant needs": the derived range is captioned on
-// the document rather than hidden, and the target is capped at the account's
-// real Alipay-paid total (TotalPaidCNY below) so nobody can manufacture a
-// bigger figure than they ever paid for. If even the whole retained log
-// doesn't reach the target, the request is refused rather than served short.
+// the document rather than hidden, and every line on it is a charge that
+// really happened. Real spend is the only ceiling; if the whole retained log
+// cannot reach the target, the request is refused rather than served short.
+//
+// It is deliberately NOT capped at what the account paid via Alipay. That
+// cap existed briefly and was removed: a wallet funded by operator credit
+// reports an Alipay total of zero, so an account that had genuinely spent
+// ¥1,543 could not export a statement of its own consumption. The document
+// records what was consumed, which is true however the balance was funded,
+// and says so in its own footer — the invoice flow is the other thing.
 
 type statementBody struct {
 	Token string `json:"token"`
@@ -242,9 +248,8 @@ func (h *Handler) buildStatement(c *gin.Context, withLines bool) (*statement.Sta
 	if retention <= 0 {
 		retention = 90
 	}
-	// One scan serves both windows: the range being exported, and the running
-	// total across the whole retained log.
-	//
+	var lifetimeRequests int64
+	var lifetimeUSD float64
 	// The token is part of the filter. This used to issue a filter deliberately
 	// identical to handleStatusQuery's — fleet-wide, capped at 200k rows — so
 	// the two could share a cache entry, and then drop every row belonging to
@@ -255,32 +260,65 @@ func (h *Handler) buildStatement(c *gin.Context, withLines bool) (*statement.Sta
 	// scan with another endpoint is not worth a wrong number on a document
 	// someone files for reimbursement.
 	//
-	// FromDay rather than From: a day label is what agg_cube is keyed on, so
-	// Summary comes off the pre-aggregated cube while Entries come off
-	// idx_req_ct(client_token, ts DESC, id DESC). A From timestamp would look
+	// Day labels rather than From/To instants: a label is what agg_cube is
+	// keyed on, so Summary comes off the pre-aggregated cube while Entries come
+	// off idx_req_ct(client_token, ts DESC, id DESC). A timestamp would look
 	// equivalent and quietly force both onto a row-by-row scan — and if both
 	// are supplied the timestamp wins and the label is discarded.
 	fromDayRetention := time.Now().In(loc).AddDate(0, 0, -(retention - 1)).Format("2006-01-02")
-	res, err := h.cachedQueryShared(requestlog.Filter{
+
+	// The running total is an aggregate, so it is read as one: a cube-only
+	// query materialises no rows at all, whatever the account's volume.
+	if lt, lerr := h.cachedQueryShared(requestlog.Filter{
 		Dir:         h.cfg.LogDir,
 		ClientToken: masked,
 		FromDay:     fromDayRetention,
+		Limit:       1,
+	}, statusCacheTTL); lerr == nil {
+		lifetimeRequests = lt.Summary.Count
+		lifetimeUSD = lt.Summary.BilledUSD
+	} else {
+		log.Warnf("statement: lifetime rollup failed for %s: %v", masked, lerr)
+	}
+
+	// Only the window being exported is read row by row. A date-range export
+	// reads that range; only a target-amount export has to walk the whole
+	// retained log, because where it stops is what it is trying to find out.
+	//
+	// Scanning the full window regardless is what made the row cap a wall:
+	// the cap was reported with the advice "shorten the date range", and
+	// shortening it changed neither the filter nor even the cache key, so an
+	// account big enough to trip the cap could never export anything at all.
+	scanFrom, scanTo := fromDay, toDay
+	if byTarget {
+		scanFrom, scanTo = fromDayRetention, ""
+	}
+	res, err := h.cachedQueryShared(requestlog.Filter{
+		Dir:         h.cfg.LogDir,
+		ClientToken: masked,
+		FromDay:     scanFrom,
+		ToDay:       scanTo,
 		Limit:       statementMaxRows,
-	}, statusCacheTTL)
+	}, statementScanCacheTTL)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return nil, false
 	}
 	// Summary.Count is the true number of matching rows; Entries is what the
 	// cap let through. A statement built from a truncated scan would understate
-	// spend exactly the way the fleet-wide cap used to, so say so rather than
-	// quietly totalling a subset.
+	// spend exactly the way the fleet-wide cap used to, so refuse rather than
+	// quietly total a subset — and say something the reader can act on, which
+	// differs by mode because only one of the two modes has a range to narrow.
 	if res.Summary.Count > int64(len(res.Entries)) {
-		log.Warnf("statement: %s has %d rows in the retained window but the scan capped at %d — statement refused",
-			masked, res.Summary.Count, len(res.Entries))
-		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": fmt.Sprintf(
-			"该令牌在留存窗口内有 %d 条记录，超过单次对账单的处理上限 %d 条，请缩短日期区间后重试",
-			res.Summary.Count, statementMaxRows)})
+		log.Warnf("statement: %s matched %d rows over %s..%s but the scan capped at %d — refused",
+			masked, res.Summary.Count, scanFrom, scanTo, statementMaxRows)
+		msg := fmt.Sprintf("该区间内有 %d 条记录，超过单次对账单的处理上限 %d 条，请缩短日期区间后重试",
+			res.Summary.Count, statementMaxRows)
+		if byTarget {
+			msg = fmt.Sprintf("该令牌在留存窗口内有 %d 条记录，超过按目标金额生成的处理上限 %d 条，请改用日期区间导出",
+				res.Summary.Count, statementMaxRows)
+		}
+		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": msg})
 		return nil, false
 	}
 
@@ -345,9 +383,6 @@ func (h *Handler) buildStatement(c *gin.Context, withLines bool) (*statement.Sta
 	var rangeUSD float64
 	for i := len(res.Entries) - 1; i >= 0; i-- {
 		rec := res.Entries[i]
-		if rec.ClientToken != masked {
-			continue
-		}
 		// Each row converts at the rate it settled at. BilledCNY reports
 		// ok=false for rows predating that column rather than converting at
 		// zero, and those fall back to the current rate — tracked separately
@@ -359,9 +394,6 @@ func (h *Handler) buildStatement(c *gin.Context, withLines bool) (*statement.Sta
 			// 90-day retention means both conventions coexist in one directory.
 			cny = rec.BilledOrCost() * fallbackRate
 		}
-
-		s.LifetimeRequests++
-		s.LifetimeBilledCNY += cny
 
 		if rec.TS.Before(start) || !rec.TS.Before(end) {
 			continue
@@ -383,6 +415,24 @@ func (h *Handler) buildStatement(c *gin.Context, withLines bool) (*statement.Sta
 	s.Lines = lines
 	s.LinesTruncated = withLines && s.Requests > int64(len(lines))
 	s.Rollup()
+
+	// The running total is context, not a claim: it says roughly what the token
+	// has spent over the retained window, beside the range the document is
+	// actually about. It comes off the cube, which stores no rate, so the yuan
+	// figure is converted rather than summed per row — at the rate the scanned
+	// range itself worked out to when there is one, since that is the closest
+	// observed rate to these rows, and at the current rate otherwise.
+	//
+	// Exact whenever a single rate applies, which is every deployment that has
+	// not yet accumulated rows from both sides of a rate change. The range
+	// total above is always summed per row; only this one is derived.
+	s.LifetimeRequests = lifetimeRequests
+	lifetimeRate := fallbackRate
+	if rangeUSD > 0 && s.BilledCNY > 0 {
+		lifetimeRate = s.BilledCNY / rangeUSD
+	}
+	s.LifetimeBilledCNY = lifetimeUSD * lifetimeRate
+
 	h.reconcileAgainstLedger(c, tok, s, rangeUSD, start, end, fallbackRate)
 
 	// The preview reports the row count the PDF will carry, so it has to apply
@@ -481,7 +531,21 @@ const unitemisedFloorCNY = 0.005
 // A var, not a const, so a test can lower it: the failure it guards against
 // only appears once the cap is crossed, and a test that had to write half a
 // million rows to reach it would never be written.
+//
+// Process-global, so the tests that lower it must not call t.Parallel(). If
+// this package ever gains parallel tests, move it onto Handler instead of
+// making the tests work around it.
 var statementMaxRows = 500000
+
+// statementScanCacheTTL is deliberately much shorter than statusCacheTTL.
+//
+// The row scan behind an export is the largest object this process caches — up
+// to statementMaxRows materialised Records — and unlike the polled status
+// endpoints it has exactly one reuse worth having: the preview the dialog draws
+// and the PDF the user then downloads, seconds apart. Holding it for a minute
+// per token bought nothing and let a handful of large accounts pin hundreds of
+// megabytes at once on a host that already runs under earlyoom.
+const statementScanCacheTTL = 10 * time.Second
 
 // statementDefaultDays is the range the dialog opens on when the caller sends
 // none — long enough to cover a typical monthly reimbursement cycle.
@@ -516,6 +580,10 @@ var errStatementTargetUnreachable = errors.New("target amount exceeds total spen
 func statementRangeForTarget(entries []requestlog.Record, masked string, targetCNY, fallbackRate float64, now time.Time) (start, end time.Time, achievedCNY float64, err error) {
 	end = now
 	for _, rec := range entries {
+		// Redundant against the caller, which now filters by token in the
+		// query, but kept because this is a pure helper with its own unit
+		// tests that feed it mixed slices — it should not silently depend on
+		// having been handed a pre-filtered one.
 		if rec.ClientToken != masked {
 			continue
 		}

@@ -220,6 +220,34 @@ func (db *DB) TotalPaidCNY(ctx context.Context, token string) (float64, error) {
 	return total, nil
 }
 
+// AllWallets returns every wallet keyed by token.
+//
+// For callers that need a balance for each of many tokens at once. The rows
+// are one per token by definition, so this is the same amount of data a loop
+// of GetWallet would have fetched, minus a round trip per token: the admin
+// summary was issuing two queries per client and rebuilding the same handful
+// of pricing groups over and over.
+func (db *DB) AllWallets(ctx context.Context) (map[string]*Wallet, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT token, balance_usd, group_id, created_at, updated_at FROM wallets`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]*Wallet)
+	for rows.Next() {
+		var w Wallet
+		var created, updated int64
+		if err := rows.Scan(&w.Token, &w.BalanceUSD, &w.GroupID, &created, &updated); err != nil {
+			return nil, err
+		}
+		w.CreatedAt = time.Unix(created, 0)
+		w.UpdatedAt = time.Unix(updated, 0)
+		out[w.Token] = &w
+	}
+	return out, rows.Err()
+}
+
 // SetWalletGroup reassigns a token to a different pricing group. Used by
 // the admin panel when an operator moves a token between groups.
 func (db *DB) SetWalletGroup(ctx context.Context, token string, groupID int64) error {

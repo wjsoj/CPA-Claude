@@ -199,12 +199,27 @@ func (db *DB) ListOrders(ctx context.Context, token string, limit int) ([]*Alipa
 	return out, rows.Err()
 }
 
-func (db *DB) ListAllOrders(ctx context.Context, limit int) ([]*AlipayOrder, error) {
+// ListAllOrders is the operator's order feed, newest first.
+//
+// status filters in SQL rather than in the caller. Filtering after LIMIT reads
+// as equivalent and is not: it selects the newest `limit` orders of any status
+// and then keeps the matching ones, so asking for paid orders returns however
+// many of the recent page happened to be paid — fewer rows than asked for, and
+// a window that silently shrinks as unpaid orders accumulate.
+func (db *DB) ListAllOrders(ctx context.Context, status string, limit int) ([]*AlipayOrder, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := db.QueryContext(ctx,
-		`SELECT `+orderCols+` FROM alipay_orders ORDER BY created_at DESC LIMIT ?`, limit)
+	q := `SELECT ` + orderCols + ` FROM alipay_orders`
+	args := []any{}
+	if status != "" {
+		q += ` WHERE status = ?`
+		args = append(args, status)
+	}
+	q += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -218,4 +233,17 @@ func (db *DB) ListAllOrders(ctx context.Context, limit int) ([]*AlipayOrder, err
 		out = append(out, o)
 	}
 	return out, rows.Err()
+}
+
+// PaidOrderTotals sums every paid order there has ever been.
+//
+// Separate from ListAllOrders because a total taken over a page is not a total.
+// The operator panel used to add up the paid rows it happened to be showing and
+// label the result "total revenue", so the figure quietly stopped counting
+// anything older than the most recent page — and the page is capped.
+func (db *DB) PaidOrderTotals(ctx context.Context) (cny, usd float64, count int64, err error) {
+	err = db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(cny_amount), 0), COALESCE(SUM(usd_credit), 0), COUNT(1)
+		FROM alipay_orders WHERE status = ?`, OrderPaid).Scan(&cny, &usd, &count)
+	return cny, usd, count, err
 }

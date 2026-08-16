@@ -135,7 +135,19 @@ func (h *Handler) handleListAllOrders(c *gin.Context) {
 		}
 	}
 	statusFilter := c.Query("status") // optional: "paid", "pending", "expired", "failed"
-	os, err := h.wallets.ListAllOrders(c.Request.Context(), limit)
+	os, err := h.wallets.ListAllOrders(c.Request.Context(), statusFilter, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Headline totals come from their own aggregate over every paid order,
+	// not from adding up the page. The page is capped, so summing it labelled
+	// a window as a lifetime and dropped everything older than the cap.
+	//
+	// Deliberately independent of ?status=: these are always the lifetime paid
+	// figures, so they stay comparable whatever the operator is filtering the
+	// list down to. The panel only ever asks for paid orders anyway.
+	sumCNY, sumUSD, paidCount, err := h.wallets.PaidOrderTotals(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -151,11 +163,7 @@ func (h *Handler) handleListAllOrders(c *gin.Context) {
 		}
 	}
 	out := make([]gin.H, 0, len(os))
-	var sumCNY, sumUSD float64
 	for _, o := range os {
-		if statusFilter != "" && string(o.Status) != statusFilter {
-			continue
-		}
 		out = append(out, gin.H{
 			"out_trade_no": o.OutTradeNo,
 			"token":        maskToken(o.Token),
@@ -173,16 +181,16 @@ func (h *Handler) handleListAllOrders(c *gin.Context) {
 				return o.PaidAt.Unix()
 			}(),
 		})
-		if o.Status == saasdb.OrderPaid {
-			sumCNY += o.CNYAmount
-			sumUSD += o.USDCredit
-		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"orders":    out,
 		"total_cny": sumCNY,
 		"total_usd": sumUSD,
-		"count":     len(out),
+		// count is this page; paid_count is every paid order there is. They
+		// differ once the archive outgrows the page, which is exactly when
+		// reporting the page as the total would start being wrong.
+		"count":      len(out),
+		"paid_count": paidCount,
 	})
 }
 

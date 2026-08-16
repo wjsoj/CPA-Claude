@@ -703,6 +703,15 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 		toDay := today.Format("2006-01-02")
 
 		for masked, i := range maskedIdx {
+			// Seeded before the query, not inside the success branch: the chart
+			// expects a point per day, and a transient query failure should
+			// render as a flat series rather than as no series at all.
+			daily := make([]statusDailyEntry, 0, len(seedDays))
+			for _, day := range seedDays {
+				daily = append(daily, statusDailyEntry{Date: day})
+			}
+			results[i].Daily = daily
+
 			// One query answers three of the four fields: the day-label window
 			// puts Summary and ByDay on agg_cube, and Entries come off
 			// idx_req_ct already ordered newest-first, so LIMIT is the page.
@@ -715,17 +724,13 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 			}, statusCacheTTL); err == nil {
 				results[i].RecentTotal = int(res.Summary.Count)
 
-				daily := make([]statusDailyEntry, 0, len(seedDays))
-				for _, day := range seedDays {
-					e := statusDailyEntry{Date: day}
+				for j, day := range seedDays {
 					// ByDay is keyed on bday — the display-zone label seedDays
 					// is built from — so the two line up without re-bucketing.
 					if a, ok := res.ByDay[day]; ok {
-						e.CostUSD, e.Requests = a.CostUSD, a.Count
+						daily[j].CostUSD, daily[j].Requests = a.CostUSD, a.Count
 					}
-					daily = append(daily, e)
 				}
-				results[i].Daily = daily
 
 				if len(res.Entries) > 0 {
 					recent := make([]statusRecentEntry, 0, len(res.Entries))
@@ -778,8 +783,9 @@ func (h *Handler) handleStatusQuery(c *gin.Context) {
 // ---- /status/api/history ----
 //
 // Paged ledger for a single client token over an arbitrary time range.
-// Kept separate from /query so batch overview requests stay lean; this one
-// scans the full log archive (all rotated files) once per invocation.
+// Kept separate from /query so batch overview requests stay lean. Both the
+// page and its row count are answered by the index — this used to read the
+// archive once per invocation and paginate the result in memory.
 
 type statusHistoryBody struct {
 	Token  string `json:"token"`
@@ -863,7 +869,14 @@ func (h *Handler) handleStatusHistory(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	total := len(res.Entries) + offset // fallback if the count query fails
+	// Fallback if the count query fails. It leans towards "there is more",
+	// because the opposite guess strands the reader: a full page plus the
+	// offset reads as exactly one page left, and the pager stops offering the
+	// next one — silently truncating a history that is really still going.
+	total := len(res.Entries) + offset
+	if len(res.Entries) == limit {
+		total++
+	}
 	if cnt, cerr := h.cachedQueryShared(countF, statusCacheTTL); cerr == nil {
 		total = int(cnt.Summary.Count)
 	} else {

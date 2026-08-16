@@ -113,8 +113,14 @@ type statusWindow24 struct {
 }
 
 type reqCacheEntry struct {
-	at     time.Time
-	result *requestlog.Result
+	at time.Time
+	// expiresAt is stamped from the TTL the writer asked for. One table serves
+	// callers with different freshness bounds (15s for the panel, 60s for the
+	// status endpoints, less for statement scans), so eviction has to judge
+	// each entry by its own deadline — sweeping with whichever TTL happens to
+	// be passing through would drop entries that are still live.
+	expiresAt time.Time
+	result    *requestlog.Result
 }
 
 type byAuthCacheEntry struct {
@@ -700,6 +706,30 @@ func (h *Handler) handleSummary(c *gin.Context) {
 	// Clients (per-access-token spending).
 	clientSnap := h.usage.SnapshotClients()
 	currentWeek := h.usage.CurrentWeekKey()
+	// Wallets and pricing groups, fetched once instead of twice per client
+	// row. Both are small — one wallet per token, a handful of groups — and
+	// the per-row lookups were the bulk of this handler's database work.
+	// Best-effort: a failure here leaves the fields zero exactly as a missing
+	// wallet row already did.
+	var walletByToken map[string]*saasdb.Wallet
+	groupName := map[int64]string{}
+	if h.wallets != nil {
+		if m, err := h.wallets.AllWallets(c.Request.Context()); err == nil {
+			walletByToken = m
+		} else {
+			log.Warnf("summary: wallet prefetch failed: %v", err)
+		}
+		if gs, err := h.wallets.ListGroups(c.Request.Context()); err == nil {
+			for _, g := range gs {
+				groupName[g.ID] = g.Name
+			}
+		} else {
+			// Logged because this one failure blanks the pricing group on
+			// every row at once, where the per-row lookup it replaced would
+			// only have blanked the row that hit the error.
+			log.Warnf("pricing-group prefetch failed: %v", err)
+		}
+	}
 	clientRows := make([]clientRow, 0)
 	seen := make(map[string]bool)
 	addRow := func(token, label, group string, rpm int, fromConfig, managed bool) {
@@ -737,17 +767,14 @@ func (h *Handler) handleSummary(c *gin.Context) {
 		if entry, ok := h.tokens.Lookup(token); ok {
 			row.Providers = entry.Providers
 		}
-		// SaaS wallet view (balance + pricing group). Best-effort —
-		// missing wallet row just leaves the fields zero.
-		if h.wallets != nil {
-			if w, err := h.wallets.GetWallet(c.Request.Context(), token); err == nil {
-				row.BalanceUSD = w.BalanceUSD
-				row.GroupID = w.GroupID
-				row.Blocked = w.BalanceUSD <= 0
-				if g, err := h.wallets.GetGroup(c.Request.Context(), w.GroupID); err == nil {
-					row.PricingGroup = g.Name
-				}
-			}
+		// SaaS wallet view (balance + pricing group), read from the maps
+		// prefetched above. Best-effort — a missing wallet row just leaves
+		// the fields zero.
+		if w, ok := walletByToken[token]; ok {
+			row.BalanceUSD = w.BalanceUSD
+			row.GroupID = w.GroupID
+			row.Blocked = w.BalanceUSD <= 0
+			row.PricingGroup = groupName[w.GroupID]
 		}
 		if managed || fromConfig {
 			row.FullToken = token
@@ -1659,10 +1686,11 @@ func (h *Handler) cachedQueryShared(f requestlog.Filter, ttl time.Duration) (*re
 			// evicted the other N-1 mid-poll and put every one of them back
 			// on a cold query. Sweeping expired entries first keeps the
 			// working set and only falls back to the blunt reset when the
-			// live set genuinely exceeds the cap.
+			// live set genuinely exceeds the cap. Each entry is judged by
+			// its own deadline, not by this caller's TTL.
 			now := time.Now()
 			for k, v := range h.reqCache {
-				if now.Sub(v.at) > ttl {
+				if now.After(v.expiresAt) {
 					delete(h.reqCache, k)
 				}
 			}
@@ -1670,7 +1698,8 @@ func (h *Handler) cachedQueryShared(f requestlog.Filter, ttl time.Duration) (*re
 				h.reqCache = make(map[string]reqCacheEntry, 8)
 			}
 		}
-		h.reqCache[key] = reqCacheEntry{at: time.Now(), result: res}
+		now := time.Now()
+		h.reqCache[key] = reqCacheEntry{at: now, expiresAt: now.Add(ttl), result: res}
 		h.reqCacheMu.Unlock()
 		return res, nil
 	})
@@ -1876,6 +1905,26 @@ type tokenView struct {
 func (h *Handler) handleListTokens(c *gin.Context) {
 	full := c.Query("full") == "1"
 	rows := h.tokens.List()
+	// Same prefetch as the summary: two queries instead of two per token.
+	var walletByToken map[string]*saasdb.Wallet
+	groupName := map[int64]string{}
+	if h.wallets != nil {
+		if m, err := h.wallets.AllWallets(c.Request.Context()); err == nil {
+			walletByToken = m
+		} else {
+			log.Warnf("tokens: wallet prefetch failed: %v", err)
+		}
+		if gs, err := h.wallets.ListGroups(c.Request.Context()); err == nil {
+			for _, g := range gs {
+				groupName[g.ID] = g.Name
+			}
+		} else {
+			// Logged because this one failure blanks the pricing group on
+			// every row at once, where the per-row lookup it replaced would
+			// only have blanked the row that hit the error.
+			log.Warnf("pricing-group prefetch failed: %v", err)
+		}
+	}
 	out := make([]tokenView, 0, len(rows))
 	for _, t := range rows {
 		v := tokenView{
@@ -1887,14 +1936,10 @@ func (h *Handler) handleListTokens(c *gin.Context) {
 			Providers:     t.Providers,
 			WeeklyUsedUSD: h.usage.WeeklyCostUSD(t.Token),
 		}
-		if h.wallets != nil {
-			if w, err := h.wallets.GetWallet(c.Request.Context(), t.Token); err == nil {
-				v.BalanceUSD = w.BalanceUSD
-				v.GroupID = w.GroupID
-				if g, err := h.wallets.GetGroup(c.Request.Context(), w.GroupID); err == nil {
-					v.PricingGroup = g.Name
-				}
-			}
+		if w, ok := walletByToken[t.Token]; ok {
+			v.BalanceUSD = w.BalanceUSD
+			v.GroupID = w.GroupID
+			v.PricingGroup = groupName[w.GroupID]
 		}
 		if !t.CreatedAt.IsZero() {
 			ct := t.CreatedAt

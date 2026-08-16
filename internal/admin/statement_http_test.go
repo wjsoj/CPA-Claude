@@ -627,3 +627,73 @@ func TestStatementIsNotCrowdedOutByABusierToken(t *testing.T) {
 		t.Errorf("lifetime_billed_cny = %v, want ¥140 — no other token's spend may appear", p.LifetimeBilledCNY)
 	}
 }
+
+// The row cap is the one branch that can refuse an export outright, so the
+// advice it gives has to be actionable. A date-range export scans the range it
+// was asked for, which means narrowing the range really does get under the cap
+// — when the scan covered the whole retention window regardless, the same
+// message told users to do something that changed nothing at all, and an
+// account big enough to trip the cap could never export anything again.
+func TestStatementRowCapIsEscapableByNarrowingTheRange(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	masked := maskToken(testToken)
+	loc := requestlog.BucketLocation()
+	now := time.Now().In(loc)
+
+	// 30 requests a day for three days.
+	for d := range 3 {
+		day := now.AddDate(0, 0, -d)
+		recs := make([]requestlog.Record, 0, 30)
+		for i := range 30 {
+			recs = append(recs, requestlog.Record{
+				TS:          time.Date(day.Year(), day.Month(), day.Day(), 3, i, 0, 0, loc),
+				ClientToken: masked, Provider: "anthropic", Model: "claude-opus-4-7",
+				AuthID: "a1", AuthKind: "oauth",
+				CostUSD: 2, BilledUSD: 0.1, Multiplier: 0.05, CNYPerUSD: 7, Status: 200,
+			})
+		}
+		writeLog(t, dir, day, recs)
+	}
+	openReadyStore(t, dir)
+
+	orig := statementMaxRows
+	statementMaxRows = 50 // under three days (90), over one (30)
+	t.Cleanup(func() { statementMaxRows = orig })
+
+	tokens := clienttoken.OpenInMemory()
+	if err := tokens.Add(clienttoken.Token{Token: testToken, Name: "上限测试", Group: "default"}); err != nil {
+		t.Fatalf("add token: %v", err)
+	}
+	h := New(&config.Config{LogDir: dir, LogRetentionDays: 90},
+		auth.NewPool(nil, nil, time.Minute, false, ""), nil, nil, tokens)
+	r := gin.New()
+	r.POST("/status/api/statement", h.handleStatementPreview)
+
+	// Three days is over the cap: refused.
+	w := postJSON(t, r, "/status/api/statement", statementBody{
+		Token: testToken, From: dayLabel(-2), To: dayLabel(0),
+	})
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("wide range status = %d, want 413; body = %s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("缩短日期区间")) {
+		t.Errorf("413 body = %s, want it to advise narrowing the range", w.Body.String())
+	}
+
+	// Taking that advice has to actually work.
+	w = postJSON(t, r, "/status/api/statement", statementBody{
+		Token: testToken, From: dayLabel(0), To: dayLabel(0),
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("narrowed range status = %d, want 200 — the advice must be actionable; body = %s",
+			w.Code, w.Body.String())
+	}
+	var p statementPreview
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.Requests != 30 {
+		t.Errorf("requests = %d, want the 30 rows of the single day asked for", p.Requests)
+	}
+}
