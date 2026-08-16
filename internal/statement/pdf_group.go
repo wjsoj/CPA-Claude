@@ -204,7 +204,14 @@ func (r *renderer) groupDetailTable() {
 	if len(r.g.Lines) == 0 {
 		r.setFont(bodySize)
 		r.ink(130)
-		r.text(margin, r.y, "该区间内没有计费请求。")
+		// Which of the two empty states this is decides the sentence. A summary
+		// export prints a five-figure request count higher up the same page, so
+		// saying there were no billed requests contradicts the document itself.
+		msg := "本对账单为汇总版，未列示逐笔明细。"
+		if r.g.Itemised {
+			msg = "该区间内没有计费请求。"
+		}
+		r.text(margin, r.y, msg)
 		r.y += rowH
 		r.totalsRow(cols, r.groupTotalLines())
 		return

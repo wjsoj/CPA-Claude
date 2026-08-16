@@ -122,6 +122,8 @@ func (t *TeamHandler) buildGroupStatement(c *gin.Context, withLines bool) (*stat
 	// full export would carry, from the range count it already has.
 	wantLines := detail == "full"
 	collectLines := wantLines && withLines
+	// Carried onto the document so the renderer and the preview can both tell
+	// "no detail asked for" from "no requests in range".
 
 	if t.LogDir == "" {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "log_dir not configured"})
@@ -178,6 +180,7 @@ func (t *TeamHandler) buildGroupStatement(c *gin.Context, withLines bool) (*stat
 		LifetimeDays:  t.retentionDays(),
 		Partial:       gu.Partial,
 		Notes:         gu.Notes,
+		Itemised:      wantLines,
 	}
 
 	members := make([]statement.MemberRow, 0, len(gu.ByMember))
@@ -522,9 +525,12 @@ func teamStatementJSON(g *statement.GroupStatement) gin.H {
 		})
 	}
 	detailLines := int64(len(g.Lines))
-	if detailLines == 0 {
+	if detailLines == 0 && g.Itemised {
 		// The preview does not collect rows, so it reports what a full export
-		// would print rather than what it happens to hold.
+		// would print rather than what it happens to hold. Only when detail was
+		// actually asked for — a summary export prints no listing at all, and
+		// promising three thousand rows it will not carry is how the dialog and
+		// the file end up disagreeing.
 		detailLines = min64(g.Requests, int64(statement.MaxDetailLines))
 	}
 	notes := g.Notes

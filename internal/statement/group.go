@@ -122,6 +122,12 @@ type GroupStatement struct {
 	ByMember []MemberRow
 	ByModel  []ModelRow
 
+	// Itemised says the caller asked for the per-request listing. It is what
+	// separates "detail was not requested" from "the range really is empty" —
+	// two states that both leave Lines empty and read completely differently on
+	// the page, since a summary export still shows a five-figure request count
+	// above the listing it omitted.
+	Itemised bool
 	// Lines is the itemised listing, only when the caller asked for detail. It
 	// is capped for the document as a whole (MaxDetailLines), never per member.
 	Lines          []Line

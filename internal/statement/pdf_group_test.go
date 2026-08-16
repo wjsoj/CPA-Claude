@@ -118,6 +118,9 @@ func TestGroupEmptyRangeStillClosesOnTheLedgerFigure(t *testing.T) {
 		WorkspaceName: "行知实验室", FromDay: "2026-08-01", ToDay: "2026-08-15",
 		TZName: "Asia/Shanghai", CNYPerUSD: 7, GeneratedAt: time.Now(),
 		UnitemisedCNY: 21, ChargedCNY: 21,
+		// Itemised: the listing was asked for and came back empty, which is the
+		// only reading under which "no billed requests" is a true statement.
+		Itemised: true,
 	}
 	g.Rollup()
 	drawn := strings.Join(drawnByGroup(t, g, (*renderer).groupDetailTable), "\n")
@@ -247,3 +250,23 @@ func TestGroupTruncatedListingDisclosesItself(t *testing.T) {
 // renderer is a test-only shorthand for the pure label helpers, which need no
 // PDF handle.
 func (g *GroupStatement) renderer() *renderer { return &renderer{g: g} }
+
+// A summary export carries a five-figure request count in its headline and no
+// listing beneath it. Saying "no billed requests" there contradicts the same
+// page, so the two empty states have to read differently.
+func TestSummaryExportDoesNotClaimTheRangeIsEmpty(t *testing.T) {
+	g := &GroupStatement{
+		WorkspaceName: "行知实验室", FromDay: "2026-08-01", ToDay: "2026-08-15",
+		TZName: "Asia/Shanghai", CNYPerUSD: 7, GeneratedAt: time.Now(),
+		Requests: 82420, BilledCNY: 968.89,
+	}
+	g.Rollup()
+	drawn := strings.Join(drawnByGroup(t, g, (*renderer).groupDetailTable), "\n")
+	if strings.Contains(drawn, "没有计费请求") {
+		t.Errorf("a summary export claimed the range was empty while reporting %d requests; drew:\n%s",
+			g.Requests, drawn)
+	}
+	if !strings.Contains(drawn, "汇总版") {
+		t.Errorf("a summary export must say the listing was omitted; drew:\n%s", drawn)
+	}
+}
