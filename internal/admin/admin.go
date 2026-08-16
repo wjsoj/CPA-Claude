@@ -28,6 +28,7 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/monitor"
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
+	"github.com/wjsoj/CPA-Claude/internal/tokenmask"
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/clienttoken"
 	"github.com/wjsoj/cc-core/pricing"
@@ -66,6 +67,10 @@ type Handler struct {
 	// reset can quiesce + rewrite the masked client_token in rotated files.
 	// nil when request logging is disabled.
 	reqLog *requestlog.Writer
+	// logIndexed reports that the request log's SQL index is open. The team
+	// usage aggregates fan out one query per member and are only affordable
+	// against the index — see internal/saas/billing/usage.go.
+	logIndexed bool
 
 	// mon is the public uptime monitor. nil-safe: the /status/api/monitor
 	// handler returns an empty payload when unset.
@@ -171,6 +176,13 @@ func (h *Handler) WithInvoice(ia *InvoiceAdmin) *Handler {
 // historical client_token masks won't run.
 func (h *Handler) WithRequestLog(w *requestlog.Writer) *Handler {
 	h.reqLog = w
+	return h
+}
+
+// WithLogIndex records whether the request log's SQL index is open, which is
+// what makes a per-member usage fan-out affordable. Wire from server.New.
+func (h *Handler) WithLogIndex(indexed bool) *Handler {
+	h.logIndexed = indexed
 	return h
 }
 
@@ -315,6 +327,7 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.POST("/workspaces", h.handleCreateWorkspace)
 		api.PATCH("/workspaces/:id", h.handlePatchWorkspace)
 		api.GET("/workspaces/:id/members", h.handleListWorkspaceMembers)
+		api.GET("/workspaces/:id/usage", h.handleWorkspaceUsage)
 		// Invoices: list / issue (PDF upload) / reject / re-download.
 		api.GET("/invoices", h.handleListInvoices)
 		api.POST("/invoices/:id/issue", h.handleIssueInvoice)
@@ -843,12 +856,7 @@ type clientRow struct {
 	LastUsed     *time.Time        `json:"last_used,omitempty"`
 }
 
-func maskToken(t string) string {
-	if len(t) <= 10 {
-		return "***"
-	}
-	return t[:6] + "…" + t[len(t)-4:]
-}
+func maskToken(t string) string { return tokenmask.Mask(t) }
 
 // authKindString returns the wire-format tag ("oauth" / "apikey") used in the
 // request log and admin API. Matches the string literal the proxy writes at

@@ -23,6 +23,9 @@ type TeamHandler struct {
 	DB      *db.DB
 	Billing *Handler // shared order-creation machinery (gateway, rate, limits)
 	LogDir  string   // request-log directory for the per-member request view
+	// LogIndexed reports that LogDir's SQL index is open. Everything that
+	// queries once per member is gated on it — see the header of usage.go.
+	LogIndexed bool
 
 	// Auth resolves the bearer token to a registered client-token string, or
 	// "" when unauthenticated. Same resolver the wallet routes use.
@@ -37,6 +40,12 @@ type TeamHandler struct {
 	// invoicing isn't configured — the team invoice routes still work, the
 	// operator just finds the request in the panel instead of the inbox.
 	Invoices *InvoiceHandler
+	// RetentionDays is how far back the request log reaches (cfg
+	// log_retention_days). The team statement prints its running total as
+	// "近 N 天" rather than "累计" because of it — a retention-bounded figure
+	// read as all-time overstates a team older than the window. Zero falls back
+	// to the 90-day default applyDefaults installs.
+	RetentionDays int
 }
 
 const (
@@ -54,8 +63,10 @@ func (t *TeamHandler) Routes(g *gin.RouterGroup) {
 	g.DELETE("/members/:masked", t.removeMember)
 	g.GET("/ledger", t.ledger)
 	g.GET("/requests", t.requests)
+	g.GET("/usage", t.usage)
 	g.POST("/topup", t.topup)
 	t.invoiceRoutes(g)
+	t.statementRoutes(g)
 }
 
 // authMW resolves the bearer token, verifies it administers a workspace, and
@@ -117,22 +128,65 @@ func (t *TeamHandler) me(c *gin.Context) {
 	})
 }
 
-func (t *TeamHandler) memberView(c *gin.Context, m *db.WorkspaceMember) gin.H {
+// groupMembers converts the DB rows into the usage layer's member shape,
+// resolving display labels once.
+func (t *TeamHandler) groupMembers(ms []*db.WorkspaceMember) []GroupMember {
+	out := make([]GroupMember, 0, len(ms))
+	for _, m := range ms {
+		label := ""
+		if t.TokenLabel != nil {
+			label = t.TokenLabel(m.Token)
+		}
+		out = append(out, GroupMember{Token: m.Token, Label: label, Role: m.Role})
+	}
+	return out
+}
+
+// memberView renders one member row. `spend` is the real day/month spend read
+// from the request log; `ok` is false when the log could not be consulted, in
+// which case the two spend_* figures are omitted rather than shown as zero —
+// "we don't know" and "they spent nothing" must not look the same, which is
+// exactly the bug this whole surface exists to fix.
+func (t *TeamHandler) memberView(c *gin.Context, m *db.WorkspaceMember, spend MemberSpend, ok bool) gin.H {
 	day, month := t.DB.MemberPeriodPoolSpend(c.Request.Context(), m.Token)
 	label := ""
 	if t.TokenLabel != nil {
 		label = t.TokenLabel(m.Token)
 	}
-	return gin.H{
+	row := gin.H{
 		"masked":          maskToken(m.Token),
 		"label":           label,
 		"role":            m.Role,
 		"daily_usd_cap":   m.DailyUSDCap,
 		"monthly_usd_cap": m.MonthlyUSDCap,
-		"used_day_usd":    day,
-		"used_month_usd":  month,
-		"created_at":      m.CreatedAt.Unix(),
+		// used_* is pool spend — what the caps above actually meter. Kept under
+		// its original name and meaning.
+		"used_day_usd":   day,
+		"used_month_usd": month,
+		"created_at":     m.CreatedAt.Unix(),
 	}
+	switch {
+	case !ok:
+		row["spend_source"] = "unavailable"
+	case !spend.Measurable:
+		row["spend_source"] = "unmeasurable"
+	default:
+		// spend_* is total spend — pool plus whatever the member's own wallet
+		// covered after a cap ran out. Always >= used_*.
+		row["spend_source"] = "requestlog"
+		row["spend_day_usd"] = spend.Day.BilledUSD
+		row["spend_month_usd"] = spend.Month.BilledUSD
+		row["spend_day_requests"] = spend.Day.Count
+		row["spend_month_requests"] = spend.Month.Count
+	}
+	return row
+}
+
+// memberSpendFor looks up the current day/month real spend for a set of
+// members. Two request-log queries answer the whole team, so this is called
+// once per response rather than once per member.
+func (t *TeamHandler) memberSpendFor(ms []*db.WorkspaceMember) (map[string]MemberSpend, bool) {
+	return MemberSpendToDate(t.LogDir, t.groupMembers(ms))
 }
 
 func (t *TeamHandler) listMembers(c *gin.Context) {
@@ -142,11 +196,18 @@ func (t *TeamHandler) listMembers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	spend, spendOK := t.memberSpendFor(ms)
 	out := make([]gin.H, 0, len(ms))
 	for _, m := range ms {
-		out = append(out, t.memberView(c, m))
+		out = append(out, t.memberView(c, m, spend[maskToken(m.Token)], spendOK))
 	}
-	c.JSON(http.StatusOK, gin.H{"members": out})
+	c.JSON(http.StatusOK, gin.H{
+		"members": out,
+		// The display zone the spend_* windows are cut on, so the console can
+		// say which "today" it means.
+		"timezone":      requestlog.BucketLocation().String(),
+		"spend_partial": !spendOK,
+	})
 }
 
 type addMemberBody struct {
@@ -181,7 +242,8 @@ func (t *TeamHandler) addMember(c *gin.Context) {
 		return
 	}
 	m, _ := t.DB.MemberFor(c.Request.Context(), tok)
-	c.JSON(http.StatusOK, t.memberView(c, m))
+	spend, ok := t.memberSpendFor([]*db.WorkspaceMember{m})
+	c.JSON(http.StatusOK, t.memberView(c, m, spend[maskToken(m.Token)], ok))
 }
 
 // resolveMember maps a masked token (the URL identifier) back to the full
@@ -238,7 +300,8 @@ func (t *TeamHandler) patchMember(c *gin.Context) {
 		return
 	}
 	updated, _ := t.DB.MemberFor(c.Request.Context(), m.Token)
-	c.JSON(http.StatusOK, t.memberView(c, updated))
+	spend, ok := t.memberSpendFor([]*db.WorkspaceMember{updated})
+	c.JSON(http.StatusOK, t.memberView(c, updated, spend[maskToken(updated.Token)], ok))
 }
 
 func (t *TeamHandler) removeMember(c *gin.Context) {
@@ -288,16 +351,53 @@ func (t *TeamHandler) ledger(c *gin.Context) {
 // requests returns recent request-log entries for this workspace's members,
 // merged newest-first. Tokens in the log are already masked; we match members
 // by their masked form. Bounded: at most 50 members scanned, 200 rows out.
+//
+// This is the drill-down under /usage, not a second source of truth for it:
+// PageOnly deliberately returns rows without aggregates, and the rows are
+// truncated, so summing them would undercount. Totals come from /usage.
+//
+// Optional from/to (inclusive YYYY-MM-DD day labels, same contract as /usage)
+// and member (a masked token) narrow it.
 func (t *TeamHandler) requests(c *gin.Context) {
 	if t.LogDir == "" {
 		c.JSON(http.StatusOK, gin.H{"requests": []any{}})
 		return
 	}
+	fromDay, toDay := "", ""
+	if v := c.Query("from"); v != "" {
+		d, err := ParseDay(v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		fromDay = d
+	}
+	if v := c.Query("to"); v != "" {
+		d, err := ParseDay(v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		toDay = d
+	}
+	only := c.Query("member")
 	ws := t.ws(c)
 	ms, err := t.DB.ListMembers(c.Request.Context(), ws.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if only != "" {
+		// Filtering by member happens against this workspace's own roster, so
+		// a masked token belonging to someone else's team reads back as empty
+		// rather than leaking their traffic.
+		filtered := ms[:0:0]
+		for _, m := range ms {
+			if maskToken(m.Token) == only {
+				filtered = append(filtered, m)
+			}
+		}
+		ms = filtered
 	}
 	if len(ms) > 50 {
 		ms = ms[:50]
@@ -316,7 +416,11 @@ func (t *TeamHandler) requests(c *gin.Context) {
 		res, qerr := requestlog.Query(requestlog.Filter{
 			Dir:         t.LogDir,
 			ClientToken: masked,
-			Limit:       100,
+			// Day labels, never a From/To timestamp pair — the timestamp form
+			// forfeits the pre-summed index and scans row by row.
+			FromDay: fromDay,
+			ToDay:   toDay,
+			Limit:   100,
 			// Only res.Entries is read below — skip the per-member aggregates
 			// and stop scanning at the newest 100 hits so a 50-member team
 			// dashboard doesn't trigger 50 full-archive scans.
@@ -327,16 +431,20 @@ func (t *TeamHandler) requests(c *gin.Context) {
 		}
 		for _, r := range res.Entries {
 			all = append(all, entry{ts: r.TS, row: gin.H{
-				"member":     masked,
-				"label":      labelByMask[masked],
-				"ts":         r.TS.Unix(),
-				"provider":   r.Provider,
-				"model":      r.Model,
-				"status":     r.Status,
-				"input":      r.Input,
-				"output":     r.Output,
-				"cost_usd":   r.CostUSD,
-				"billed_usd": r.BilledUSD,
+				"member":   masked,
+				"label":    labelByMask[masked],
+				"ts":       r.TS.Unix(),
+				"provider": r.Provider,
+				"model":    r.Model,
+				"status":   r.Status,
+				"input":    r.Input,
+				"output":   r.Output,
+				"cost_usd": r.CostUSD,
+				// BilledOrCost, not the raw field: rows written before the
+				// cost/billed split carry the charge in cost_usd alone and
+				// would show up as free. These rows get compared against an
+				// invoice, so a legacy row reading 0 is a support ticket.
+				"billed_usd": r.BilledOrCost(),
 			}})
 		}
 	}
@@ -349,6 +457,36 @@ func (t *TeamHandler) requests(c *gin.Context) {
 		out = append(out, e.row)
 	}
 	c.JSON(http.StatusOK, gin.H{"requests": out})
+}
+
+// usage answers "what did this team really spend over this window", split by
+// member, model and day. Unlike /ledger (pool transactions) it reads the
+// request log, so it sees the spend that fell back to members' personal
+// wallets — which for a team that never funded a pool is all of it.
+func (t *TeamHandler) usage(c *gin.Context) {
+	ws := t.ws(c)
+	label := func(string) string { return "" }
+	if t.TokenLabel != nil {
+		label = t.TokenLabel
+	}
+	gu, err := BuildGroupUsage(c.Request.Context(), GroupUsageQuery{
+		Wallets:     t.DB,
+		LogDir:      t.LogDir,
+		LogIndexed:  t.LogIndexed,
+		WorkspaceID: ws.ID,
+		FromDay:     c.Query("from"),
+		ToDay:       c.Query("to"),
+		Label:       label,
+	})
+	if err != nil {
+		if errors.Is(err, ErrBadWindow) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, GroupUsageJSON(gu))
 }
 
 type teamTopupBody struct {

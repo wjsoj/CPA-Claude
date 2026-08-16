@@ -1,13 +1,16 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
+	"github.com/wjsoj/cc-core/requestlog"
 )
 
 // ---- Pricing groups ----
@@ -409,20 +412,86 @@ func (h *Handler) handleListWorkspaceMembers(c *gin.Context) {
 			labels[t.Token] = t.Name
 		}
 	}
+	gms := make([]billing.GroupMember, 0, len(ms))
+	for _, m := range ms {
+		gms = append(gms, billing.GroupMember{Token: m.Token, Label: labels[m.Token], Role: m.Role})
+	}
+	spend, spendOK := billing.MemberSpendToDate(h.cfg.LogDir, gms)
 	out := make([]gin.H, 0, len(ms))
 	for _, m := range ms {
 		day, month := h.wallets.MemberPeriodPoolSpend(c.Request.Context(), m.Token)
-		out = append(out, gin.H{
+		row := gin.H{
 			"masked":          maskToken(m.Token),
 			"label":           labels[m.Token],
 			"role":            m.Role,
 			"daily_usd_cap":   m.DailyUSDCap,
 			"monthly_usd_cap": m.MonthlyUSDCap,
-			"used_day_usd":    day,
-			"used_month_usd":  month,
-		})
+			// used_* is pool draw only — the figure the caps meter. Total spend
+			// (pool + personal wallet fallback) is spend_*, from the request log.
+			"used_day_usd":   day,
+			"used_month_usd": month,
+		}
+		s := spend[maskToken(m.Token)]
+		switch {
+		case !spendOK:
+			row["spend_source"] = "unavailable"
+		case !s.Measurable:
+			row["spend_source"] = "unmeasurable"
+		default:
+			// Same field set as the team console's memberView: one shape, so a
+			// column added to either panel finds the data it expects on both.
+			row["spend_source"] = "requestlog"
+			row["spend_day_usd"] = s.Day.BilledUSD
+			row["spend_month_usd"] = s.Month.BilledUSD
+			row["spend_day_requests"] = s.Day.Count
+			row["spend_month_requests"] = s.Month.Count
+		}
+		out = append(out, row)
 	}
-	c.JSON(http.StatusOK, gin.H{"members": out})
+	c.JSON(http.StatusOK, gin.H{
+		"members":       out,
+		"timezone":      requestlog.BucketLocation().String(),
+		"spend_partial": !spendOK,
+	})
+}
+
+// handleWorkspaceUsage mirrors the team console's /api/team/usage for the
+// operator, from the same producer — a support question about a team's bill
+// must not get a different answer here than the customer sees.
+func (h *Handler) handleWorkspaceUsage(c *gin.Context) {
+	if h.wallets == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "saas billing disabled"})
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+		return
+	}
+	labels := make(map[string]string)
+	for _, t := range h.tokens.List() {
+		if t.Name != "" {
+			labels[t.Token] = t.Name
+		}
+	}
+	gu, err := billing.BuildGroupUsage(c.Request.Context(), billing.GroupUsageQuery{
+		Wallets:     h.wallets,
+		LogDir:      h.cfg.LogDir,
+		LogIndexed:  h.logIndexed,
+		WorkspaceID: id,
+		FromDay:     c.Query("from"),
+		ToDay:       c.Query("to"),
+		Label:       func(tok string) string { return labels[tok] },
+	})
+	if err != nil {
+		if errors.Is(err, billing.ErrBadWindow) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, billing.GroupUsageJSON(gu))
 }
 
 func ptrBool(b bool) *bool { return &b }

@@ -13,6 +13,7 @@ import (
 	"github.com/wjsoj/CPA-Claude/internal/saas/billing"
 	saasdb "github.com/wjsoj/CPA-Claude/internal/saas/db"
 	"github.com/wjsoj/CPA-Claude/internal/saas/resend"
+	"github.com/wjsoj/CPA-Claude/internal/tokenmask"
 	"github.com/wjsoj/cc-core/auth"
 )
 
@@ -74,7 +75,13 @@ func (s *Server) mountBillingRoutes(engine *gin.Engine) {
 			Billing:  s.billing,
 			Invoices: s.invoice,
 			LogDir:   s.cfg.LogDir,
-			Auth:     s.makeBearerAuth(),
+			// Group usage and the team statement query once per member; without
+			// the index that is a full archive scan each.
+			LogIndexed: s.logIndexed,
+			// The statement's "近 N 天" running total has to name the window the
+			// log actually reaches back over, not a guess.
+			RetentionDays: s.cfg.LogRetentionDays,
+			Auth:          s.makeBearerAuth(),
 			TokenExists: func(tok string) bool {
 				_, ok := s.tokens.Lookup(tok)
 				return ok
@@ -345,12 +352,8 @@ func (b *saasBilling) SettleCharge(ctx context.Context, token, provider, model s
 	return mult, cost
 }
 
-// maskTokenShort renders a token for log lines without dragging in the
-// admin package's masker. Six-char prefix + four-char suffix is enough to
-// distinguish tokens in logs without making the value reconstructible.
-func maskTokenShort(tok string) string {
-	if len(tok) <= 10 {
-		return "***"
-	}
-	return tok[:6] + "…" + tok[len(tok)-4:]
-}
+// maskTokenShort renders a token for log lines. It forwards to the one masking
+// implementation rather than repeating it: a fourth copy that agrees today is
+// exactly what tokenmask exists to prevent, even where — as here — the output
+// only ever reaches a log line and is never a query key.
+func maskTokenShort(tok string) string { return tokenmask.Mask(tok) }

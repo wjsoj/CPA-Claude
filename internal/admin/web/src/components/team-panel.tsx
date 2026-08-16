@@ -34,6 +34,7 @@ import {
   teamPatchMember,
   teamRemoveMember,
   teamLedger,
+  teamUsage,
   teamTopup,
   teamInvoiceSummary,
   teamInvoices,
@@ -56,6 +57,8 @@ import {
   invoiceStatusBadge,
   taxNoIsValid,
 } from "@/components/invoice-common";
+import { GroupUsageView } from "@/components/group-usage-view";
+import { TeamStatementDialog } from "@/components/team-statement-dialog";
 import { confirmDialog } from "@/hooks/use-confirm";
 import { cn } from "@/lib/utils";
 
@@ -70,9 +73,14 @@ const cap = (n: number) => (n > 0 ? `$${n.toFixed(2)}` : "∞");
 export function TeamPanel({ token }: { token: string }) {
   const [me, setMe] = useState<TeamMe | null>(null);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  const [spendTZ, setSpendTZ] = useState("");
+  // 整份列表的「总消费」是否不可信。逐行已经会显示「暂不可用」，但一眼看去满屏都是
+  // 破折号时，读者需要知道这是日志读不到而不是大家真没花钱。
+  const [spendPartial, setSpendPartial] = useState(false);
   const [ledger, setLedger] = useState<TeamLedgerRow[]>([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [stmtOpen, setStmtOpen] = useState(false);
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -85,6 +93,8 @@ export function TeamPanel({ token }: { token: string }) {
       ]);
       setMe(m);
       setMembers(ms.members || []);
+      setSpendTZ(ms.timezone || "");
+      setSpendPartial(!!ms.spend_partial);
       setLedger(lg.ledger || []);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e));
@@ -96,6 +106,13 @@ export function TeamPanel({ token }: { token: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Stable identity so GroupUsageView's debounced effect doesn't re-fire on
+  // every render of this panel.
+  const usageLoader = useCallback(
+    (from: string, to: string) => teamUsage(token, from, to),
+    [token],
+  );
 
   if (err) {
     return (
@@ -123,6 +140,10 @@ export function TeamPanel({ token }: { token: string }) {
               {usd(me.workspace.balance_usd)}
             </span>
           </div>
+          <Button size="sm" variant="outline" onClick={() => setStmtOpen(true)}>
+            <FileText className="mr-1 h-3.5 w-3.5" />
+            对账单
+          </Button>
           <Button size="sm" variant="outline" onClick={() => void load()} disabled={busy}>
             <RefreshCw className={busy ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
           </Button>
@@ -131,9 +152,24 @@ export function TeamPanel({ token }: { token: string }) {
 
       <TopupRow token={token} onDone={load} />
 
-      <MembersTable token={token} members={members} onChange={load} />
+      <MembersTable
+        token={token}
+        members={members}
+        timezone={spendTZ}
+        spendPartial={spendPartial}
+        onChange={load}
+      />
+
+      <GroupUsageView load={usageLoader} />
 
       <TeamInvoiceSection token={token} />
+
+      <TeamStatementDialog
+        open={stmtOpen}
+        onOpenChange={setStmtOpen}
+        token={token}
+        workspaceName={me.workspace.name}
+      />
 
       {ledger.length > 0 && <LedgerTable rows={ledger} />}
     </div>
@@ -194,10 +230,14 @@ function TopupRow({ token, onDone }: { token: string; onDone: () => void }) {
 function MembersTable({
   token,
   members,
+  timezone,
+  spendPartial,
   onChange,
 }: {
   token: string;
   members: TeamMember[];
+  timezone: string;
+  spendPartial: boolean;
   onChange: () => void;
 }) {
   const [newTok, setNewTok] = useState("");
@@ -240,8 +280,9 @@ function MembersTable({
             <TableRow>
               <TableHead>成员</TableHead>
               <TableHead>角色</TableHead>
-              <TableHead className="text-right">日上限 / 已用</TableHead>
-              <TableHead className="text-right">月上限 / 已用</TableHead>
+              <TableHead className="text-right">日上限 / 池已用</TableHead>
+              <TableHead className="text-right">月上限 / 池已用</TableHead>
+              <TableHead className="text-right">总消费 今日 / 本月</TableHead>
               <TableHead className="w-10" />
             </TableRow>
           </TableHeader>
@@ -251,7 +292,7 @@ function MembersTable({
             ))}
             {members.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
+                <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
                   暂无成员
                 </TableCell>
               </TableRow>
@@ -259,8 +300,22 @@ function MembersTable({
           </TableBody>
         </Table>
       </div>
-      <p className="text-xs text-muted-foreground">
+      {/* 两个数字来自两本账，必须一起看：上限只约束「池已用」，成员撞上限后仍继续消费，
+          那部分只出现在「总消费」里。不给池充值的团队「池已用」恒为 0，是正常的。 */}
+      <p className="text-xs leading-relaxed text-muted-foreground">
         份额按北京时间日 / 月计；上限为 0 表示不限（仅受池总额约束）。组内成员请求优先扣组池，超出份额或池耗尽后回落扣其个人余额。
+        <br />
+        「池已用」只统计组池支付的部分——<span className="font-medium">若本组未给池充值，这里恒为 0 属正常</span>
+        ；「总消费」来自请求日志，含成员用个人余额支付的部分，也是上限管不到的那部分
+        {timezone ? `（按 ${timezone} 划分今日 / 本月）` : ""}。
+        {spendPartial && (
+          <>
+            <br />
+            <span className="font-medium text-amber-600 dark:text-amber-500">
+              当前无法读取请求日志，本表「总消费」一列整体不可用——不是成员没有消费。
+            </span>
+          </>
+        )}
       </p>
     </div>
   );
@@ -347,6 +402,9 @@ function MemberRow({
           <span className="w-16 text-xs text-muted-foreground">{usd(m.used_month_usd)}</span>
         </div>
       </TableCell>
+      <TableCell className="text-right">
+        <MemberSpendCell m={m} />
+      </TableCell>
       <TableCell>
         <div className="flex items-center gap-1">
           {dirty && (
@@ -366,6 +424,36 @@ function MemberRow({
         </div>
       </TableCell>
     </TableRow>
+  );
+}
+
+/**
+ * Total spend for one member — pool plus whatever their own wallet covered.
+ *
+ * "We could not measure it" must not render as $0.0000: that is the exact
+ * failure this column exists to fix, and a zero here would be read as "this
+ * person did nothing" rather than "the log is unavailable".
+ */
+function MemberSpendCell({ m }: { m: TeamMember }) {
+  if (m.spend_source !== "requestlog") {
+    const why =
+      m.spend_source === "unmeasurable"
+        ? "该令牌过短，脱敏后无法在请求日志中区分"
+        : "请求日志暂不可用";
+    return (
+      <span className="text-xs text-muted-foreground" title={why}>
+        {m.spend_source === "unmeasurable" ? "无法统计" : "暂不可用"}
+      </span>
+    );
+  }
+  return (
+    <div className="font-mono text-xs leading-tight">
+      <div>{usd(m.spend_day_usd || 0)}</div>
+      <div className="text-muted-foreground">
+        {usd(m.spend_month_usd || 0)}
+        <span className="ml-1 opacity-60">/ {m.spend_month_requests || 0} 笔</span>
+      </div>
+    </div>
   );
 }
 

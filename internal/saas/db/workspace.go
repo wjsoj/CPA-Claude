@@ -374,6 +374,14 @@ func (db *DB) SoleAdminWorkspace(ctx context.Context, token string) (int64, bool
 // MemberPeriodPoolSpend returns how much the member has drawn from the pool in
 // the current Beijing-time day and month (positive USD). Feeds the member list
 // "used / cap" display.
+//
+// This is pool spend only, and that is what the caps constrain — once a member
+// exhausts a cap their traffic falls back to their personal wallet and stops
+// appearing here. It is therefore never the member's real spend; the request
+// log is (see internal/saas/billing/usage.go). The window here is the cap
+// window, fixed at UTC+8, which lines up with the log's day labels only while
+// display_timezone is Asia/Shanghai — the default. Making cstZone follow the
+// display zone would move billing boundaries, so it deliberately doesn't.
 func (db *DB) MemberPeriodPoolSpend(ctx context.Context, token string) (day, month float64) {
 	now := time.Now()
 	_ = db.QueryRowContext(ctx,
@@ -383,6 +391,76 @@ func (db *DB) MemberPeriodPoolSpend(ctx context.Context, token string) (day, mon
 		`SELECT COALESCE(-SUM(amount_usd), 0) FROM workspace_tx WHERE token = ? AND kind = 'charge' AND created_at >= ?`,
 		token, monthStartUnix(now)).Scan(&month)
 	return day, month
+}
+
+// MemberPoolSpendBetween returns the pool spend of every member of one
+// workspace over [from, to), keyed by full token, positive USD. One grouped
+// query for the whole group — the per-member alternative is a round trip each,
+// and a usage screen asks about all of them at once.
+func (db *DB) MemberPoolSpendBetween(ctx context.Context, workspaceID int64, from, to time.Time) (map[string]float64, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT token, COALESCE(-SUM(amount_usd), 0) FROM workspace_tx
+		 WHERE workspace_id = ? AND kind = 'charge' AND created_at >= ? AND created_at < ?
+		 GROUP BY token`, workspaceID, from.Unix(), to.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var tok string
+		var amt float64
+		if err := rows.Scan(&tok, &amt); err != nil {
+			return nil, err
+		}
+		if tok != "" {
+			out[tok] = amt
+		}
+	}
+	return out, rows.Err()
+}
+
+// MemberPersonalSpendBetween is MemberPoolSpendBetween's other half: what each
+// member's own wallet was debited over [from, to), keyed by full token, positive
+// USD. Together the two are the group's whole ledger-side story — pool first,
+// personal after a cap runs out — and the pair is what a group statement
+// reconciles its request-log total against.
+//
+// One grouped query for the whole roster, joined against workspace_members
+// rather than looped per member. The per-member shape (see the three-queries-
+// each loop in WorkspaceInvoiceableCNY) costs a round trip per person on a
+// screen that always asks about all of them.
+//
+// wallet_tx carries no workspace_id — a personal wallet belongs to the token,
+// not the team — so a member who used to be in another workspace brings their
+// whole personal charge history for the window with them. That is the right
+// answer for a statement: the charge was theirs, it fell inside the window, and
+// the roster is by construction the export-time one (see the note the renderer
+// prints). The pool half is workspace-scoped and stays that way, so shared money
+// spent under a previous team never leaks into this one's total.
+func (db *DB) MemberPersonalSpendBetween(ctx context.Context, workspaceID int64, from, to time.Time) (map[string]float64, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT w.token, COALESCE(-SUM(w.amount_usd), 0) FROM wallet_tx w
+		 JOIN workspace_members m ON m.token = w.token
+		 WHERE m.workspace_id = ? AND w.kind = 'charge'
+		   AND w.created_at >= ? AND w.created_at < ?
+		 GROUP BY w.token`, workspaceID, from.Unix(), to.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var tok string
+		var amt float64
+		if err := rows.Scan(&tok, &amt); err != nil {
+			return nil, err
+		}
+		if tok != "" {
+			out[tok] = amt
+		}
+	}
+	return out, rows.Err()
 }
 
 func (db *DB) ListWorkspaceTx(ctx context.Context, workspaceID int64, limit int) ([]*WorkspaceTx, error) {

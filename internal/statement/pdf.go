@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/signintech/gopdf"
 )
@@ -71,12 +72,13 @@ func render(s *Statement, totalPages int) ([]byte, int, error) {
 	}
 
 	r := &renderer{pdf: pdf, s: s, totalPages: totalPages}
+	r.foot = r.tokenLine()
 	r.newPage()
-	r.header()
+	r.header("API 用量消费对账单", s.GeneratedAt)
 	r.identity()
 	r.summary()
 	if len(s.ByModel) > 0 {
-		r.modelTable()
+		r.modelTable(s.ByModel)
 	}
 	r.detailTable()
 	r.footerNote()
@@ -86,11 +88,19 @@ func render(s *Statement, totalPages int) ([]byte, int, error) {
 }
 
 type renderer struct {
-	pdf        *gopdf.GoPdf
+	pdf *gopdf.GoPdf
+	// s is the per-token document; g the group one. Exactly one is set — the
+	// primitives below (text, tables, pagination) are shared verbatim between
+	// them, and only the section builders know which document they are drawing.
 	s          *Statement
+	g          *GroupStatement
 	y          float64
 	page       int
 	totalPages int
+	// foot is the identity line repeated at the bottom of every page: the
+	// token on a per-token statement, the team on a group one. Set once at
+	// construction so pagination never has to know which kind it is drawing.
+	foot string
 	// drawn, when non-nil, records every string written to the page. Only
 	// tests set it: the output embeds a subsetted font with a private
 	// encoding, so searching the PDF bytes for "¥21.00" finds nothing whether
@@ -208,14 +218,14 @@ func colTitles(cols []col) []string {
 
 // --- sections -----------------------------------------------------------
 
-func (r *renderer) header() {
+func (r *renderer) header(title string, generatedAt time.Time) {
 	r.setFont(titleSize)
 	r.ink(20)
-	r.text(margin, r.y, "API 用量消费对账单")
+	r.text(margin, r.y, title)
 
 	r.setFont(smallSize)
 	r.ink(110)
-	r.textRight(margin, contentW, r.y+7, "生成时间 "+r.s.GeneratedAt.Format("2006-01-02 15:04:05"))
+	r.textRight(margin, contentW, r.y+7, "生成时间 "+generatedAt.Format("2006-01-02 15:04:05"))
 
 	r.y += 24
 	r.rule(r.y, 60, 1.0)
@@ -226,8 +236,12 @@ func (r *renderer) header() {
 // timezone is on the page because a day label means a different set of requests
 // in Shanghai than in UTC, and a reader reconciling against another system has
 // no way to tell which was meant.
-func (r *renderer) identity() {
-	for _, kv := range r.identityRows() {
+func (r *renderer) identity() { r.identityBlock(r.identityRows()) }
+
+// identityBlock draws a kv table. Both documents' identity sections are the
+// same shape; only the rows differ.
+func (r *renderer) identityBlock(rows [][2]string) {
+	for _, kv := range rows {
 		r.setFont(bodySize)
 		r.ink(120)
 		r.text(margin, r.y, kv[0])
@@ -305,13 +319,16 @@ func (r *renderer) tokenLine() string {
 
 // summary is the block a reimbursement reviewer actually reads: the range
 // total, the token's all-time total, and the rate behind every CNY figure here.
-func (r *renderer) summary() {
+func (r *renderer) summary() { r.summaryBlock(r.summaryItems()) }
+
+// summaryBlock draws the three-tile headline. The tile width is contentW/3 and
+// both documents use exactly three, so the layout is shared verbatim.
+func (r *renderer) summaryBlock(items [][2]string) {
 	const boxH = 58.0
 	r.pdf.SetFillColor(246, 246, 247)
 	r.pdf.RectFromUpperLeftWithStyle(margin, r.y, contentW, boxH, "F")
 
 	cellW := contentW / 3
-	items := r.summaryItems()
 	for i, it := range items {
 		x := margin + float64(i)*cellW + 12
 		r.setFont(smallSize)
@@ -389,11 +406,11 @@ func (r *renderer) detailCols() []col {
 	}
 }
 
-func (r *renderer) modelTable() {
+func (r *renderer) modelTable(rows []ModelRow) {
 	r.sectionTitle("按模型汇总")
 	cols := r.modelCols()
 	r.tableHead(cols)
-	for _, m := range r.s.ByModel {
+	for _, m := range rows {
 		r.row(cols, []string{m.Model, fmtInt(m.Requests), cny4(m.BilledCNY)})
 	}
 	r.y += 10
@@ -433,10 +450,9 @@ func (r *renderer) detailTable() {
 		r.ink(130)
 		r.text(margin, r.y, "该区间内没有计费请求。")
 		r.y += rowH
-		r.totalsRow(cols)
+		r.totalsRow(cols, r.totalLines())
 		return
 	}
-
 
 	r.tableHead(cols)
 	for _, ln := range r.s.Lines {
@@ -447,7 +463,7 @@ func (r *renderer) detailTable() {
 		vals = append(vals, cny4(ln.BilledCNY))
 		r.row(cols, vals)
 	}
-	r.totalsRow(cols)
+	r.totalsRow(cols, r.totalLines())
 }
 
 // totalsRow closes the itemised section on figures the reader can check against
@@ -458,8 +474,7 @@ func (r *renderer) detailTable() {
 // than folded into one number. The gap is a real debit with no evidence behind
 // it, and a document that hides it inside "合计" is claiming an itemisation it
 // does not have.
-func (r *renderer) totalsRow(cols []col) {
-	lines := r.totalLines()
+func (r *renderer) totalsRow(cols []col, lines []totalLine) {
 	if r.y+rowH*float64(len(lines))+10 > bottomLimit {
 		r.newPage()
 	}
@@ -494,13 +509,22 @@ func (r *renderer) totalLines() []totalLine {
 	if r.s.LinesTruncated {
 		label = "区间合计（含未列示部分）"
 	}
-	if r.s.UnitemisedCNY <= 0 {
-		return []totalLine{{label, "¥" + fmtMoney(r.s.BilledCNY)}}
+	return closingLines(label, r.s.BilledCNY, r.s.UnitemisedCNY, r.s.ChargedCNY)
+}
+
+// closingLines builds the closing block for either document.
+//
+// The reconciliation stays three separate lines rather than one reconciled
+// figure: the gap is a real debit with no evidence behind it, and folding it
+// into "合计" would claim an itemisation the document does not have.
+func closingLines(label string, billedCNY, unitemisedCNY, chargedCNY float64) []totalLine {
+	if unitemisedCNY <= 0 {
+		return []totalLine{{label, "¥" + fmtMoney(billedCNY)}}
 	}
 	return []totalLine{
-		{label, "¥" + fmtMoney(r.s.BilledCNY)},
-		{"未能明细化的消费", "¥" + fmtMoney(r.s.UnitemisedCNY)},
-		{"区间实际扣款", "¥" + fmtMoney(r.s.ChargedCNY)},
+		{label, "¥" + fmtMoney(billedCNY)},
+		{"未能明细化的消费", "¥" + fmtMoney(unitemisedCNY)},
+		{"区间实际扣款", "¥" + fmtMoney(chargedCNY)},
 	}
 }
 
@@ -558,7 +582,7 @@ func (r *renderer) pageFooter() {
 
 	r.setFont(smallSize)
 	r.ink(150)
-	r.text(margin, y-6, r.tokenLine())
+	r.text(margin, y-6, r.foot)
 	label := fmt.Sprintf("第 %d 页", r.page)
 	if r.totalPages > 0 {
 		label = fmt.Sprintf("第 %d 页 / 共 %d 页", r.page, r.totalPages)

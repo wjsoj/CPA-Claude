@@ -39,13 +39,15 @@ type endpoint struct {
 }
 
 type Server struct {
-	cfg       *config.Config
-	pool      *auth.Pool
-	usage     *usage.Store
-	pricing   *pricing.Catalog
-	tokens    *clienttoken.Store
-	reqLog    *requestlog.Writer
-	endpoints []*endpoint
+	cfg     *config.Config
+	pool    *auth.Pool
+	usage   *usage.Store
+	pricing *pricing.Catalog
+	tokens  *clienttoken.Store
+	reqLog  *requestlog.Writer
+	// logIndexed is set when the request log's SQL index is open.
+	logIndexed bool
+	endpoints  []*endpoint
 	// inflight is keyed by (provider | clientToken): Claude and Codex are
 	// treated as independent budgets for the same user so a client running
 	// Claude at cap doesn't block its Codex calls (and vice-versa). Matches
@@ -103,10 +105,16 @@ type Server struct {
 // enabled — otherwise the returned Server has no listeners and Start will
 // refuse to run. Admin panel + public /status page are mounted on the
 // "primary" endpoint: Claude when enabled, otherwise Codex.
-func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *requestlog.Writer, tokens *clienttoken.Store) *Server {
+// logIndex is the request log's SQL index, or nil when it is disabled or
+// failed to open. Only its presence is kept: it decides whether the surfaces
+// that query once per member (team usage, team statements) may run at all,
+// because requestlog.Query falls back to scanning the whole archive without
+// saying so.
+func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *requestlog.Writer, logIndex *requestlog.Store, tokens *clienttoken.Store) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	cat := pricing.NewCatalog(cfg.Pricing)
-	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens, reqLog: reqLog}
+	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens, reqLog: reqLog,
+		logIndexed: logIndex != nil}
 	s.codexRespAccount = newCodexRespAccountStore(codexRespAccountTTL)
 	s.codexSessions = codexws.NewSessionRegistry(0)
 	if cfg.ClientGuard.Enabled {
@@ -167,6 +175,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	if reqLog != nil {
 		adminH.WithRequestLog(reqLog)
 	}
+	adminH.WithLogIndex(s.logIndexed)
 
 	// Public uptime monitor. One probe target per enabled provider endpoint —
 	// no OAuth/API-key split. Built before the engines so the admin handler

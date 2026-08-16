@@ -385,6 +385,10 @@ export interface WalletOrder {
   img?: string;
   created_at: number;
   paid_at: number;
+  // Present only on a team-pool top-up: the credit went to the workspace, not
+  // to this wallet, so the row has to say so or it reads as money that vanished.
+  workspace_id?: number;
+  workspace_name?: string;
 }
 
 export interface WalletPricingGroup {

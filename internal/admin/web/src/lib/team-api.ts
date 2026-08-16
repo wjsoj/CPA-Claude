@@ -38,9 +38,136 @@ export interface TeamMember {
   role: string;
   daily_usd_cap: number;
   monthly_usd_cap: number;
+  /**
+   * used_* is *pool* spend — the only thing the caps above meter. A team that
+   * never funded a pool reads 0 here forever, which is correct and not a fault.
+   */
   used_day_usd: number;
   used_month_usd: number;
+  /**
+   * spend_* is total spend from the request log: pool plus whatever fell back
+   * to the member's own wallet. Absent unless spend_source is "requestlog", so
+   * "we could not measure it" never renders as ¥0.
+   */
+  spend_source?: "requestlog" | "unmeasurable" | "unavailable";
+  spend_day_usd?: number;
+  spend_month_usd?: number;
+  spend_day_requests?: number;
+  spend_month_requests?: number;
   created_at?: number;
+}
+
+export interface TeamMembersResp {
+  members: TeamMember[];
+  /** Display zone the spend_* day/month windows are cut on. */
+  timezone?: string;
+  spend_partial?: boolean;
+}
+
+// ---- Group usage ------------------------------------------------------
+//
+// /api/team/usage reads the request log, not workspace_tx, so it sees the spend
+// that fell back to members' personal wallets — for a team that only shares an
+// invoice, that is all of it. Amounts are USD; the statement endpoints below
+// are the CNY view.
+
+export interface UsageAgg {
+  requests: number;
+  billed_usd: number;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_create_tokens: number;
+  errors: number;
+}
+
+export interface GroupUsageMember extends UsageAgg {
+  masked: string;
+  label?: string;
+  role: string;
+  /** Token too short to mask distinguishably — its rows can't be told apart. */
+  unmeasurable: boolean;
+  pool_billed_usd: number;
+  /** Log total minus the pool half — derived, not a ledger figure. */
+  personal_billed_usd: number;
+  /** What wallet_tx actually debited this member; see the statement's note. */
+  personal_ledger_usd: number;
+}
+
+export interface GroupUsageModel extends UsageAgg {
+  model: string;
+}
+
+export interface GroupUsageDay extends UsageAgg {
+  day: string;
+}
+
+export interface GroupUsage {
+  from: string;
+  to: string;
+  timezone: string;
+  currency: string;
+  /** Some figure below is known to be incomplete; `notes` says which. */
+  partial: boolean;
+  notes: string[];
+  total: UsageAgg;
+  pool_billed_usd: number;
+  personal_billed_usd: number;
+  personal_ledger_usd: number;
+  by_member: GroupUsageMember[];
+  by_model: GroupUsageModel[];
+  by_day: GroupUsageDay[];
+}
+
+// ---- Group statement --------------------------------------------------
+
+export interface TeamStatementMember {
+  masked: string;
+  label?: string;
+  role: string;
+  unmeasurable: boolean;
+  requests: number;
+  billed_cny: number;
+  /** Fraction of the range total, 0–1. */
+  share: number;
+  /**
+   * The ledger's own view of this member: what the shared pool covered and what
+   * their personal wallet was debited. Not the same quantity as GroupUsage's
+   * personal_billed_usd, which is the log total minus the pool half — these two
+   * agree only where both books are complete.
+   */
+  pool_ledger_cny: number;
+  personal_ledger_cny: number;
+}
+
+export interface TeamStatementModel {
+  model: string;
+  requests: number;
+  billed_cny: number;
+}
+
+export interface TeamStatementPreview {
+  workspace: { id: number; name: string };
+  from: string;
+  to: string;
+  timezone: string;
+  cny_per_usd: number;
+  requests: number;
+  billed_cny: number;
+  /** Debited but with no matching log line; printed as its own line. */
+  unitemised_cny: number;
+  charged_cny: number;
+  lifetime_requests: number;
+  lifetime_billed_cny: number;
+  lifetime_days: number;
+  member_count: number;
+  by_member: TeamStatementMember[];
+  by_model: TeamStatementModel[];
+  detail_lines: number;
+  truncated: boolean;
+  partial: boolean;
+  notes: string[];
 }
 
 export interface TeamLedgerRow {
@@ -77,7 +204,48 @@ export interface TeamTopupResp {
 export const teamMe = (token: string) => teamFetch<TeamMe>(token, "/api/team/me");
 
 export const teamMembers = (token: string) =>
-  teamFetch<{ members: TeamMember[] }>(token, "/api/team/members");
+  teamFetch<TeamMembersResp>(token, "/api/team/members");
+
+export const teamUsage = (token: string, from?: string, to?: string) => {
+  const q = new URLSearchParams();
+  if (from) q.set("from", from);
+  if (to) q.set("to", to);
+  const qs = q.toString();
+  return teamFetch<GroupUsage>(token, `/api/team/usage${qs ? `?${qs}` : ""}`);
+};
+
+export const teamStatementPreview = (
+  token: string,
+  body: { from?: string; to?: string; detail?: "summary" | "full" },
+) =>
+  teamFetch<TeamStatementPreview>(token, "/api/team/statement", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+/** Blob download of the group statement PDF (mirrors downloadStatementPDF). */
+export async function teamDownloadStatementPDF(
+  token: string,
+  body: { from?: string; to?: string; detail?: "summary" | "full" },
+): Promise<Blob> {
+  const res = await fetch("/api/team/statement.pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    let msg = text || `HTTP ${res.status}`;
+    try {
+      const j = JSON.parse(text);
+      if (j && j.error) msg = j.error;
+    } catch {
+      /* keep the raw body */
+    }
+    throw new ApiError(msg, res.status);
+  }
+  return await res.blob();
+}
 
 export const teamAddMember = (
   token: string,

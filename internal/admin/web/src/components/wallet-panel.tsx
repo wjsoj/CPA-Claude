@@ -498,6 +498,11 @@ function OrdersCard({
                   <span className="font-mono text-[11px] opacity-60 truncate">
                     {o.out_trade_no}
                   </span>
+                  {o.workspace_id ? (
+                    <span className="shrink-0 rounded border border-[color:var(--border)] px-1 py-px text-[10px] leading-none opacity-70">
+                      组共享池
+                    </span>
+                  ) : null}
                 </div>
                 <span className="font-mono text-sm tabular font-medium">
                   +{fmtUSD(o.usd_credit)}
@@ -507,6 +512,14 @@ function OrdersCard({
                 <span>{fmtTime(o.created_at)}</span>
                 <span>{fmtCNY(o.cny_amount)} @ ¥{o.rate.toFixed(4)}</span>
               </div>
+              {/* The credit landed in the pool, so this wallet's balance and its
+                  transaction list stay unchanged — say so, or a paid order with
+                  no matching balance change looks like lost money. */}
+              {o.workspace_id ? (
+                <div className="mt-1 text-[11px] leading-relaxed opacity-60">
+                  已充入{o.workspace_name ? `「${o.workspace_name}」` : "团队"}共享池，不计入个人余额
+                </div>
+              ) : null}
               {o.status === "pending" && (
                 <div className="mt-2 flex gap-3 flex-wrap items-center">
                   {o.img && (

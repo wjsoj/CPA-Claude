@@ -208,7 +208,7 @@ func main() {
 	}
 	log.Infof("client tokens: %d loaded from %s", len(tokens.List()), tokensPath)
 
-	s := server.New(cfg, pool, store, reqLog, tokens)
+	s := server.New(cfg, pool, store, reqLog, logIndex, tokens)
 	for _, ep := range s.Endpoints() {
 		primary := ""
 		if ep.Primary {

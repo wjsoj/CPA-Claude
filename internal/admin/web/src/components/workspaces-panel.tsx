@@ -13,6 +13,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { GroupUsageView } from "@/components/group-usage-view";
+import type { GroupUsage } from "@/lib/team-api";
 import { confirmDialog } from "@/hooks/use-confirm";
 
 interface Workspace {
@@ -25,6 +27,8 @@ interface Workspace {
   created_at: number;
 }
 
+// Mirrors TeamMember on the group-admin side: used_* is pool spend (all the
+// caps meter), spend_* is total spend from the request log.
 interface WSMember {
   masked: string;
   label?: string;
@@ -33,6 +37,9 @@ interface WSMember {
   monthly_usd_cap: number;
   used_day_usd: number;
   used_month_usd: number;
+  spend_source?: "requestlog" | "unmeasurable" | "unavailable";
+  spend_day_usd?: number;
+  spend_month_usd?: number;
 }
 
 const usd = (n: number) => `$${n.toFixed(4)}`;
@@ -183,6 +190,14 @@ function WorkspaceRow({ ws, onChange }: { ws: Workspace; onChange: () => void })
     }
   }, [ws.id]);
 
+  // Stable identity: GroupUsageView re-queries whenever its loader changes, so
+  // an inline arrow would re-fetch on every render of this row.
+  const loadUsage = useCallback(
+    (from: string, to: string) =>
+      api<GroupUsage>(`/admin/api/workspaces/${ws.id}/usage?from=${from}&to=${to}`),
+    [ws.id],
+  );
+
   const toggleOpen = () => {
     const next = !open;
     setOpen(next);
@@ -266,8 +281,9 @@ function WorkspaceRow({ ws, onChange }: { ws: Workspace; onChange: () => void })
                   <TableRow>
                     <TableHead>成员</TableHead>
                     <TableHead>角色</TableHead>
-                    <TableHead className="text-right">日上限 / 已用</TableHead>
-                    <TableHead className="text-right">月上限 / 已用</TableHead>
+                    <TableHead className="text-right">日上限 / 池已用</TableHead>
+                    <TableHead className="text-right">月上限 / 池已用</TableHead>
+                    <TableHead className="text-right">总消费 今日 / 本月</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -292,20 +308,45 @@ function WorkspaceRow({ ws, onChange }: { ws: Workspace; onChange: () => void })
                         {m.monthly_usd_cap > 0 ? `$${m.monthly_usd_cap.toFixed(2)}` : "∞"} /{" "}
                         {usd(m.used_month_usd)}
                       </TableCell>
+                      <TableCell className="text-right font-mono text-xs">
+                        {m.spend_source === "requestlog" ? (
+                          <>
+                            {usd(m.spend_day_usd || 0)} /{" "}
+                            <span className="text-muted-foreground">
+                              {usd(m.spend_month_usd || 0)}
+                            </span>
+                          </>
+                        ) : (
+                          // 不能显示 $0：那正是这一列要修的谎——"没量"和"量不出来"必须长得不一样。
+                          <span
+                            className="text-muted-foreground"
+                            title={
+                              m.spend_source === "unmeasurable"
+                                ? "该令牌过短，脱敏后无法在请求日志中区分"
+                                : "请求日志暂不可用"
+                            }
+                          >
+                            {m.spend_source === "unmeasurable" ? "无法统计" : "暂不可用"}
+                          </span>
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))}
                   {members.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
+                      <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
                         暂无成员
                       </TableCell>
                     </TableRow>
                   )}
                 </TableBody>
               </Table>
-              <p className="mt-2 text-xs text-muted-foreground">
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                 成员的份额（日 / 月上限）由组管理员在公开状态页的「团队管理」面板设置。
+                「池已用」只含组池支付的部分（未给池充值的团队恒为 0）；「总消费」来自请求日志，含回落到个人余额的部分。
               </p>
+
+              <GroupUsageView className="mt-3" load={loadUsage} />
             </div>
           )}
         </div>

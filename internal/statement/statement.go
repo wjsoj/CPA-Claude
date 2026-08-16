@@ -71,6 +71,13 @@ type Line struct {
 	// Zero on requests that failed before settling.
 	BilledCNY float64
 	Status    int
+	// Member is the masked client token that made the request. Only a group
+	// statement fills it, and only a group statement prints it: on a per-token
+	// document every row has the same value, which is already in the header.
+	// Without it an itemised group listing is a column of amounts nobody can
+	// attribute, which for a shared reimbursement attachment is the one thing
+	// the listing is for.
+	Member string
 }
 
 // ModelRow is the per-model rollup printed above the itemised lines.

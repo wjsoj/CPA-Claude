@@ -18,6 +18,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/wjsoj/CPA-Claude/internal/saas/db"
+	"github.com/wjsoj/CPA-Claude/internal/tokenmask"
 )
 
 // Gateway abstracts a payment gateway (Z-Pay, MockGateway). Implementations
@@ -225,9 +226,30 @@ func (h *Handler) orders(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// A pool top-up is filed under the admin who paid for it, so it shows up in
+	// his personal order list — while the credit went to the workspace, leaving
+	// his wallet balance and wallet_tx untouched. Without saying which workspace
+	// it funded, that reads as a paid order whose money vanished. Names are
+	// resolved per distinct workspace, which in this list is 0 or 1 of them.
+	names := map[int64]string{}
+	for _, o := range os {
+		if o.WorkspaceID > 0 {
+			names[o.WorkspaceID] = ""
+		}
+	}
+	for id := range names {
+		if ws, err := h.DB.GetWorkspace(c.Request.Context(), id); err == nil {
+			names[id] = ws.Name
+		}
+	}
 	out := make([]gin.H, 0, len(os))
 	for _, o := range os {
-		out = append(out, orderView(o))
+		v := orderView(o)
+		if o.WorkspaceID > 0 {
+			v["workspace_id"] = o.WorkspaceID
+			v["workspace_name"] = names[o.WorkspaceID]
+		}
+		out = append(out, v)
 	}
 	c.JSON(http.StatusOK, gin.H{"orders": out})
 }
@@ -580,12 +602,7 @@ func tokenShort(token string) string {
 	return fmt.Sprintf("%08x", uint32(h))
 }
 
-func maskToken(tok string) string {
-	if len(tok) <= 10 {
-		return "***"
-	}
-	return tok[:6] + "…" + tok[len(tok)-4:]
-}
+func maskToken(tok string) string { return tokenmask.Mask(tok) }
 
 func round2(v float64) float64 {
 	return float64(int64(v*100+0.5)) / 100

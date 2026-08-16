@@ -11,6 +11,8 @@ import {
 } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { DateRangeRow } from "./date-range-row";
+import { shiftDays, todayLocal } from "@/lib/date-range";
 import {
   downloadStatementPDF,
   loadStatementPreview,
@@ -34,29 +36,6 @@ import {
 // as an ordinary date-range export. Real spend is the only ceiling — an
 // account funded by operator credit rather than by Alipay is still exporting
 // its own consumption.
-
-function todayLocal(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function shiftDays(day: string, delta: number): string {
-  const d = new Date(`${day}T00:00:00`);
-  d.setDate(d.getDate() + delta);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function monthBounds(offset: number): { from: string; to: string } {
-  const now = new Date();
-  const first = new Date(now.getFullYear(), now.getMonth() + offset, 1);
-  const last = new Date(now.getFullYear(), now.getMonth() + offset + 1, 0);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const fmt = (d: Date) =>
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  return { from: fmt(first), to: fmt(last) };
-}
 
 const fmtCNY = (v: number) =>
   `¥${v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -167,32 +146,6 @@ export function StatementDialog({
     }
   };
 
-  const presets: { label: string; apply: () => void }[] = [
-    {
-      label: "本月",
-      apply: () => {
-        const b = monthBounds(0);
-        setFrom(b.from);
-        setTo(b.to);
-      },
-    },
-    {
-      label: "上月",
-      apply: () => {
-        const b = monthBounds(-1);
-        setFrom(b.from);
-        setTo(b.to);
-      },
-    },
-    {
-      label: "近 30 天",
-      apply: () => {
-        setFrom(shiftDays(todayLocal(), -29));
-        setTo(todayLocal());
-      },
-    },
-  ];
-
   const empty = preview !== null && preview.requests === 0;
 
   return (
@@ -231,42 +184,17 @@ export function StatementDialog({
           </div>
 
           {mode === "date" ? (
-            <div className="space-y-2">
-              <div className="flex items-center gap-1.5">
-                <Input
-                  type="date"
-                  value={from}
-                  onChange={(e) => setFrom(e.currentTarget.value)}
-                  className="h-8 text-xs mono"
-                />
-                <span className="mono text-xs opacity-60">→</span>
-                <Input
-                  type="date"
-                  value={to}
-                  onChange={(e) => setTo(e.currentTarget.value)}
-                  className="h-8 text-xs mono"
-                />
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {presets.map((p) => (
-                  <Button
-                    key={p.label}
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-6 px-2 text-[11px]"
-                    onClick={p.apply}
-                  >
-                    {p.label}
-                  </Button>
-                ))}
-                {preview?.timezone && (
-                  <span className="ml-auto self-center text-[11px] mono opacity-55">
-                    区间按 {preview.timezone} 计，含首尾两日
-                  </span>
-                )}
-              </div>
-            </div>
+            <DateRangeRow
+              from={from}
+              to={to}
+              onChange={(f, t) => {
+                setFrom(f);
+                setTo(t);
+              }}
+              hint={
+                preview?.timezone ? `区间按 ${preview.timezone} 计，含首尾两日` : undefined
+              }
+            />
           ) : (
             <div className="space-y-1.5">
               <div className="flex items-center gap-1.5">

@@ -16,6 +16,8 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/wjsoj/CPA-Claude/internal/tokenmask"
+
 	"github.com/wjsoj/cc-core/advisor"
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/downstream"
@@ -592,12 +594,10 @@ func applyRelayIdentity(h http.Header, a *auth.Auth, c *gin.Context, clientToken
 	relay.Apply(h, RelayPeerName, clientToken, clientSlotID(c))
 }
 
-func maskClientToken(t string) string {
-	if len(t) <= 10 {
-		return "***"
-	}
-	return t[:6] + "…" + t[len(t)-4:]
-}
+// maskClientToken is the form a client token takes in the request log. The
+// mask is the only client identity stored there, so it doubles as the join key
+// every usage query matches on — see internal/tokenmask.
+func maskClientToken(t string) string { return tokenmask.Mask(t) }
 
 // flagStripThinking persists the strip-thinking decision on a credential after
 // a thinking-signature recovery succeeds, so future requests on it sanitize
