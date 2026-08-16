@@ -70,42 +70,6 @@ function mask(tok: string): string {
   return t.slice(0, 6) + "…" + t.slice(-4);
 }
 
-function Metric({
-  label,
-  value,
-  unit,
-  accent,
-}: {
-  label: string;
-  value: string | number;
-  unit?: string;
-  accent?: boolean;
-}) {
-  return (
-    <div className={cn("metric-cell", accent && "metric-cell-accent")}>
-      <div className="relative z-10">
-        <div className="eyebrow mb-2.5">{label}</div>
-        <div className="flex items-baseline gap-1.5">
-          <span
-            className={cn(
-              "font-mono text-2xl md:text-[2rem] leading-none font-medium tracking-tight tabular",
-              accent ? "text-primary" : "text-foreground",
-            )}
-          >
-            {value}
-          </span>
-          {unit && (
-            <span className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
-              {unit}
-            </span>
-          )}
-        </div>
-      </div>
-      <span aria-hidden className="metric-cell-corner" />
-      <span aria-hidden className="metric-cell-spark" />
-    </div>
-  );
-}
 
 type StatusTab = "dashboard" | "wallet" | "lookup" | "docs";
 
@@ -351,6 +315,50 @@ export function StatusPage() {
           <div className="stagger pt-2 md:pt-4 space-y-6">
             <StatusMonitorPanel refreshTick={refreshTick} pools={pools} />
             <StatusDashboardPanel refreshTick={refreshTick} />
+
+            {/* CREDENTIAL POOL — fleet state, so it belongs with the rest of
+                the fleet view rather than above a personal token lookup. Last
+                on the tab because it is the per-credential detail you drill
+                into after the charts above have told you something is off. */}
+            <section className="stagger space-y-4">
+              <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                <div>
+                  <div className="eyebrow mb-1.5">§ Pool health</div>
+                  <h2 className="font-display text-2xl md:text-3xl tracking-tight">
+                    Credentials <span className="text-muted-foreground">overview</span>
+                  </h2>
+                </div>
+                {ov && poolTotals.total > 0 && (
+                  // Every state, straight from by_state — the parts sum to the
+                  // total by construction. The old three-term line silently
+                  // dropped circuit-broken API keys.
+                  <span className="eyebrow tabular opacity-70 flex flex-wrap gap-x-2">
+                    {CRED_STATES.filter((s) => poolTotals.by_state[s] > 0).map((s) => (
+                      <span key={s} className={toneText(STATE_META[s].tone)}>
+                        {poolTotals.by_state[s]} {STATE_META[s].label.toLowerCase()}
+                      </span>
+                    ))}
+                    <span className="opacity-60">= {poolTotals.total}</span>
+                  </span>
+                )}
+              </div>
+
+              {!ov ? (
+                <div className="py-12 text-center eyebrow animate-pulse bg-card border border-border-strong rounded-md">
+                  <span className="opacity-60">Loading…</span>
+                </div>
+              ) : (ov.auths || []).length === 0 ? (
+                <div className="py-10 px-6 text-center text-sm text-muted-foreground font-mono bg-card border border-border-strong rounded-md">
+                  No credentials configured.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
+                  {(ov.auths || []).map((a, i) => (
+                    <PublicCredCard key={i} a={a} />
+                  ))}
+                </div>
+              )}
+            </section>
           </div>
         )}
 
@@ -372,79 +380,12 @@ export function StatusPage() {
           </div>
         )}
 
+        {/* The lookup tab is deliberately just the token query: fleet-wide
+            figures (pool health, 24h totals, model count) all live on the
+            Dashboard, and repeating them above a personal ledger made the
+            page read as a fleet view that happened to have a search box. */}
         {tab === "lookup" && (
           <>
-        {/* OVERVIEW METRICS */}
-        <section className="stagger">
-          <div className="hud-strip">
-            <div className="hud-strip-grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
-              {/* "Healthy" here is verified-healthy only — the count comes
-                  from by_state, not from a `healthy` boolean that flips true
-                  the moment a circuit-breaker window lapses. */}
-              <Metric
-                label="Healthy"
-                value={ov ? poolTotals.by_state.healthy : "···"}
-                unit={ov ? `/ ${poolTotals.total}` : undefined}
-                accent
-              />
-              <Metric
-                label="Serving"
-                value={ov ? poolTotals.serving : "···"}
-                unit={ov ? `/ ${poolTotals.total}` : undefined}
-              />
-              <Metric label="OAuth" value={ov ? fmtInt(ov.counts.oauth) : "···"} />
-              <Metric label="API keys" value={ov ? fmtInt(ov.counts.apikey) : "···"} />
-              <Metric label="Models" value={ov ? fmtInt(ov.counts.models) : "···"} />
-              <Metric label="24h req" value={ov ? fmtInt(ov.window_24h.requests) : "···"} />
-              <Metric
-                label="24h cost"
-                value={ov ? `$${ov.window_24h.cost_usd.toFixed(2)}` : "···"}
-              />
-            </div>
-          </div>
-        </section>
-
-        {/* CREDENTIAL POOL */}
-        <section className="stagger space-y-4">
-          <div className="flex items-baseline justify-between gap-3 flex-wrap">
-            <div>
-              <div className="eyebrow mb-1.5">§ Pool health</div>
-              <h2 className="font-display text-2xl md:text-3xl tracking-tight">
-                Credentials <span className="text-muted-foreground">overview</span>
-              </h2>
-            </div>
-            {ov && poolTotals.total > 0 && (
-              // Every state, straight from by_state — the parts sum to the
-              // total by construction. The old three-term line silently
-              // dropped circuit-broken API keys.
-              <span className="eyebrow tabular opacity-70 flex flex-wrap gap-x-2">
-                {CRED_STATES.filter((s) => poolTotals.by_state[s] > 0).map((s) => (
-                  <span key={s} className={toneText(STATE_META[s].tone)}>
-                    {poolTotals.by_state[s]} {STATE_META[s].label.toLowerCase()}
-                  </span>
-                ))}
-                <span className="opacity-60">= {poolTotals.total}</span>
-              </span>
-            )}
-          </div>
-
-          {!ov ? (
-            <div className="py-12 text-center eyebrow animate-pulse bg-card border border-border-strong rounded-md">
-              <span className="opacity-60">Loading…</span>
-            </div>
-          ) : (ov.auths || []).length === 0 ? (
-            <div className="py-10 px-6 text-center text-sm text-muted-foreground font-mono bg-card border border-border-strong rounded-md">
-              No credentials configured.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
-              {(ov.auths || []).map((a, i) => (
-                <PublicCredCard key={i} a={a} />
-              ))}
-            </div>
-          )}
-        </section>
-
         {/* TOKEN QUERY */}
         <section className="stagger space-y-4">
           <div className="flex items-baseline justify-between gap-3 flex-wrap">
