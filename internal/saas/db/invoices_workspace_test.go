@@ -642,3 +642,78 @@ func TestRekeyTokenRefusesOccupiedInvoiceState(t *testing.T) {
 		t.Fatalf("source quota = %.2f after a refused rekey, want 100", got)
 	}
 }
+
+// TestRekeyTokenCountsUnderWriteLock is the regression for the bug that made
+// reset unusable on exactly the tokens that needed it.
+//
+// The row counts used to be read before BeginTx. A charge settling in the gap
+// left the UPDATE touching one row more than had been counted, the
+// conservation check called that corruption, and the rotation was refused —
+// deterministically, for any token with live traffic.
+//
+// The interleaving is forced rather than raced: a competing writer holds the
+// write lock, RekeyToken blocks at BEGIN, and the writer commits a new ledger
+// row before letting go. Counting inside the lock sees that row; counting
+// outside it does not.
+func TestRekeyTokenCountsUnderWriteLock(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+	const old = "sk-rekey-race-old-xxxxxxxxxx"
+	const newTok = "sk-rekey-race-new-yyyyyyyyyy"
+	if _, err := d.AddBalance(ctx, old, TxKindTopup, 10, "seed", "seed", true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Competing writer takes the write lock and holds it.
+	blocker, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if _, err := blocker.ExecContext(ctx,
+		`INSERT INTO wallet_tx (token, kind, amount_usd, ref, note, created_at)
+		 VALUES (?, ?, ?, '', '', ?)`,
+		old, TxKindCharge, -0.5, time.Now().Unix()); err != nil {
+		t.Fatalf("competing insert: %v", err)
+	}
+
+	done := make(chan *RekeyTokenReport, 1)
+	errc := make(chan error, 1)
+	go func() {
+		rep, err := d.RekeyToken(ctx, old, newTok)
+		if err != nil {
+			errc <- err
+			return
+		}
+		done <- rep
+	}()
+
+	// Let the rekey reach BEGIN and block there, then release the row it
+	// must account for.
+	time.Sleep(300 * time.Millisecond)
+	if err := blocker.Commit(); err != nil {
+		t.Fatalf("blocker commit: %v", err)
+	}
+
+	select {
+	case err := <-errc:
+		t.Fatalf("rekey refused a token that was merely busy: %v", err)
+	case rep := <-done:
+		// Two ledger rows: the seed topup and the charge the competing
+		// writer committed while the rekey waited.
+		if rep.WalletTxRowsAffected != 2 {
+			t.Fatalf("wallet_tx moved = %d, want 2 (the row written during the wait must move too)",
+				rep.WalletTxRowsAffected)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("rekey never returned")
+	}
+
+	var leftBehind int64
+	if err := d.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM wallet_tx WHERE token = ?`, old).Scan(&leftBehind); err != nil {
+		t.Fatal(err)
+	}
+	if leftBehind != 0 {
+		t.Fatalf("%d ledger rows stranded on the old token", leftBehind)
+	}
+}

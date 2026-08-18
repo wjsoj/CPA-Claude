@@ -331,8 +331,42 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 		return nil, errors.New("oldToken and newToken must differ and be non-empty")
 	}
 	rep := &RekeyTokenReport{}
+
+	// The backup is taken before the write lock: VACUUM INTO cannot run
+	// inside a transaction. A charge landing in the gap is settled against
+	// the old token and would be absent from the backup, which is the same
+	// exposure the backup always had — it is a restore point, not a
+	// snapshot of the exact pre-mutation state.
+	if db.path != "" {
+		bk := fmt.Sprintf("%s.pre-rekey-%s.bak", db.path, time.Now().UTC().Format("20060102-150405.000000000"))
+		if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, bk); err != nil {
+			return nil, fmt.Errorf("pre-rekey backup failed (refusing to mutate): %w", err)
+		}
+		rep.BackupPath = bk
+	}
+
+	// Everything below — the counts, the guards and the UPDATEs — runs inside
+	// one transaction. The module opens with _txlock=immediate, so BeginTx
+	// takes the write lock at BEGIN rather than on first write; no other
+	// writer can interleave once we are past this line.
+	//
+	// The counts MUST be taken inside that lock. They were read before
+	// BeginTx until 2026-08-18, and on a token carrying live traffic the
+	// result was that reset could essentially never succeed: a charge
+	// settling between the pre-count and the UPDATE made the UPDATE touch
+	// one row more than had been counted, the conservation check read that
+	// as data corruption, and the rotation was refused with "wallet_tx
+	// conservation broken: pre=86695 post=86696". The busier the token, the
+	// more reliably its owner could not rotate a leaked key — the one
+	// situation the feature exists for.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	var hadWallet bool
-	if err := db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT balance_usd FROM wallets WHERE token = ?`, oldToken).Scan(&rep.OldBalanceUSD); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
@@ -340,88 +374,53 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 	} else {
 		hadWallet = true
 	}
-	var oldTxCount, oldOrderCount, dstWalletCount int64
-	var oldMemberCount, oldWsTxCount, dstMemberCount int64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM wallet_tx WHERE token = ?`, oldToken).Scan(&oldTxCount); err != nil {
-		return nil, err
-	}
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM alipay_orders WHERE token = ?`, oldToken).Scan(&oldOrderCount); err != nil {
-		return nil, err
-	}
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM wallets WHERE token = ?`, newToken).Scan(&dstWalletCount); err != nil {
-		return nil, err
-	}
-	if dstWalletCount > 0 {
-		return nil, errors.New("destination token already has a wallet; refusing to overwrite")
-	}
-	// Workspace state moves with the token too (membership row + the pool
-	// ledger's per-member attribution). Counted here for the same
-	// conservation guarantee the wallet rows get.
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM workspace_members WHERE token = ?`, oldToken).Scan(&oldMemberCount); err != nil {
-		return nil, err
-	}
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM workspace_tx WHERE token = ?`, oldToken).Scan(&oldWsTxCount); err != nil {
-		return nil, err
-	}
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM workspace_members WHERE token = ?`, newToken).Scan(&dstMemberCount); err != nil {
-		return nil, err
-	}
-	if dstMemberCount > 0 {
-		return nil, errors.New("destination token already belongs to a workspace; refusing to overwrite")
-	}
-	// Invoice state (requests, per-member allocations of team invoices, and
-	// the saved-title shortlist). The destination is a freshly minted token
-	// so none of these can collide, but invoice_titles' UNIQUE(token, name)
-	// and invoice_allocations' PK would turn a collision into a mid-
-	// transaction constraint error rather than the clean refusal the wallet
-	// and workspace checks above give.
+
+	// Source row counts, and the destination-occupied guards. A freshly
+	// minted token collides with nothing, but a caller passing an in-use
+	// token deserves a clean refusal rather than a constraint error thrown
+	// from the middle of the transaction.
+	var oldTxCount, oldOrderCount, oldMemberCount, oldWsTxCount int64
 	var oldInvoiceCount, oldAllocCount, oldTitleCount int64
+	var dstWalletCount, dstMemberCount int64
 	var dstInvoiceCount, dstAllocCount, dstTitleCount int64
 	for _, q := range []struct {
 		table string
 		token string
 		into  *int64
 	}{
+		{"wallet_tx", oldToken, &oldTxCount},
+		{"alipay_orders", oldToken, &oldOrderCount},
+		{"workspace_members", oldToken, &oldMemberCount},
+		{"workspace_tx", oldToken, &oldWsTxCount},
 		{"invoices", oldToken, &oldInvoiceCount},
 		{"invoice_allocations", oldToken, &oldAllocCount},
 		{"invoice_titles", oldToken, &oldTitleCount},
+		{"wallets", newToken, &dstWalletCount},
+		{"workspace_members", newToken, &dstMemberCount},
 		{"invoices", newToken, &dstInvoiceCount},
 		{"invoice_allocations", newToken, &dstAllocCount},
 		{"invoice_titles", newToken, &dstTitleCount},
 	} {
-		if err := db.QueryRowContext(ctx,
+		if err := tx.QueryRowContext(ctx,
 			`SELECT COUNT(1) FROM `+q.table+` WHERE token = ?`, q.token).Scan(q.into); err != nil {
 			return nil, err
 		}
+	}
+	if dstWalletCount > 0 {
+		return nil, errors.New("destination token already has a wallet; refusing to overwrite")
+	}
+	if dstMemberCount > 0 {
+		return nil, errors.New("destination token already belongs to a workspace; refusing to overwrite")
 	}
 	if dstInvoiceCount > 0 || dstAllocCount > 0 || dstTitleCount > 0 {
 		return nil, errors.New("destination token already has invoice state; refusing to overwrite")
 	}
 
-	if db.path != "" {
-		bk := db.path + ".pre-rekey-" + time.Now().UTC().Format("20060102-150405") + ".bak"
-		if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, bk); err != nil {
-			return nil, fmt.Errorf("pre-rekey backup failed (refusing to mutate): %w", err)
-		}
-		rep.BackupPath = bk
-	}
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
+	now := time.Now().Unix()
 	if hadWallet {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE wallets SET token = ?, updated_at = ? WHERE token = ?`,
-			newToken, time.Now().Unix(), oldToken)
+			newToken, now, oldToken)
 		if err != nil {
 			return nil, err
 		}
@@ -430,47 +429,19 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 			return nil, fmt.Errorf("wallets rekey expected 1 row, got %d", rep.WalletRowsAffected)
 		}
 	}
-	res, err := tx.ExecContext(ctx,
-		`UPDATE wallet_tx SET token = ? WHERE token = ?`, newToken, oldToken)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE workspace_members SET updated_at = ? WHERE token = ?`, now, oldToken); err != nil {
 		return nil, err
-	}
-	rep.WalletTxRowsAffected, _ = res.RowsAffected()
-	if rep.WalletTxRowsAffected != oldTxCount {
-		return nil, fmt.Errorf("wallet_tx conservation broken: pre=%d post=%d", oldTxCount, rep.WalletTxRowsAffected)
-	}
-	res, err = tx.ExecContext(ctx,
-		`UPDATE alipay_orders SET token = ? WHERE token = ?`, newToken, oldToken)
-	if err != nil {
-		return nil, err
-	}
-	rep.OrdersRowsAffected, _ = res.RowsAffected()
-	if rep.OrdersRowsAffected != oldOrderCount {
-		return nil, fmt.Errorf("alipay_orders conservation broken: pre=%d post=%d", oldOrderCount, rep.OrdersRowsAffected)
-	}
-	res, err = tx.ExecContext(ctx,
-		`UPDATE workspace_members SET token = ?, updated_at = ? WHERE token = ?`, newToken, time.Now().Unix(), oldToken)
-	if err != nil {
-		return nil, err
-	}
-	rep.MemberRowsAffected, _ = res.RowsAffected()
-	if rep.MemberRowsAffected != oldMemberCount {
-		return nil, fmt.Errorf("workspace_members conservation broken: pre=%d post=%d", oldMemberCount, rep.MemberRowsAffected)
-	}
-	res, err = tx.ExecContext(ctx,
-		`UPDATE workspace_tx SET token = ? WHERE token = ?`, newToken, oldToken)
-	if err != nil {
-		return nil, err
-	}
-	rep.WorkspaceTxRowsAffected, _ = res.RowsAffected()
-	if rep.WorkspaceTxRowsAffected != oldWsTxCount {
-		return nil, fmt.Errorf("workspace_tx conservation broken: pre=%d post=%d", oldWsTxCount, rep.WorkspaceTxRowsAffected)
 	}
 	for _, u := range []struct {
 		table string
 		pre   int64
 		into  *int64
 	}{
+		{"wallet_tx", oldTxCount, &rep.WalletTxRowsAffected},
+		{"alipay_orders", oldOrderCount, &rep.OrdersRowsAffected},
+		{"workspace_members", oldMemberCount, &rep.MemberRowsAffected},
+		{"workspace_tx", oldWsTxCount, &rep.WorkspaceTxRowsAffected},
 		{"invoices", oldInvoiceCount, &rep.InvoiceRowsAffected},
 		{"invoice_allocations", oldAllocCount, &rep.InvoiceAllocRowsAffected},
 		{"invoice_titles", oldTitleCount, &rep.InvoiceTitleRowsAffected},
@@ -485,21 +456,25 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 			return nil, fmt.Errorf("%s conservation broken: pre=%d post=%d", u.table, u.pre, *u.into)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
 
 	if hadWallet {
-		if err := db.QueryRowContext(ctx,
+		// Read the moved balance back while the lock is still held, so the
+		// comparison cannot pick up a charge that settled against the new
+		// token the instant the rotation became visible.
+		if err := tx.QueryRowContext(ctx,
 			`SELECT balance_usd FROM wallets WHERE token = ?`, newToken).Scan(&rep.NewBalanceUSDAfterMove); err != nil {
-			return rep, fmt.Errorf("post-commit balance readback failed: %w", err)
+			return nil, fmt.Errorf("balance readback failed: %w", err)
 		}
 		// Both reads pull the same scalar untouched by arithmetic; exact
 		// equality is the right check here.
 		if rep.NewBalanceUSDAfterMove != rep.OldBalanceUSD {
-			return rep, fmt.Errorf("post-commit balance mismatch: pre=%.10f post=%.10f (backup at %s)",
-				rep.OldBalanceUSD, rep.NewBalanceUSDAfterMove, rep.BackupPath)
+			return nil, fmt.Errorf("balance mismatch: pre=%.10f post=%.10f",
+				rep.OldBalanceUSD, rep.NewBalanceUSDAfterMove)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return rep, nil
 }
