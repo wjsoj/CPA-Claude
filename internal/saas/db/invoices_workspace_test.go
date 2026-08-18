@@ -554,3 +554,91 @@ func TestListInvoicesByTokenPersonalAllocationIsFaceValue(t *testing.T) {
 		t.Fatalf("personal row = %+v, want 1 personal row allocated 20", rows)
 	}
 }
+
+// TestRekeyTokenMovesInvoiceState pins the invoice trio to the rekey.
+//
+// The quota is computed as paid(alipay_orders) − pending − issued(invoices +
+// invoice_allocations). alipay_orders always moved with the token, so leaving
+// the invoice rows behind did not merely lose history — it handed the rotated
+// token its whole paid amount back as fresh quota, letting everything already
+// invoiced be invoiced a second time.
+func TestRekeyTokenMovesInvoiceState(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+	const admin = "sk-rekey-inv-admin-xxxxxxxx"
+	const member = "sk-rekey-inv-member-yyyyyyy"
+	const newTok = "sk-rekey-inv-member-new-zzzz"
+
+	// Member has 100 paid: 40 goes to a personal invoice. The team invoice is
+	// sized to overflow the admin's own 10, so 20 of it lands on the member as
+	// an allocation row. 40 should remain invoiceable — before and after.
+	ws := seedInvoiceTeam(t, d, []string{admin, member}, []float64{10, 100})
+	if _, err := d.CreateInvoice(ctx, member, 40, testTitle(), "who@example.com"); err != nil {
+		t.Fatalf("CreateInvoice: %v", err)
+	}
+	createTeamInvoice(t, d, ws, admin, 30)
+	before := availCNY(t, d, member)
+
+	rep, err := d.RekeyToken(ctx, member, newTok)
+	if err != nil {
+		t.Fatalf("RekeyToken: %v", err)
+	}
+	if rep.InvoiceRowsAffected != 1 {
+		t.Fatalf("invoices moved = %d, want 1", rep.InvoiceRowsAffected)
+	}
+	if rep.InvoiceAllocRowsAffected != 1 {
+		t.Fatalf("invoice_allocations moved = %d, want 1", rep.InvoiceAllocRowsAffected)
+	}
+	// CreateInvoice books the header into the member's shortlist as a side
+	// effect; the team invoice's went to the filing admin instead.
+	if rep.InvoiceTitleRowsAffected != 1 {
+		t.Fatalf("invoice_titles moved = %d, want 1", rep.InvoiceTitleRowsAffected)
+	}
+
+	// The quota is carried over exactly, not reset to the paid total.
+	if after := availCNY(t, d, newTok); !approx(after, before) {
+		t.Fatalf("quota after rekey = %.2f, want %.2f (the pre-rekey figure)", after, before)
+	}
+	if got := availCNY(t, d, member); !approx(got, 0) {
+		t.Fatalf("old token still has %.2f of quota after rekey, want 0", got)
+	}
+
+	// History and the saved-title shortlist follow the token too.
+	invs, err := d.ListInvoicesByToken(ctx, newTok, 50)
+	if err != nil {
+		t.Fatalf("ListInvoicesByToken: %v", err)
+	}
+	if len(invs) != 2 {
+		t.Fatalf("new token sees %d invoices, want 2 (one personal, one team share)", len(invs))
+	}
+	titles, err := d.ListInvoiceTitles(ctx, newTok, "", 0)
+	if err != nil {
+		t.Fatalf("ListInvoiceTitles: %v", err)
+	}
+	if len(titles) == 0 {
+		t.Fatal("saved invoice titles did not follow the rotated token")
+	}
+}
+
+// A destination carrying invoice state is refused before anything is touched,
+// matching how an occupied wallet or workspace membership is handled — the
+// UNIQUE(token, name) on invoice_titles would otherwise surface as a
+// constraint error from inside the transaction.
+func TestRekeyTokenRefusesOccupiedInvoiceState(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+	const old = "sk-rekey-occupied-old-xxxxxx"
+	const dst = "sk-rekey-occupied-dst-yyyyyy"
+	seedPaidCNY(t, d, old, 100)
+	seedPaidCNY(t, d, dst, 50)
+	if _, err := d.CreateInvoice(ctx, dst, 10, testTitle(), "who@example.com"); err != nil {
+		t.Fatalf("CreateInvoice: %v", err)
+	}
+	if _, err := d.RekeyToken(ctx, old, dst); err == nil {
+		t.Fatal("rekey onto a token with existing invoices should be refused")
+	}
+	// Nothing moved: the source keeps its full quota.
+	if got := availCNY(t, d, old); !approx(got, 100) {
+		t.Fatalf("source quota = %.2f after a refused rekey, want 100", got)
+	}
+}

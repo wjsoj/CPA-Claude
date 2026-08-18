@@ -2179,9 +2179,11 @@ func (h *Handler) handleResetToken(c *gin.Context) {
 			})
 			return
 		}
-		log.Infof("admin: wallet rekey %s→%s ok: wallets=%d tx=%d orders=%d balance=$%.4f backup=%s",
+		log.Infof("admin: wallet rekey %s→%s ok: wallets=%d tx=%d orders=%d members=%d ws_tx=%d invoices=%d allocs=%d titles=%d balance=$%.4f backup=%s",
 			maskToken(tok), maskToken(newTok),
 			rep.WalletRowsAffected, rep.WalletTxRowsAffected, rep.OrdersRowsAffected,
+			rep.MemberRowsAffected, rep.WorkspaceTxRowsAffected,
+			rep.InvoiceRowsAffected, rep.InvoiceAllocRowsAffected, rep.InvoiceTitleRowsAffected,
 			rep.OldBalanceUSD, rep.BackupPath)
 	}
 

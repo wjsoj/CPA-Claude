@@ -286,20 +286,31 @@ func (db *DB) FleetTotals(ctx context.Context) (*FleetWalletTotals, error) {
 
 // RekeyTokenReport tells the caller exactly what was migrated.
 type RekeyTokenReport struct {
-	WalletRowsAffected      int64
-	WalletTxRowsAffected    int64
-	OrdersRowsAffected      int64
-	MemberRowsAffected      int64
-	WorkspaceTxRowsAffected int64
-	OldBalanceUSD           float64
-	NewBalanceUSDAfterMove  float64
-	BackupPath              string
+	WalletRowsAffected       int64
+	WalletTxRowsAffected     int64
+	OrdersRowsAffected       int64
+	MemberRowsAffected       int64
+	WorkspaceTxRowsAffected  int64
+	InvoiceRowsAffected      int64
+	InvoiceAllocRowsAffected int64
+	InvoiceTitleRowsAffected int64
+	OldBalanceUSD            float64
+	NewBalanceUSDAfterMove   float64
+	BackupPath               string
 }
 
 // RekeyToken migrates all wallet-side state from oldToken to newToken
 // inside a single transaction (the wallets row, all wallet_tx ledger
-// entries, and all alipay_orders). Used by admin token-reset to keep
+// entries, all alipay_orders, the workspace membership + pool ledger
+// attribution, and the invoice trio). Used by admin token-reset to keep
 // history attached to a rotated token.
+//
+// Every table keyed on the token has to move together, and the invoice
+// trio is the sharpest case: invoiceSummaryFor computes the remaining
+// quota as paid(alipay_orders) − pending − issued(invoices +
+// invoice_allocations). Moving the orders while leaving the invoices
+// behind hands the rotated token its full paid amount as fresh quota,
+// so everything already invoiced can be invoiced a second time.
 //
 // Safety invariants (this is production billing data):
 //
@@ -364,6 +375,34 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 	if dstMemberCount > 0 {
 		return nil, errors.New("destination token already belongs to a workspace; refusing to overwrite")
 	}
+	// Invoice state (requests, per-member allocations of team invoices, and
+	// the saved-title shortlist). The destination is a freshly minted token
+	// so none of these can collide, but invoice_titles' UNIQUE(token, name)
+	// and invoice_allocations' PK would turn a collision into a mid-
+	// transaction constraint error rather than the clean refusal the wallet
+	// and workspace checks above give.
+	var oldInvoiceCount, oldAllocCount, oldTitleCount int64
+	var dstInvoiceCount, dstAllocCount, dstTitleCount int64
+	for _, q := range []struct {
+		table string
+		token string
+		into  *int64
+	}{
+		{"invoices", oldToken, &oldInvoiceCount},
+		{"invoice_allocations", oldToken, &oldAllocCount},
+		{"invoice_titles", oldToken, &oldTitleCount},
+		{"invoices", newToken, &dstInvoiceCount},
+		{"invoice_allocations", newToken, &dstAllocCount},
+		{"invoice_titles", newToken, &dstTitleCount},
+	} {
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(1) FROM `+q.table+` WHERE token = ?`, q.token).Scan(q.into); err != nil {
+			return nil, err
+		}
+	}
+	if dstInvoiceCount > 0 || dstAllocCount > 0 || dstTitleCount > 0 {
+		return nil, errors.New("destination token already has invoice state; refusing to overwrite")
+	}
 
 	if db.path != "" {
 		bk := db.path + ".pre-rekey-" + time.Now().UTC().Format("20060102-150405") + ".bak"
@@ -426,6 +465,25 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 	rep.WorkspaceTxRowsAffected, _ = res.RowsAffected()
 	if rep.WorkspaceTxRowsAffected != oldWsTxCount {
 		return nil, fmt.Errorf("workspace_tx conservation broken: pre=%d post=%d", oldWsTxCount, rep.WorkspaceTxRowsAffected)
+	}
+	for _, u := range []struct {
+		table string
+		pre   int64
+		into  *int64
+	}{
+		{"invoices", oldInvoiceCount, &rep.InvoiceRowsAffected},
+		{"invoice_allocations", oldAllocCount, &rep.InvoiceAllocRowsAffected},
+		{"invoice_titles", oldTitleCount, &rep.InvoiceTitleRowsAffected},
+	} {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE `+u.table+` SET token = ? WHERE token = ?`, newToken, oldToken)
+		if err != nil {
+			return nil, err
+		}
+		*u.into, _ = res.RowsAffected()
+		if *u.into != u.pre {
+			return nil, fmt.Errorf("%s conservation broken: pre=%d post=%d", u.table, u.pre, *u.into)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
