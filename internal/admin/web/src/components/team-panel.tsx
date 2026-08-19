@@ -8,6 +8,9 @@ import {
   Wallet,
   FileText,
   Download,
+  ExternalLink,
+  Copy,
+  CheckCircle2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,8 +50,9 @@ import {
   type TeamLedgerRow,
   type TeamInvoice,
   type TeamInvoiceSummary,
+  type TeamTopupResp,
 } from "@/lib/team-api";
-import type { InvoiceTitle } from "@/lib/status-api";
+import { loadWalletOrder, type InvoiceTitle } from "@/lib/status-api";
 import {
   InvoiceTitleFields,
   LabeledInput,
@@ -185,6 +189,7 @@ export function TeamPanel({ token }: { token: string }) {
 function TopupRow({ token, onDone }: { token: string; onDone: () => void }) {
   const [amt, setAmt] = useState("");
   const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<TeamTopupResp | null>(null);
 
   const go = async () => {
     const usdVal = parseFloat(amt);
@@ -195,16 +200,8 @@ function TopupRow({ token, onDone }: { token: string; onDone: () => void }) {
     setBusy(true);
     try {
       const r = await teamTopup(token, usdVal);
-      const url = r.pay_url || r.img || r.qr_code;
-      if (url && /^https?:/.test(url)) {
-        window.open(url, "_blank", "noopener");
-        toast.success("已打开支付页，支付完成后点「刷新」更新池余额");
-      } else {
-        toast.success(`订单已创建：${r.out_trade_no}`);
-      }
+      setResult(r);
       setAmt("");
-      // Give the mock gateway (dev) a moment to auto-confirm, then refresh.
-      setTimeout(onDone, 2500);
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -229,7 +226,181 @@ function TopupRow({ token, onDone }: { token: string; onDone: () => void }) {
       <Button onClick={go} disabled={busy}>
         充值
       </Button>
+
+      <TeamTopupDialog
+        token={token}
+        result={result}
+        onClose={() => setResult(null)}
+        onSettled={onDone}
+      />
     </div>
+  );
+}
+
+/**
+ * Mirrors wallet-panel's TopupModal: same order shape from the same
+ * CreateTopup core, so the QR must be rendered the same way — an embedded
+ * `result.img`, not a bare window.open on `pay_url` (that URL is the
+ * Alipay-app-only "qr.alipay.com/bax…" link; opened in a desktop browser it
+ * shows the "use the Alipay app" stub, not a scannable code).
+ */
+function TeamTopupDialog({
+  token,
+  result,
+  onClose,
+  onSettled,
+}: {
+  token: string;
+  result: TeamTopupResp | null;
+  onClose: () => void;
+  onSettled: () => void;
+}) {
+  const [settled, setSettled] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setSettled(false);
+    setCopied(false);
+  }, [result?.out_trade_no]);
+
+  useEffect(() => {
+    if (!result || settled) return;
+    let cancelled = false;
+    const id = setInterval(async () => {
+      try {
+        const o = await loadWalletOrder(token, result.out_trade_no);
+        if (cancelled) return;
+        if (o.status === "paid") {
+          setSettled(true);
+          onSettled();
+          toast.success(`已到账 · +$${result.usd_credit.toFixed(2)} 入组共享池`);
+          setTimeout(() => {
+            if (!cancelled) onClose();
+          }, 1400);
+        } else if (o.status === "expired" || o.status === "failed") {
+          if (!cancelled) {
+            toast.error(`订单${o.status === "expired" ? "已过期" : "失败"}，请重新发起`);
+            onClose();
+          }
+        }
+      } catch {
+        // network blip — next tick retries
+      }
+    }, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [result, settled, token, onSettled, onClose]);
+
+  const copyLink = async () => {
+    const url = result?.pay_url || result?.qr_code || "";
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
+  return (
+    <Dialog open={!!result} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>扫码支付</DialogTitle>
+        </DialogHeader>
+        {result && (
+          <div className="space-y-4">
+            <div className="rounded-md border border-border/60 bg-muted/30 p-4">
+              <div className="font-mono text-xs text-muted-foreground">
+                订单 {result.out_trade_no}
+              </div>
+              <div className="mt-1 flex items-baseline justify-between">
+                <span className="font-mono text-2xl tabular">
+                  +${result.usd_credit.toFixed(2)}
+                </span>
+                <span className="font-mono text-sm text-muted-foreground">
+                  支付 {fmtCNY(result.cny_amount)}
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                入组共享池，不计入你的个人余额
+              </div>
+            </div>
+
+            {result.img ? (
+              <div className="flex flex-col items-center gap-3">
+                <img
+                  src={result.img}
+                  alt="payment QR"
+                  className="rounded-md border border-border bg-white p-2"
+                  style={{ width: 240, height: 240 }}
+                />
+                <div className="text-center font-mono text-[11px] text-muted-foreground">
+                  使用支付宝扫码支付 {fmtCNY(result.cny_amount)}
+                </div>
+                {result.pay_url && (
+                  <a
+                    href={result.pay_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    或在支付宝 App 中打开
+                  </a>
+                )}
+              </div>
+            ) : result.pay_url ? (
+              <a
+                href={result.pay_url}
+                target="_blank"
+                rel="noreferrer"
+                className="block w-full rounded-md bg-primary px-4 py-2.5 text-center font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                <ExternalLink className="mr-2 inline h-4 w-4" />
+                在支付宝 App 中打开
+              </a>
+            ) : result.qr_code ? (
+              <div className="break-all rounded-md border border-border/60 bg-muted/30 px-2 py-3 text-center font-mono text-xs">
+                {result.qr_code}
+              </div>
+            ) : null}
+
+            <div className="flex items-center justify-between gap-2 pt-1">
+              {settled ? (
+                <span className="inline-flex items-center gap-1.5 font-mono text-sm text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 className="h-4 w-4" /> 已到账
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
+                  <span className="relative inline-flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
+                  </span>
+                  等待支付…
+                </span>
+              )}
+              {(result.pay_url || result.qr_code) && !settled && (
+                <Button variant="outline" size="sm" onClick={copyLink} className="gap-1.5">
+                  {copied ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                  ) : (
+                    <Copy className="h-4 w-4" />
+                  )}
+                  {copied ? "已复制" : "复制链接"}
+                </Button>
+              )}
+            </div>
+            <p className="text-center text-[11px] text-muted-foreground">
+              请在 15 分钟内完成支付，订单会自动过期；支付到账后本弹窗会自动关闭。
+            </p>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
