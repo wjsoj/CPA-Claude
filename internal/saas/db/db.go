@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 
+	// Registers the cgo-free "sqlite" driver used by every Open below.
 	_ "modernc.org/sqlite"
 )
 

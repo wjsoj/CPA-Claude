@@ -137,6 +137,7 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 		inflightKey := auth.NormalizeProvider(provider) + "|" + clientToken
 		cur, releaseSlot := s.inflight.Begin(inflightKey)
 		defer releaseSlot()
+		//nolint:gosec // G115: maxConc is an operator-set concurrency limit (small positive int), not attacker-controlled.
 		if cur > int32(maxConc) {
 			c.Header("Retry-After", "5")
 			c.AbortWithStatusJSON(429, gin.H{"error": "too many concurrent requests", "max_concurrent": maxConc})

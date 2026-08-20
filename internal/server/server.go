@@ -217,6 +217,10 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 			http: &http.Server{
 				Addr:    fmt.Sprintf("%s:%d", cfg.Endpoints.Claude.Host, cfg.Endpoints.Claude.Port),
 				Handler: eng,
+				// Bounds only the header read, never the body or a live stream,
+				// so a long-running proxied turn is unaffected. Without it a
+				// half-open connection can hold a slot indefinitely (Slowloris).
+				ReadHeaderTimeout: 10 * time.Second,
 			},
 		})
 	}
@@ -227,8 +231,9 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 			provider: auth.ProviderOpenAI,
 			primary:  primary == "codex",
 			http: &http.Server{
-				Addr:    fmt.Sprintf("%s:%d", cfg.Endpoints.Codex.Host, cfg.Endpoints.Codex.Port),
-				Handler: eng,
+				Addr:              fmt.Sprintf("%s:%d", cfg.Endpoints.Codex.Host, cfg.Endpoints.Codex.Port),
+				Handler:           eng,
+				ReadHeaderTimeout: 10 * time.Second,
 			},
 		})
 	}
@@ -507,7 +512,7 @@ func (s *Server) handleStatus(c *gin.Context) {
 		QuotaResetAt  time.Time `json:"quota_reset_at,omitempty"`
 		ExpiresAt     time.Time `json:"expires_at,omitempty"`
 	}
-	var rows []row
+	rows := make([]row, 0, len(s.pool.Status()))
 	for _, st := range s.pool.Status() {
 		kind := "oauth"
 		if st.Auth.Kind == auth.KindAPIKey {

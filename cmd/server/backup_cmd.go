@@ -202,7 +202,9 @@ func backupS3(cfg *config.Config) (backup.S3Config, error) {
 // (tokens.json) log a warning.
 func buildManifest(ctx context.Context, cfg *config.Config, configPath, tmpDir string) ([]backup.FileEntry, error) {
 	var entries []backup.FileEntry
-	add := func(name, src string, mode os.FileMode) {
+	// mode is uniform today but stays a parameter so each entry declares its
+	// own permissions at the call site rather than inheriting a hidden default.
+	add := func(name, src string, mode os.FileMode) { //nolint:unparam // mode is part of the manifest's vocabulary
 		if fileExists(src) {
 			entries = append(entries, backup.FileEntry{Name: name, SourcePath: src, Mode: mode})
 		}

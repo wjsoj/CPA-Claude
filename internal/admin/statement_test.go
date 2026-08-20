@@ -169,10 +169,10 @@ func TestStatementRangeForTargetWalksNewestFirst(t *testing.T) {
 	// rows for our token, interleaved with a foreign token's row that must
 	// be skipped entirely.
 	entries := []requestlog.Record{
-		{TS: now.Add(-1 * time.Hour), ClientToken: masked, BilledUSD: 1,},
-		{TS: now.Add(-2 * time.Hour), ClientToken: "sk-oth…9999", BilledUSD: 100,},
-		{TS: now.Add(-3 * time.Hour), ClientToken: masked, BilledUSD: 1,},
-		{TS: now.Add(-4 * time.Hour), ClientToken: masked, BilledUSD: 1,},
+		{TS: now.Add(-1 * time.Hour), ClientToken: masked, BilledUSD: 1},
+		{TS: now.Add(-2 * time.Hour), ClientToken: "sk-oth…9999", BilledUSD: 100},
+		{TS: now.Add(-3 * time.Hour), ClientToken: masked, BilledUSD: 1},
+		{TS: now.Add(-4 * time.Hour), ClientToken: masked, BilledUSD: 1},
 	}
 	// ¥10 needs two of our ¥7 rows (7, then 14 >= 10) — the walk must stop at
 	// the second matching row, not consume the third.
@@ -199,7 +199,7 @@ func TestStatementRangeForTargetUnreachable(t *testing.T) {
 	masked := maskToken(testToken)
 	now := time.Now()
 	entries := []requestlog.Record{
-		{TS: now.Add(-time.Hour), ClientToken: masked, BilledUSD: 1,},
+		{TS: now.Add(-time.Hour), ClientToken: masked, BilledUSD: 1},
 	}
 	_, _, achieved, err := statementRangeForTarget(entries, masked, 100, 7, now)
 	if !errors.Is(err, errStatementTargetUnreachable) {

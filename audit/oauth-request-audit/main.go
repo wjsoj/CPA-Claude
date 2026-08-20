@@ -52,7 +52,7 @@ func main() {
 	if err := os.MkdirAll(filepath.Dir(*out), 0755); err != nil {
 		fatal(err)
 	}
-	if err := os.WriteFile(*out, []byte(report), 0644); err != nil {
+	if err := os.WriteFile(*out, []byte(report), 0o600); err != nil {
 		fatal(err)
 	}
 	fmt.Printf("wrote %s\n", *out)
@@ -157,7 +157,7 @@ func writeGoldenFlow(b *strings.Builder, rows []row) {
 	for _, r := range rows {
 		phase := phaseGuess(r)
 		shape := bodyShape(r)
-		b.WriteString(fmt.Sprintf("| %d | %s | `%s` | %s | %s |\n", r.Idx, r.Method, trimURL(r.URL), phase, shape))
+		fmt.Fprintf(b, "| %d | %s | `%s` | %s | %s |\n", r.Idx, r.Method, trimURL(r.URL), phase, shape)
 	}
 	b.WriteString("\n")
 }
@@ -170,7 +170,7 @@ func writeFieldMatrix(b *strings.Builder, rows []row) {
 		if !ok {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("### Row %02d `%s %s`\n\n", r.Idx, r.Method, trimURL(r.URL)))
+		fmt.Fprintf(b, "### Row %02d `%s %s`\n\n", r.Idx, r.Method, trimURL(r.URL))
 		b.WriteString("- Headers: " + headerSummary(r) + "\n")
 		b.WriteString("- Body: " + bodySummary(r) + "\n")
 		if uid := metadataUserID(r); uid != "" {
@@ -190,18 +190,18 @@ func writeSourceSignals(b *strings.Builder, src map[string]string) {
 
 	b.WriteString("| field group | implementation source | source category |\n")
 	b.WriteString("|---|---|---|\n")
-	b.WriteString(fmt.Sprintf("| Claude CLI version / UA / Stainless headers / beta list | `%s` | hard-coded constants |\n", constPresence(fp, "CLICurrentVersion")))
-	b.WriteString(fmt.Sprintf("| `/v1/messages` OAuth auth + Anthropic headers | `%s` | generated defaults plus client header passthrough |\n", presence(proxy, "applyAnthropicHeaders")))
-	b.WriteString(fmt.Sprintf("| billing header `cc_version` / `cch` | `%s` | derived from request body with local algorithm |\n", presence(mimicry, "signBillingHeaderCCH")))
-	b.WriteString(fmt.Sprintf("| `metadata.user_id.device_id` | `%s` | derived locally from account key, not read from a real machine-id store |\n", presence(mimicry, "DeviceIDFor")))
-	b.WriteString(fmt.Sprintf("| bootstrap sidecars | `%s` | generated async from a hard-coded schedule |\n", presence(sidecar, "realBootstrapSteps")))
-	b.WriteString(fmt.Sprintf("| GrowthBook account attributes | `%s` | mixed: OAuth file values plus hard-coded plan/tier/platform |\n", presence(sidecar, "buildGrowthBookBody")))
-	b.WriteString(fmt.Sprintf("| event_logging / Datadog bodies | `%s` | low-fidelity generated heartbeat |\n", presence(sidecar, "buildHeartbeatBody")))
-	b.WriteString(fmt.Sprintf("| OAuth account UUID persistence | `%s` | parsed from credential JSON when present |\n", presence(oauth, "account_uuid")))
+	fmt.Fprintf(b, "| Claude CLI version / UA / Stainless headers / beta list | `%s` | hard-coded constants |\n", constPresence(fp, "CLICurrentVersion"))
+	fmt.Fprintf(b, "| `/v1/messages` OAuth auth + Anthropic headers | `%s` | generated defaults plus client header passthrough |\n", presence(proxy, "applyAnthropicHeaders"))
+	fmt.Fprintf(b, "| billing header `cc_version` / `cch` | `%s` | derived from request body with local algorithm |\n", presence(mimicry, "signBillingHeaderCCH"))
+	fmt.Fprintf(b, "| `metadata.user_id.device_id` | `%s` | derived locally from account key, not read from a real machine-id store |\n", presence(mimicry, "DeviceIDFor"))
+	fmt.Fprintf(b, "| bootstrap sidecars | `%s` | generated async from a hard-coded schedule |\n", presence(sidecar, "realBootstrapSteps"))
+	fmt.Fprintf(b, "| GrowthBook account attributes | `%s` | mixed: OAuth file values plus hard-coded plan/tier/platform |\n", presence(sidecar, "buildGrowthBookBody"))
+	fmt.Fprintf(b, "| event_logging / Datadog bodies | `%s` | low-fidelity generated heartbeat |\n", presence(sidecar, "buildHeartbeatBody"))
+	fmt.Fprintf(b, "| OAuth account UUID persistence | `%s` | parsed from credential JSON when present |\n", presence(oauth, "account_uuid"))
 	b.WriteString("\n")
 }
 
-func writeFindings(b *strings.Builder, rows []row, src map[string]string) {
+func writeFindings(b *strings.Builder, _ []row, _ map[string]string) {
 	findings := []finding{
 		{
 			Area:     "Flow ordering",
@@ -237,7 +237,7 @@ func writeFindings(b *strings.Builder, rows []row, src map[string]string) {
 
 	b.WriteString("## Findings\n\n")
 	for _, f := range findings {
-		b.WriteString(fmt.Sprintf("### %s (%s)\n\n", f.Area, f.Severity))
+		fmt.Fprintf(b, "### %s (%s)\n\n", f.Area, f.Severity)
 		b.WriteString("- Evidence: " + f.Evidence + "\n")
 		b.WriteString("- Audit interpretation: " + f.Why + "\n\n")
 	}

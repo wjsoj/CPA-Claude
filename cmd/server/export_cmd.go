@@ -67,7 +67,10 @@ func runExportRequestsCmd(args []string) {
 		f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "export-requests: %v\n", err)
-			os.Exit(1)
+			// The pending `defer st.Close()` is skipped, which is fine here:
+			// st is a READ-ONLY index handle (OpenStoreForRead), so there is no
+			// WAL to flush and the fd dies with the process.
+			os.Exit(1) //nolint:gocritic // exitAfterDefer: read-only handle, fatal CLI path
 		}
 		defer f.Close()
 		w = f

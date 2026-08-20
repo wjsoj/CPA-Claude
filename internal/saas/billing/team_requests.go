@@ -216,7 +216,10 @@ func (t *TeamHandler) topSpenders(ms []*db.WorkspaceMember, fromDay, toDay strin
 		for _, m := range ms {
 			spend[m.Token] = res.ByClient[maskToken(m.Token)].BilledUSD
 		}
-		ranked := append(ms[:0:0], ms...)
+		// append(s[:0:0], s...) is the clone idiom: a zero-capacity reslice
+		// forces a fresh backing array so the sort below cannot reorder the
+		// caller's slice. gocritic reads it as a misplaced append.
+		ranked := append(ms[:0:0], ms...) //nolint:gocritic // appendAssign: deliberate slice clone
 		sort.SliceStable(ranked, func(i, j int) bool {
 			return spend[ranked[i].Token] > spend[ranked[j].Token]
 		})

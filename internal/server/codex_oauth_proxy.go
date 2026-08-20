@@ -169,7 +169,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 			return true, false
 		}
 		writeResponseHeaders(c, resp)
-		c.Writer.Write(errBody)
+		_, _ = c.Writer.Write(errBody)
 		s.emitLog(requestlog.Record{
 			Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
 			AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
@@ -187,7 +187,8 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// the wire, yet logging it as a success with an error attached hides it
 	// from every "client canceled" view.
 	logStatus := resp.StatusCode
-	if isCompactPath {
+	switch {
+	case isCompactPath:
 		// /codex/responses/compact returns a single JSON object — no SSE.
 		// Read it once, extract usage, pass through verbatim. Matches sub2api's
 		// handleNonStreamingResponsePassthrough behavior on this path.
@@ -216,8 +217,8 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		downstream.CopyResponseHeaders(c.Writer.Header(), resp.Header, time.Now())
 		c.Writer.Header().Set("Content-Type", "application/json")
 		c.Writer.WriteHeader(resp.StatusCode)
-		c.Writer.Write(payload)
-	} else if stream {
+		_, _ = c.Writer.Write(payload)
+	case stream:
 		// Streaming client: passthrough SSE verbatim (with keepalive + terminal
 		// tracking). Headers are committed lazily inside the relay, so a break
 		// before the first byte reaches the client is recoverable.
@@ -295,10 +296,21 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 					a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond), res.err)
 			}
 		}
-	} else {
+	default:
 		// Non-streaming client: aggregate SSE into a single response object
 		// (mirrors CLIProxyAPI's CodexExecutor.Execute aggregation).
-		payload, aerr := aggregateCodexResponseStream(resp.Body, &counts)
+		payload, aggShed, aerr := aggregateCodexResponseStream(resp.Body, &counts)
+		if aggShed != "" {
+			// Upstream refused the turn for capacity/quota. Nothing was written,
+			// so this is a clean failover — and naming it separately keeps the
+			// operator from reading a capacity shed as a broken relay. Health is
+			// deliberately untouched: capacity is a property of the account and
+			// the moment, and cooling it would take its other models offline too.
+			_ = resp.Body.Close()
+			log.Warnf("codex oauth: %s shed the non-streaming request (attempt %d, %s): %s — retrying on another credential",
+				a.ID, attempts, time.Since(start).Round(time.Millisecond), aggShed)
+			return true, false
+		}
 		if aerr != nil {
 			_ = resp.Body.Close()
 			// The aggregate buffers the whole response before writing anything,
@@ -338,7 +350,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		downstream.CopyResponseHeaders(c.Writer.Header(), resp.Header, time.Now())
 		c.Writer.Header().Set("Content-Type", "application/json")
 		c.Writer.WriteHeader(http.StatusOK)
-		c.Writer.Write(payload)
+		_, _ = c.Writer.Write(payload)
 	}
 	_ = resp.Body.Close()
 
@@ -387,7 +399,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 // the response.output field if it arrived empty. Output shape matches
 // OpenAI's /v1/responses non-streaming reply: the bare `response` object
 // (id, object, output, usage, …) — not the SSE event envelope.
-func aggregateCodexResponseStream(r io.Reader, counts *usage.Counts) ([]byte, error) {
+func aggregateCodexResponseStream(r io.Reader, counts *usage.Counts) (out []byte, shed string, err error) {
 	reader := newLineReader(r)
 	var byIndex []codexOutputSlot
 	var fallback []json.RawMessage
@@ -399,6 +411,19 @@ func aggregateCodexResponseStream(r io.Reader, counts *usage.Counts) ([]byte, er
 			if bytes.HasPrefix(trim, []byte("data:")) {
 				payload := bytes.TrimSpace(trim[5:])
 				if len(payload) > 0 && payload[0] == '{' {
+					// A non-streaming turn is shed exactly like a streaming one
+					// — an error frame inside an otherwise-200 stream. Reading
+					// on would reach EOF and report a truncation, which the
+					// caller does retry, but under a name that blames the wire
+					// rather than upstream capacity; worse, a relay that sends
+					// the error frame and then response.completed would hand
+					// back a "successful" payload carrying an error. Nothing has
+					// been written downstream here (the response is assembled
+					// first, sent second), so report the shed and let the caller
+					// fail over immediately.
+					if codexerr.Classify(payload) == codexerr.ClassRetryable {
+						return nil, truncate(payload, 200), nil
+					}
 					var ev struct {
 						Type        string          `json:"type"`
 						Item        json.RawMessage `json:"item"`
@@ -417,17 +442,18 @@ func aggregateCodexResponseStream(r io.Reader, counts *usage.Counts) ([]byte, er
 							}
 						case "response.completed":
 							if len(ev.Response) == 0 {
-								return nil, errors.New("response.completed missing response field")
+								return nil, "", errors.New("response.completed missing response field")
 							}
 							counts.Add(extractCodexBackendUsageFromJSON(payload))
-							return patchResponseOutput(ev.Response, byIndex, fallback)
+							patched, perr := patchResponseOutput(ev.Response, byIndex, fallback)
+							return patched, "", perr
 						}
 					}
 				}
 			}
 		}
 		if rerr != nil {
-			return nil, fmt.Errorf("stream closed before response.completed: %w", rerr)
+			return nil, "", fmt.Errorf("stream closed before response.completed: %w", rerr)
 		}
 	}
 }
@@ -488,6 +514,21 @@ func codexTerminalEvent(payload []byte) bool {
 	return false
 }
 
+// codexPreambleEvent reports whether a Codex SSE payload is one of the
+// content-free events upstream always opens with. They carry no model output,
+// so holding them back costs the client nothing — and it keeps the response
+// uncommitted long enough for a capacity shed to be withheld and failed over
+// instead of being forwarded as an error the user has to see.
+func codexPreambleEvent(payload []byte) bool {
+	var ev struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(payload, &ev) != nil {
+		return false
+	}
+	return ev.Type == "response.created" || ev.Type == "response.in_progress"
+}
+
 // streamSSECodexBackend is the Codex backend SSE passthrough. The format
 // differs from OpenAI's API-key response: events carry JSON payloads
 // structured as `response.completed` / `response.output_item.done` etc.
@@ -532,6 +573,23 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 	// to withhold, so an event line is held until its data line is classified
 	// and then emitted together with it.
 	var held []byte
+	// preamble buffers the content-free opening events (response.created,
+	// response.in_progress) until the stream reveals what it is.
+	//
+	// Without this the withhold above never fires in practice: upstream always
+	// opens with response.created, forwarding it commits the response, and the
+	// shed frame that arrives a second later is then stuck on the demote path.
+	// The sibling fork measured exactly that — after shipping the withhold it
+	// triggered zero times, while 52 sheds in the same window all took the
+	// demote branch; adding this buffer turned them into silent failovers.
+	//
+	// The buffer is released the moment any other event arrives, so it holds
+	// only for the gap between response.created and the first real event. The
+	// cost is that Relay's keepalive does not start until the first byte, so
+	// that gap runs unprotected; it is bounded by upstream sending literally
+	// anything else, and a shed — the case this exists for — lands at a median
+	// of 3.3s.
+	var preamble []byte
 	next := func() (out []byte, terminal bool, err error) {
 		for {
 			line, rerr := reader.readLine()
@@ -559,6 +617,7 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 								shedding = true
 								shed = truncate(payload, 200)
 								held = nil
+								preamble = nil
 								line = nil
 							} else if demoted, ok := codexerr.DemoteCapacityCode(payload); ok {
 								// Output already started, so the client must be
@@ -595,6 +654,19 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 							terminal = true
 						}
 
+						// Buffer a content-free opener instead of emitting it,
+						// so it does not count as output and foreclose failover.
+						// Anything else falls through and flushes the buffer.
+						if !sentAny && !shedding && codexPreambleEvent(payload) {
+							if scrubbed, keep := downstream.ScrubCodexSSELine(line); keep {
+								preamble = append(preamble, held...)
+								preamble = append(preamble, scrubbed...)
+							}
+							held = nil
+							line = nil
+							continue
+						}
+
 						// Withhold the pool's state, LAST — usage extraction,
 						// error classification and terminal detection above all
 						// read `payload` (what upstream said). This is the SSE
@@ -618,16 +690,38 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 				terminal = false
 			}
 
+			// The blank line that closes an SSE event belongs to the event
+			// before it, so while an opener is buffered its terminator has to be
+			// buffered too. Left alone it matches none of the cases above, falls
+			// straight through to the emit switch as a line of its own, and
+			// there it both flushes the buffer early and marks the stream as
+			// having produced output — which is exactly what forecloses the
+			// failover this buffer exists to preserve.
+			if !sentAny && !shedding && len(preamble) > 0 && len(line) > 0 && len(bytes.TrimSpace(line)) == 0 {
+				preamble = append(preamble, line...)
+				continue
+			}
+
 			// Emit the held event line together with the line that resolved it.
-			if len(line) > 0 && len(held) > 0 {
+			switch {
+			case len(line) > 0 && len(held) > 0:
 				out = append(append(make([]byte, 0, len(held)+len(line)), held...), line...)
 				held = nil
-			} else if len(line) > 0 {
+			case len(line) > 0:
 				out = line
-			} else if rerr != nil && len(held) > 0 && !shedding {
+			case rerr != nil && len(held) > 0 && !shedding:
 				// Stream ended with an unresolved event line — release it so
 				// nothing is silently dropped.
 				out, held = held, nil
+			}
+
+			// Flush the buffered opener ahead of whatever released it, so the
+			// client still receives the stream in upstream's original order. On
+			// a clean EOF with nothing but a preamble, release it too rather
+			// than swallowing the whole response.
+			if len(preamble) > 0 && !shedding && (len(out) > 0 || rerr != nil) {
+				out = append(append(make([]byte, 0, len(preamble)+len(out)), preamble...), out...)
+				preamble = nil
 			}
 
 			if len(out) > 0 {

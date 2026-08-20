@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 	// used in Anthropic usage proxy below
 
 	"github.com/gin-gonic/gin"
@@ -135,6 +136,7 @@ type byAuthCacheEntry struct {
 
 const lifetimeCacheTTL = 15 * time.Second
 const requestsCacheTTL = 15 * time.Second
+
 // requestsCacheMax bounds the shared query cache. It was 16 back when the
 // cache held a handful of fleet-wide filters; entries are now keyed per client
 // token, so the live set scales with how many people are looking at their own
@@ -1160,7 +1162,7 @@ func (h *Handler) handleUpload(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	h.pool.AddOAuth(a)
+	_ = h.pool.AddOAuth(a)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID})
 }
 
@@ -1226,7 +1228,7 @@ func (h *Handler) handleOAuthFinish(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	h.pool.AddOAuth(a)
+	_ = h.pool.AddOAuth(a)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID, "email": a.Email})
 }
 
@@ -1265,7 +1267,7 @@ func (h *Handler) handleOAuthSessionCookie(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	h.pool.AddOAuth(a)
+	_ = h.pool.AddOAuth(a)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": a.ID, "email": a.Email})
 }
 
@@ -1550,7 +1552,7 @@ func (h *Handler) handleRequestsHourly(c *gin.Context) {
 	}
 	hours := 24
 	if v := strings.TrimSpace(c.Query("hours")); v != "" {
-		fmt.Sscanf(v, "%d", &hours)
+		_, _ = fmt.Sscanf(v, "%d", &hours)
 		if hours < 1 {
 			hours = 1
 		}
@@ -1618,13 +1620,13 @@ func (h *Handler) handleRequestsQuery(c *gin.Context) {
 	}
 	applyDateBounds(&f, c.Query("from"), c.Query("to"))
 	if v := c.Query("limit"); v != "" {
-		fmt.Sscanf(v, "%d", &f.Limit)
+		_, _ = fmt.Sscanf(v, "%d", &f.Limit)
 	}
 	if v := c.Query("offset"); v != "" {
-		fmt.Sscanf(v, "%d", &f.Offset)
+		_, _ = fmt.Sscanf(v, "%d", &f.Offset)
 	}
 	if v := c.Query("status"); v != "" {
-		fmt.Sscanf(v, "%d", &f.Status)
+		_, _ = fmt.Sscanf(v, "%d", &f.Status)
 	}
 	res, err := h.cachedQuery(f)
 	if err != nil {

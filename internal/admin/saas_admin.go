@@ -330,7 +330,7 @@ func (h *Handler) handleCreateWorkspace(c *gin.Context) {
 		// Roll back the just-created (empty) workspace so a failed admin
 		// assignment doesn't leave an orphan group.
 		_ = h.wallets.UpdateWorkspace(c.Request.Context(), ws.ID, nil, ptrBool(true))
-		if err == saasdb.ErrMemberExists {
+		if errors.Is(err, saasdb.ErrMemberExists) {
 			c.JSON(http.StatusConflict, gin.H{"error": "that token already belongs to a workspace"})
 			return
 		}

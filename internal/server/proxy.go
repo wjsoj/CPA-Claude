@@ -263,6 +263,7 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 		inflightKey := auth.NormalizeProvider(provider) + "|" + clientToken
 		cur, releaseSlot := s.inflight.Begin(inflightKey)
 		defer releaseSlot()
+		//nolint:gosec // G115: maxConc is an operator-set concurrency limit (small positive int), not attacker-controlled.
 		if cur > int32(maxConc) {
 			c.Header("Retry-After", "5")
 			c.AbortWithStatusJSON(429, gin.H{
@@ -1066,7 +1067,7 @@ func (s *Server) doForward(c *gin.Context, a *auth.Auth, path string, body []byt
 		writeResponseHeaders(c, resp)
 		// A forwarded upstream error still carries the request_id of OUR call.
 		scrubbedErr, _ := downstream.ScrubErrorPayload(errBody)
-		c.Writer.Write(scrubbedErr)
+		_, _ = c.Writer.Write(scrubbedErr)
 		return false, true, nil
 	}
 
@@ -1151,7 +1152,7 @@ recoveredFromSignature:
 		if rewriteClientModel != "" {
 			respBody = rewriteResponseModel(respBody, rewriteClientModel)
 		}
-		c.Writer.Write(respBody)
+		_, _ = c.Writer.Write(respBody)
 		counts.Add(extractUsageFromJSON(respBody, &sub))
 		if isErr, detail := bodyLooksLikeAPIError(respBody); isErr {
 			outcome.errorPayload = true
@@ -1530,7 +1531,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 		// are. errSnippet keeps the unscrubbed text — it goes to our log, which
 		// is exactly where an operator needs the upstream id to trace a failure.
 		scrubbedErr, _ := downstream.ScrubErrorPayload(errBody)
-		c.Writer.Write(scrubbedErr)
+		_, _ = c.Writer.Write(scrubbedErr)
 		errSnippet = truncate(errBody, 500)
 		log.Warnf("proxy(apikey): %s returned %d — body=%s", a.ID, resp.StatusCode, errSnippet)
 	} else {
@@ -1570,7 +1571,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 			if rewriteClientModel != "" {
 				respBody = rewriteResponseModel(respBody, rewriteClientModel)
 			}
-			c.Writer.Write(respBody)
+			_, _ = c.Writer.Write(respBody)
 			counts.Add(extractUsageFromJSON(respBody, &sub))
 			if isErr, detail := bodyLooksLikeAPIError(respBody); isErr {
 				outcome.errorPayload = true
@@ -1971,7 +1972,7 @@ func apiKeyPriceOverride(a *auth.Auth) float64 {
 // advisor iterations. Auth-side load tracking only applies to successful
 // sub-calls — a failed parent rarely has billable advisor activity, and
 // double-counting would distort WeightedTotal-driven load balancing.
-func (s *Server) recordSubUsage(a *auth.Auth, authKind, clientToken, clientName, parentModel, path string, status int, sub advisor.SubUsage) float64 {
+func (s *Server) recordSubUsage(a *auth.Auth, authKind, clientToken, clientName, _, path string, status int, sub advisor.SubUsage) float64 {
 	if status >= 400 || sub.IsEmpty() {
 		return 0
 	}
@@ -2219,9 +2220,9 @@ func parseUnixSecondsHeader(v string) (time.Time, bool) {
 // already in the future (past stamps are a separate signal — see
 // parseUnifiedRatelimitRejected).
 func clampReset(t time.Time) time.Time {
-	max := time.Now().Add(30 * 24 * time.Hour)
-	if t.After(max) {
-		return max
+	ceiling := time.Now().Add(30 * 24 * time.Hour)
+	if t.After(ceiling) {
+		return ceiling
 	}
 	return t
 }

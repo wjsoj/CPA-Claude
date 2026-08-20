@@ -634,6 +634,7 @@ func isLikelyTaxNo(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		//nolint:staticcheck // QF1001: the positive form names the allowed set; De Morgan would obscure it.
 		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')) {
 			return false
 		}

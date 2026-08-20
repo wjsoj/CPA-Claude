@@ -136,7 +136,7 @@ func TestStreamSSEOpenAITerminalDetection(t *testing.T) {
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 			var cnt usage.Counts
-			_, sawTerminal := streamSSEOpenAI(c, bufio.NewReader(strings.NewReader(tc.sse)), &cnt, "")
+			sawTerminal := streamSSEOpenAI(c, bufio.NewReader(strings.NewReader(tc.sse)), &cnt, "").sawTerminal
 			if sawTerminal != tc.want {
 				t.Errorf("sawTerminal = %v, want %v", sawTerminal, tc.want)
 			}

@@ -10,10 +10,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache: true
       - uses: oven-sh/setup-bun@v2
         with:
@@ -24,3 +24,24 @@ jobs:
         run: go build ./...
       - name: Vet
         run: go vet ./...
+
+  lint-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # golangci-lint runs the Go typechecker, which evaluates the
+      # //go:embed all:web/dist directive in internal/admin/admin.go. Build
+      # the SPA first so that embed pattern resolves (mirrors the build job).
+      - name: Build admin SPA
+        run: make web
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2

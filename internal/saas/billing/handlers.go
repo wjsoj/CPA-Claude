@@ -599,6 +599,7 @@ func tokenShort(token string) string {
 		h ^= uint64(c)
 		h *= 1099511628211
 	}
+	//nolint:gosec // G115: truncating the FNV hash to 32 bits is the point — this builds a short opaque id, not a number.
 	return fmt.Sprintf("%08x", uint32(h))
 }
 

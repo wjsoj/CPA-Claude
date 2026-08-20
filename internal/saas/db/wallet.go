@@ -446,8 +446,10 @@ func (db *DB) RekeyToken(ctx context.Context, oldToken, newToken string) (*Rekey
 		{"invoice_allocations", oldAllocCount, &rep.InvoiceAllocRowsAffected},
 		{"invoice_titles", oldTitleCount, &rep.InvoiceTitleRowsAffected},
 	} {
+		// u.table comes from the fixed literal list above, never from input;
+		// both values stay parameterized.
 		res, err := tx.ExecContext(ctx,
-			`UPDATE `+u.table+` SET token = ? WHERE token = ?`, newToken, oldToken)
+			`UPDATE `+u.table+` SET token = ? WHERE token = ?`, newToken, oldToken) //nolint:gosec // G202: table name is a compile-time literal, not user data
 		if err != nil {
 			return nil, err
 		}

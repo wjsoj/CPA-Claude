@@ -1,29 +1,80 @@
-run:
-  timeout: 3m
-
+version: "2"
 linters:
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - unused
-    - unconvert
-    - unparam
-    - misspell
-    - nilerr
     - bodyclose
     - durationcheck
-    - revive
-    - gocritic
     - errorlint
+    - gocritic
     - gosec
+    - misspell
+    - nilerr
     - prealloc
-
-issues:
-  exclude-dirs:
-    - vendor
-  exclude-rules:
-    # Allow unchecked errors on deferred Close / Flush — standard Go idiom.
-    - linters: [errcheck]
-      source: "defer "
+    - revive
+    - unconvert
+    - unparam
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Unchecked errors on deferred Close / Flush — standard Go idiom.
+      - linters: [errcheck]
+        source: 'defer '
+      # unparam is overly strict on test helpers, whose fixed arguments are
+      # intentional for readability.
+      - linters: [unparam]
+        path: _test\.go
+      # Test fixtures are not credentials: G101/G117 fire on any identifier
+      # spelled like a token, and every hit here is a literal in a table-driven
+      # case or a struct field named client_token.
+      - linters: [gosec]
+        path: _test\.go
+        text: 'G101|G117|G703'
+      # Handler signatures in tests keep the full (w, r) shape even when the
+      # body ignores one of them — renaming to _ would obscure what the stub
+      # stands in for.
+      - linters: [revive]
+        path: _test\.go
+        text: 'unused-parameter'
+      # A test server's response body dies with the test; bodyclose adds noise
+      # without protecting anything that outlives the process.
+      - linters: [bodyclose, prealloc]
+        path: _test\.go
+      # Tests compare sentinel errors directly on purpose: asserting the exact
+      # value is the point, and errors.Is would pass on a wrapped impostor.
+      - linters: [errorlint]
+        path: _test\.go
+      # An if/else chain in a test reads in the order the cases were written;
+      # rewriting it as a switch to satisfy a style linter is churn.
+      - linters: [gocritic]
+        path: _test\.go
+        text: 'ifElseChain'
+      # codex_ws_relay_test.go deliberately uses a non-canonical header key —
+      # the test exists to prove the relay tolerates what real clients send.
+      # QF1003 wants a tagged switch where the test spells the comparisons out.
+      - linters: [staticcheck]
+        path: _test\.go
+        text: 'SA1008|QF1003'
+      # Z-Pay's aggregator API mandates MD5-signed requests (their spec), so
+      # crypto/md5 here is a protocol requirement, not a security weakness.
+      - linters: [gosec]
+        path: internal/saas/billing/zpay.go
+        text: 'G401|G501'
+    paths:
+      - vendor
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
