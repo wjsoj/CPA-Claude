@@ -222,6 +222,19 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		// tracking). Headers are committed lazily inside the relay, so a break
 		// before the first byte reaches the client is recoverable.
 		res := streamSSECodexBackend(c, resp, &counts, func() { writeResponseHeaders(c, resp) })
+		// A shed that landed after output started could only be demoted, never
+		// withheld. Say so: the demotion works, so the CLI backs off and
+		// recovers and nothing else records that upstream refused to serve. The
+		// turn otherwise reaches the operator as one that finished with no
+		// usage, which reads as a broken relay rather than a busy account.
+		if res.demoted.shed {
+			log.Warnf("codex oauth: %s shed the turn after output started (capacity=%v); client sees a retryable error", a.ID, res.demoted.capacity)
+			if res.demoted.capacity {
+				streamErr = "upstream shed the turn (capacity)"
+			} else {
+				streamErr = "upstream shed the turn (quota/rate)"
+			}
+		}
 		if !res.sawTerminal && !res.wroteAny {
 			// Nothing reached the client yet. If the client itself went away,
 			// there's nobody to retry for; otherwise transparently fail over to
@@ -499,6 +512,9 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 	reader := newLineReader(resp.Body)
 	events := 0
 	shed := ""
+	// demotedShed is the post-output half: a shed that arrived too late to
+	// withhold, so it could only be demoted (capacity) or forwarded (quota/rate).
+	var demotedShed shedSignal
 
 	// next supplies framing (raw lines) + usage + terminal detection to the
 	// shared relay; cc-core/stream.Relay owns keepalive + lazy commit + locking.
@@ -549,12 +565,26 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 								// told something. Demote the two session-ending
 								// capacity codes to one the CLI retries; the
 								// message is left untouched.
+								//
+								// Record BEFORE the rewrite: after
+								// DemoteCapacityCode the code no longer says why
+								// the turn was refused, and the caller needs
+								// that to tell a shed apart from a broken relay.
+								demotedShed.shed = true
+								demotedShed.capacity = true
 								tail := line[len(trim):]
 								rebuilt := make([]byte, 0, len("data: ")+len(demoted)+len(tail))
 								rebuilt = append(rebuilt, []byte("data: ")...)
 								rebuilt = append(rebuilt, demoted...)
 								rebuilt = append(rebuilt, tail...)
 								line = rebuilt
+							} else {
+								// Quota/rate after output started: forwarded
+								// untouched (the CLI handles those
+								// non-terminally and reads its retry delay off
+								// the original code), but still a shed and
+								// still worth naming.
+								demotedShed.shed = true
 							}
 						}
 						// ClassFatal frames are forwarded verbatim: retrying
@@ -622,7 +652,25 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 		KeepalivePayload: []byte(":\n\n"),
 		Next:             next,
 	})
-	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed}
+	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed, demoted: demotedShed}
+}
+
+// shedSignal records an in-band shed observed while relaying a Codex SSE
+// stream: upstream accepted the request, answered 200, then refused the turn
+// with an error frame instead of content.
+//
+// It exists because the demotion that keeps the client's session alive is
+// invisible by design — the CLI backs off and recovers, so nothing downstream
+// ever says how often upstream is shedding. Without this the only trace was a
+// turn that finished with no usage, which reads as "the relay is broken" rather
+// than "the account was at capacity".
+type shedSignal struct {
+	// shed: an error frame classified as retryable (capacity, quota, or rate).
+	shed bool
+	// capacity: that shed was one of the two session-terminating capacity
+	// codes, and was demoted on the way out so the CLI retries instead of
+	// ending the session.
+	capacity bool
 }
 
 // codexStreamResult reports the outcome of a Codex backend SSE relay so the
@@ -635,6 +683,9 @@ type codexStreamResult struct {
 	bytes       int64  // bytes written downstream (diagnostics)
 	err         error  // underlying read error when the stream broke early
 	shed        string // non-empty when a pre-output capacity/quota frame was withheld
+	// demoted: a shed that arrived after output had started, so it could only
+	// be demoted (or forwarded) on the way out rather than withheld.
+	demoted shedSignal
 }
 
 // errString renders an error for a log/record field, tolerating nil.

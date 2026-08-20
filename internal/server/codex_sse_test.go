@@ -161,6 +161,12 @@ func TestStreamSSECodexBackendShedsCapacityBeforeOutput(t *testing.T) {
 			if res.shed == "" {
 				t.Error("shed must carry the withheld frame for diagnostics")
 			}
+			// A withheld shed is reported through `shed`, never through
+			// `demoted` — the caller uses the latter to decide whether to log a
+			// turn the client already saw, and a withheld one it never did.
+			if res.demoted.shed {
+				t.Error("a withheld pre-output shed must not also be reported as demoted")
+			}
 			if got := w.Body.String(); got != "" {
 				t.Errorf("nothing may reach the client, got %q", got)
 			}
@@ -186,7 +192,13 @@ func TestStreamSSECodexBackendDemotesCapacityAfterOutput(t *testing.T) {
 		t.Fatal("wroteAny must be true — output already started")
 	}
 	if res.shed != "" {
-		t.Error("must not report a shed once output has started")
+		t.Error("must not report a pre-output shed once output has started")
+	}
+	// The demotion succeeds, so the CLI recovers and nothing else would ever
+	// record that upstream refused to serve. Without this the turn reaches the
+	// operator only as one that finished with no usage.
+	if !res.demoted.shed || !res.demoted.capacity {
+		t.Errorf("the post-output capacity shed must be recorded; got %+v", res.demoted)
 	}
 	out := w.Body.String()
 	if strings.Contains(out, "server_is_overloaded") {
@@ -203,6 +215,41 @@ func TestStreamSSECodexBackendDemotesCapacityAfterOutput(t *testing.T) {
 	}
 }
 
+// Quota and rate codes are account-scoped rather than capacity-scoped: the CLI
+// already handles them non-terminally and parses its retry delay off the
+// original code, so they must reach the client untouched. They are still a shed
+// — upstream refused the turn — and must be recorded as one, or half the
+// post-output sheds stay invisible.
+func TestStreamSSECodexBackendRecordsQuotaShedAfterOutputWithoutDemoting(t *testing.T) {
+	for _, code := range []string{"insufficient_quota", "rate_limit_exceeded", "usage_not_included"} {
+		t.Run(code, func(t *testing.T) {
+			c, w := newCodexStreamCtx()
+			body := "event: response.output_text.delta\n" +
+				`data: {"type":"response.output_text.delta","delta":"partial"}` + "\n\n" +
+				"event: error\n" +
+				`data: {"type":"error","error":{"code":"` + code + `","message":"out of credit"}}` + "\n\n"
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+
+			var counts usage.Counts
+			res := streamSSECodexBackend(c, resp, &counts, func() {})
+
+			if !res.demoted.shed {
+				t.Error("a quota/rate frame after output is still a shed and must be recorded")
+			}
+			if res.demoted.capacity {
+				t.Error("quota/rate is not a capacity shed and must not be reported as one")
+			}
+			out := w.Body.String()
+			if !strings.Contains(out, code) {
+				t.Errorf("the original code must reach the client untouched, got %q", out)
+			}
+			if strings.Contains(out, "server_error") {
+				t.Errorf("quota/rate must never be demoted, got %q", out)
+			}
+		})
+	}
+}
+
 // A fatal error (the request's own fault) must reach the client untouched —
 // retrying it on another credential would fail identically.
 func TestStreamSSECodexBackendForwardsFatalErrorVerbatim(t *testing.T) {
@@ -216,6 +263,9 @@ func TestStreamSSECodexBackendForwardsFatalErrorVerbatim(t *testing.T) {
 
 	if res.shed != "" {
 		t.Error("a fatal error must not be shed")
+	}
+	if res.demoted.shed {
+		t.Error("a fatal error is the request's own fault, not an upstream shed")
 	}
 	if !res.wroteAny {
 		t.Error("a fatal error must reach the client")
