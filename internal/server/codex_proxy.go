@@ -225,7 +225,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	}
 	copyForwardableHeaders(c.Request.Header, upReq.Header)
 	stripIngressHeaders(upReq.Header)
-	applyRelayIdentity(upReq.Header, a, c, clientToken)
+	applyRelayIdentity(upReq.Header, a, c, clientToken, body)
 	accessToken, _ := a.Credentials()
 	upReq.Header.Set("Authorization", "Bearer "+accessToken)
 

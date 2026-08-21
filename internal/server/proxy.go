@@ -78,8 +78,15 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 	// Per-window slot identity. Each Claude Code CLI window sends a distinct
 	// X-Claude-Code-Session-Id, so the same user opening multiple windows is
 	// scheduled as multiple independent slots (and can land on different
-	// upstream credentials). Empty for raw API callers → one slot per token.
+	// upstream credentials).
 	slotID := clientSlotID(c)
+	if slotID == "" {
+		// Nothing on the wire named a session. Before falling back to one slot
+		// per token — which pins every caller behind a third-party relay to a
+		// single credential — try to recover the conversation from the body and
+		// spread it over a bounded set of buckets. See relay_fanout.go.
+		slotID = fanoutSlotID(body, sessionlessFanoutWidth)
+	}
 
 	// Parse minimal request metadata for usage reporting + streaming detection.
 	var peek struct {
@@ -588,11 +595,21 @@ var RelayPeerName = "cpa-claude"
 // Only credentials explicitly marked relay_peer get this. To a vendor or a
 // third-party relay our users' identity is not useful, and shipping it would
 // leak the shape of our client base into someone else's logs.
-func applyRelayIdentity(h http.Header, a *auth.Auth, c *gin.Context, clientToken string) {
+func applyRelayIdentity(h http.Header, a *auth.Auth, c *gin.Context, clientToken string, body []byte) {
 	if a == nil || a.Kind != auth.KindAPIKey || !a.RelayPeer {
 		return // stripIngressHeaders already cleared anything inbound
 	}
-	relay.Apply(h, RelayPeerName, clientToken, clientSlotID(c))
+	// Resolve the slot the same way forward() does, body fallback included.
+	// Declaring an empty session would undo the fan-out on both sides at once:
+	// the peer trusts this header over the wire session, so every one of our
+	// sessionless callers would arrive there as one slot and pin one of the
+	// peer's credentials — precisely the collapse relay_fanout.go exists to
+	// undo, just relocated one hop upstream.
+	slot := clientSlotID(c)
+	if slot == "" {
+		slot = fanoutSlotID(body, sessionlessFanoutWidth)
+	}
+	relay.Apply(h, RelayPeerName, clientToken, slot)
 }
 
 // maskClientToken is the form a client token takes in the request log. The
@@ -1329,7 +1346,7 @@ func (s *Server) doForwardAnthropicAPIKey(c *gin.Context, a *auth.Auth, path str
 	}
 	copyForwardableHeaders(c.Request.Header, upReq.Header)
 	stripIngressHeaders(upReq.Header)
-	applyRelayIdentity(upReq.Header, a, c, clientToken)
+	applyRelayIdentity(upReq.Header, a, c, clientToken, body)
 	token, _ := a.Credentials()
 	upReq.Header.Set("x-api-key", token)
 

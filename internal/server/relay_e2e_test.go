@@ -39,7 +39,7 @@ func TestCodexRelayHeaderPipelineEndToEnd(t *testing.T) {
 		}
 		copyForwardableHeaders(in.Header, up.Header)
 		stripIngressHeaders(up.Header)
-		applyRelayIdentity(up.Header, &auth.Auth{Kind: auth.KindAPIKey, RelayPeer: true}, c, downstreamToken)
+		applyRelayIdentity(up.Header, &auth.Auth{Kind: auth.KindAPIKey, RelayPeer: true}, c, downstreamToken, nil)
 		resp, err := http.DefaultClient.Do(up)
 		if err != nil {
 			t.Fatal(err)

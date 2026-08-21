@@ -43,7 +43,7 @@ func TestApplyRelayIdentityOnlyForPeers(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := http.Header{}
-			applyRelayIdentity(h, tc.a, c, "sk-downstream")
+			applyRelayIdentity(h, tc.a, c, "sk-downstream", nil)
 			_, got := relay.Read(h)
 			if got != tc.stamp {
 				t.Fatalf("stamped = %t, want %t (headers: %v)", got, tc.stamp, h)
@@ -76,7 +76,7 @@ func TestClientSuppliedRelayHeadersNeverSurvive(t *testing.T) {
 	// And on a peer credential, our own value replaces it rather than
 	// appending to it.
 	applyRelayIdentity(up, &auth.Auth{Kind: auth.KindAPIKey, RelayPeer: true},
-		relayTestCtx("real-session", forged), "sk-real")
+		relayTestCtx("real-session", forged), "sk-real", nil)
 	id, ok := relay.Read(up)
 	if !ok {
 		t.Fatal("peer credential did not get an identity")
@@ -100,7 +100,7 @@ func TestRelayIdentityUsesCodexSessionHeader(t *testing.T) {
 	c.Request = req
 
 	h := http.Header{}
-	applyRelayIdentity(h, &auth.Auth{Kind: auth.KindAPIKey, RelayPeer: true}, c, "sk-downstream")
+	applyRelayIdentity(h, &auth.Auth{Kind: auth.KindAPIKey, RelayPeer: true}, c, "sk-downstream", nil)
 	id, ok := relay.Read(h)
 	if !ok {
 		t.Fatal("no identity stamped for a Codex request")
@@ -116,7 +116,7 @@ func TestRelayIdentityDistinguishesCallers(t *testing.T) {
 	peer := &auth.Auth{Kind: auth.KindAPIKey, RelayPeer: true}
 	slot := func(token, session string) string {
 		h := http.Header{}
-		applyRelayIdentity(h, peer, relayTestCtx(session, nil), token)
+		applyRelayIdentity(h, peer, relayTestCtx(session, nil), token, nil)
 		id, _ := relay.Read(h)
 		return id.SlotID()
 	}
