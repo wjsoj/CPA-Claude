@@ -104,6 +104,16 @@ use_utls: true
 # specify one of their own. Empty = direct connection.
 default_proxy_url: ""
 
+# Whether claude-fable-5 (and its dated / 1M variants) may be scheduled onto
+# Anthropic subscription OAuth credentials. Default true when omitted.
+#   true  — fable rides OAuth like every other model. An account that cannot
+#           serve it answers credits_required and is skipped for the fable
+#           family alone; every other model keeps scheduling on it.
+#   false — fable bypasses OAuth entirely and uses the API-key pool only
+#           (pre-2026-08 behaviour). Use this only if your accounts genuinely
+#           lack the fable entitlement.
+# anthropic_fable_oauth: true
+
 # Upstream base URLs (normally leave at default).
 anthropic_base_url:        "https://api.anthropic.com"
 openai_base_url:           "https://api.openai.com"          # BYOK Codex API-key path

@@ -174,6 +174,13 @@ func main() {
 		log.Info("request log: disabled (set log_dir in config to enable)")
 	}
 
+	// Fable routing policy. Set before the pool takes any traffic: the flag is
+	// read on every scheduling decision and is deliberately not hot-swappable.
+	auth.AnthropicFableOAuthDisabled = !cfg.FableOAuthEnabled()
+	if auth.AnthropicFableOAuthDisabled {
+		log.Warn("anthropic_fable_oauth=false — claude-fable-* will bypass subscription OAuth and use API keys only")
+	}
+
 	pool := auth.NewPool(oauths, apikeys,
 		time.Duration(cfg.ActiveWindowMinutes)*time.Minute,
 		cfg.UseUTLS, cfg.DefaultProxyURL)
