@@ -132,7 +132,12 @@ func (s *Server) fetchCodexAPIKeyModels(ctx context.Context, a *auth.Auth) ([]co
 	access, _ := a.Credentials()
 	req.Header.Set("Authorization", "Bearer "+access)
 	req.Header.Set("Accept", "application/json")
-	client := auth.ClientFor(snap.ProxyURL, s.cfg.UseUTLS)
+	// uTLS mimics a TLS ClientHello — pointless (and fatal: "first record does
+	// not look like a TLS handshake") against a plain-http base_url, which a
+	// same-host relay credential (base_url http://127.0.0.1:PORT) legitimately
+	// has. Only reach for it when there's an actual TLS connection to fingerprint.
+	useUTLS := s.cfg.UseUTLS && strings.HasPrefix(strings.ToLower(baseURL), "https://")
+	client := auth.ClientFor(snap.ProxyURL, useUTLS)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
