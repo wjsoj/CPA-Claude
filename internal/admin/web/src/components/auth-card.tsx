@@ -332,7 +332,7 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
               <div className="eyebrow mb-1.5">14-day</div>
               <div>
                 {u.daily && u.daily.length > 0 ? (
-                  <Sparkline daily={u.daily} />
+                  <Sparkline daily={u.daily} authId={a.id} />
                 ) : (
                   <span className="text-muted-foreground text-xs mono">no data</span>
                 )}

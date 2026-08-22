@@ -309,6 +309,7 @@ func (h *Handler) Register(r *gin.Engine) {
 		api.GET("/requests", h.handleRequestsQuery)
 		api.GET("/requests/clients", h.handleRequestsClients)
 		api.GET("/requests/hourly", h.handleRequestsHourly)
+		api.GET("/auths/:id/daily-cost", h.handleAuthDailyCost)
 		api.GET("/tokens", h.handleListTokens)
 		api.POST("/tokens", h.handleCreateToken)
 		api.GET("/orphan-tokens", h.handleListOrphanTokens)
@@ -1566,6 +1567,49 @@ func (h *Handler) handleRequestsHourly(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"buckets": buckets})
+}
+
+// authDailyCostEntry is one day of the 14-day per-credential spend breakdown
+// the sparkline tooltip renders. CostUSD mirrors usageSummary.TotalCostUSD's
+// semantics (lifetime spend routed through this credential) — the day-level
+// cut of the same number, not what customers were billed.
+type authDailyCostEntry struct {
+	Date     string  `json:"date"`
+	CostUSD  float64 `json:"cost_usd"`
+	Requests int64   `json:"requests"`
+}
+
+// handleAuthDailyCost answers the sparkline's hover tooltip: 14 days,
+// oldest first, of USD cost routed through one credential. Queried on demand
+// (not folded into /api/summary) so a panel with many credentials doesn't
+// turn one poll into N per-auth log scans; cachedQuery's TTL + singleflight
+// already dedupe repeat hovers on the same card for free.
+func (h *Handler) handleAuthDailyCost(c *gin.Context) {
+	id := c.Param("id")
+	if h.cfg.LogDir == "" {
+		c.JSON(http.StatusOK, gin.H{"days": []authDailyCostEntry{}})
+		return
+	}
+	loc := requestlog.BucketLocation()
+	today := time.Now().In(loc)
+	res, err := h.cachedQuery(requestlog.Filter{
+		Dir:     h.cfg.LogDir,
+		AuthID:  id,
+		FromDay: today.AddDate(0, 0, -13).Format("2006-01-02"),
+		ToDay:   today.Format("2006-01-02"),
+		Dims:    requestlog.DimByDay,
+	})
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	days := make([]authDailyCostEntry, 0, 14)
+	for i := 13; i >= 0; i-- {
+		d := today.AddDate(0, 0, -i).Format("2006-01-02")
+		agg := res.ByDay[d]
+		days = append(days, authDailyCostEntry{Date: d, CostUSD: agg.CostUSD, Requests: agg.Count})
+	}
+	c.JSON(http.StatusOK, gin.H{"days": days})
 }
 
 func (h *Handler) handleRequestsClients(c *gin.Context) {
