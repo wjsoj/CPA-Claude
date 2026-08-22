@@ -132,6 +132,18 @@ type Config struct {
 	// If true, OAuth/API-key refresh+request uses utls Chrome fingerprint.
 	UseUTLS bool `yaml:"use_utls"`
 
+	// AnthropicFableOAuth controls whether claude-fable-5 (and its dated /
+	// 1M variants) may be scheduled onto Anthropic subscription OAuth
+	// credentials. Absent = true: fable rides OAuth like every other model,
+	// and an account that cannot serve it self-excludes for that model family
+	// alone via the scheduler's model-scoped cooldown.
+	//
+	// Set to false only for a fleet whose accounts genuinely lack the fable
+	// entitlement (Anthropic answers credits_required); fable then goes to the
+	// API-key pool exclusively, which is the pre-2026-08 behaviour. It is a
+	// pointer so an absent key is distinguishable from an explicit false.
+	AnthropicFableOAuth *bool `yaml:"anthropic_fable_oauth,omitempty"`
+
 	// CodexWS controls the Codex /v1/responses WebSocket ingress (and the
 	// WebSocket upstream to chatgpt.com). Disabled by default — the proxy keeps
 	// serving Codex over the proven HTTP POST + SSE path until WS is enabled
@@ -482,6 +494,13 @@ func normalizePromotions(c *Config) error {
 // DefaultCodexConcurrencyMultiplier is the fallback for
 // Config.CodexConcurrencyMultiplier when it is unset (0).
 const DefaultCodexConcurrencyMultiplier = 5
+
+// FableOAuthEnabled reports whether fable may schedule onto subscription OAuth.
+// Absent config key = enabled; only an explicit `anthropic_fable_oauth: false`
+// restores the API-key-only routing.
+func (c *Config) FableOAuthEnabled() bool {
+	return c.AnthropicFableOAuth == nil || *c.AnthropicFableOAuth
+}
 
 func applyDefaults(c *Config, path string) {
 	if c.Endpoints.Claude.Port == 0 {
