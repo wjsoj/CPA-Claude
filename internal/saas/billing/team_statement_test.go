@@ -386,8 +386,20 @@ func TestTrimNewestKeepsTheNewestUpToTheCap(t *testing.T) {
 // get wrong by printing MaxDetailLines rows per person.
 func TestTeamStatementListingCapIsPerDocument(t *testing.T) {
 	_, d, logDir := newUsageTeam(t)
-	now := time.Now().UTC().Add(-6 * time.Hour)
 	n := statement.MaxDetailLines/2 + 100 // per member, so the pair overflows
+
+	// The write window must not straddle a UTC midnight. Records are filed into
+	// per-UTC-day log files while the query below covers a single bucket day, so
+	// a span that crossed midnight would land its tail in tomorrow's file and be
+	// invisible here — the assertion then fails with a row count that looks like
+	// a capping bug and is really a clock.
+	//
+	// "6 hours ago" used to be the anchor, and it put the span at 23:5x on the
+	// previous UTC day whenever the suite ran shortly before 06:00 UTC: the run
+	// saw only the rows before midnight (366s x 2 = 732 of 3000) once a day,
+	// every day. Anchor to 01:00 on that day instead — comfortably in the past,
+	// and n seconds later is still the same UTC day for any plausible n.
+	now := time.Now().UTC().Add(-6 * time.Hour).Truncate(24 * time.Hour).Add(time.Hour)
 	recs := make([]requestlog.Record, 0, 2*n)
 	for i := 0; i < n; i++ {
 		at := now.Add(time.Duration(i) * time.Second)

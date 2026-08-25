@@ -31,6 +31,40 @@ const InvoicesPanel = lazyNamed(() => import("./invoices-panel"), "InvoicesPanel
 const InboxPanel = lazyNamed(() => import("./inbox-panel"), "InboxPanel");
 const WorkspacesPanel = lazyNamed(() => import("./workspaces-panel"), "WorkspacesPanel");
 
+// The OpenAI models on sale, as catalogue keys. The Pricing tab lists these by
+// default and hides the rest of the OpenAI cards behind a toggle.
+//
+// The catalogue holds strictly more than this. Since 2026-08-25 cc-core ships
+// a price card for every published OpenAI SKU — not to sell them, but because
+// pricing.Lookup falls back by trimming "-" segments, so a MISSING card does
+// not bill zero, it bills at the nearest shorter name (gpt-5.4-nano was
+// billing at the gpt-5.4 card, 12.5x over). Those defensive cards are the
+// reason this tab suddenly listed two dozen OpenAI models.
+//
+// Hence a default view, not a filter: the full table is how an operator
+// verifies that a defensive card is present and correct, which is exactly the
+// check that would have caught that mispricing. Hiding it outright would
+// remove the tool; showing it always buries the rows that matter.
+//
+// Scoped to OpenAI on purpose. Anthropic's cards are all models the service
+// actually serves — the priced set and the sold set have not diverged there —
+// so narrowing that provider would hide real rows to solve a problem it does
+// not have.
+const SOLD_OPENAI_MODELS = new Set([
+  "openai/gpt-5.6-sol",
+  "openai/gpt-5.6-terra",
+  "openai/gpt-5.6-luna",
+  "openai/gpt-5.5",
+  "openai/gpt-5.4",
+  "openai/gpt-5.4-mini",
+]);
+
+/** Rows shown when the Pricing tab is not expanded: every non-OpenAI card,
+ *  plus the OpenAI models on sale. */
+function isDefaultPricingRow(key: string): boolean {
+  return !key.startsWith("openai/") || SOLD_OPENAI_MODELS.has(key);
+}
+
 // Modals are opened by an explicit user action, so their code has no business
 // being in the first paint either.
 const EditAuthModal = lazyNamed(() => import("./modals/edit-auth"), "EditAuthModal");
@@ -128,6 +162,9 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     localStorage.setItem("cpa.admin.tab", tab);
   }, [tab]);
   const [refreshTick, setRefreshTick] = useState(0);
+  // Pricing tab: show the models actually on sale by default, with the full
+  // catalogue one click away. See SOLD_MODELS.
+  const [showAllPrices, setShowAllPrices] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -460,11 +497,31 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                   <h2 className="font-display text-3xl md:text-4xl tracking-tight">
                     Model rate{" "}
                     <span className="text-muted-foreground">
-                      · {data?.pricing ? Object.keys(data.pricing.models).length : "···"} models
+                      ·{" "}
+                      {data?.pricing
+                        ? showAllPrices
+                          ? `${Object.keys(data.pricing.models).length} models`
+                          : `${
+                              Object.keys(data.pricing.models).filter(isDefaultPricingRow).length
+                            } models`
+                        : "···"}
                     </span>
                   </h2>
                 </div>
-                <span className="eyebrow opacity-70">edit in config.yaml / pricing.models</span>
+                <div className="flex items-center gap-3">
+                  {data?.pricing && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllPrices((v) => !v)}
+                      className="eyebrow underline underline-offset-4 hover:text-foreground transition-colors"
+                    >
+                      {showAllPrices
+                        ? "hide unsold OpenAI SKUs"
+                        : `show all ${Object.keys(data.pricing.models).length}`}
+                    </button>
+                  )}
+                  <span className="eyebrow opacity-70">edit in config.yaml / pricing.models</span>
+                </div>
               </div>
               <PricingStats pricing={data?.pricing} refreshTick={refreshTick} />
               <div className="bg-card border border-border-strong rounded-md overflow-hidden">
@@ -483,6 +540,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                       </thead>
                       <tbody>
                         {Object.entries(data.pricing.models)
+                          .filter(([name]) => showAllPrices || isDefaultPricingRow(name))
                           .sort(([a], [b]) => a.localeCompare(b))
                           .map(([name, p]) => {
                             // Catalog keys are "provider/model"; legacy bare
