@@ -40,7 +40,7 @@ func TestCodexModelCapacityDoesNotFreezeCredential(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 
 	retry, done := s.doForwardCodexOAuth(c, cred, "/v1/responses", body, true,
-		"gpt-5.6-luna", "client-token", "client", time.Now(), 1)
+		"gpt-5.6-luna", "client-token", "client", "", time.Now(), 1)
 	if !retry || done {
 		t.Fatalf("capacity error should retry this request only; got retry=%v done=%v", retry, done)
 	}

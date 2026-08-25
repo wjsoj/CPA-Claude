@@ -115,7 +115,7 @@ func runCodexLeakStreamAt(t *testing.T, upstreamURL string) *httptest.ResponseRe
 	body := []byte(`{"model":"gpt-5.6-sol","input":"hi","stream":true}`)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	s.doForwardCodexOAuth(c, cred, "/v1/responses", body, true,
-		"gpt-5.6-sol", "client-token", "client", time.Now(), 1)
+		"gpt-5.6-sol", "client-token", "client", "", time.Now(), 1)
 	return w
 }
 

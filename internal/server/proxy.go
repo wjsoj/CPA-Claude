@@ -417,7 +417,7 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 		var deferred *deferredResponse
 		switch auth.NormalizeProvider(a.Provider) {
 		case auth.ProviderOpenAI:
-			retry, done = s.doForwardCodex(c, a, path, body, stream, model, clientToken, clientName, start, attempts)
+			retry, done = s.doForwardCodex(c, a, path, body, stream, model, clientToken, clientName, slotID, start, attempts)
 		default:
 			// attempt > 0 ⇒ transparent retry; doForward skips the blocking
 			// bootstrap-wait so the credential switch stays fast.

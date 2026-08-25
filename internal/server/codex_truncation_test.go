@@ -65,7 +65,7 @@ func runCodexAPIKeyForward(t *testing.T, s *Server, cred *auth.Auth) (retry, don
 	body := []byte(`{"model":"gpt-5.6-sol","input":"hi","stream":true}`)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	return s.doForwardCodex(c, cred, "/v1/responses", body, true,
-		"gpt-5.6-sol", "sk-client-token-abcdef", "client", time.Now(), 1)
+		"gpt-5.6-sol", "sk-client-token-abcdef", "client", "", time.Now(), 1)
 }
 
 func TestCodexAPIKeyTruncatedStreamDoesNotCoolCredential(t *testing.T) {

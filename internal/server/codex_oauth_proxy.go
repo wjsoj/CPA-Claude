@@ -34,9 +34,11 @@ import (
 // doForwardCodexOAuth forwards the client's /v1/responses request to the
 // ChatGPT backend. Behavior matches the vendor Codex CLI: Bearer auth from
 // the OAuth access_token, account_id from the cached ID-token claims, a
-// fresh per-request session UUID, and the `codex-tui` User-Agent /
-// Originator that the backend fingerprints on.
-func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName string, start time.Time, attempts int) (retry, done bool) {
+// session UUID that is STABLE for the conversation (see codexUpstreamSessionID
+// — a fresh one per request is what a real client never does and what costs the
+// upstream prompt cache), and the `codex-tui` User-Agent / Originator that the
+// backend fingerprints on.
+func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName, slotID string, start time.Time, attempts int) (retry, done bool) {
 	if path != "/v1/responses" && path != "/v1/responses/compact" {
 		// The ChatGPT backend only hosts /codex/responses{,/compact}; OAuth
 		// creds can't serve /v1/chat/completions. Ask the retry loop to try a
@@ -83,7 +85,8 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// out, after sanitization — so the header can never name a different model
 	// than the body does.
 	routingModel, routingTier := mimicry.CodexModelAndTier(upstreamBody)
-	mimicry.ApplyCodexCLIHeaders(upReq, accessToken, accountID, isCompactPath, routingModel, routingTier)
+	mimicry.ApplyCodexHeadersWithSession(upReq, mimicry.DefaultCodexProfile(), accessToken, accountID,
+		isCompactPath, routingModel, routingTier, s.codexUpstreamSessionID(a, clientToken, slotID, body))
 
 	// Shared pooled transport (per proxyURL). Reusing HTTP/2 connections is
 	// critical here: chatgpt.com's CF edge rate-limits new TCP/TLS connections
