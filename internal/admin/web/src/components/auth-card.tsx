@@ -122,7 +122,11 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
           conditions, so a cooling credential can no longer be described as
           both quota-exceeded and unhealthy depending on which branch won. */}
       {state === "quota" && (
-        <AlertStrip tone="warning" icon={<Gauge className="h-3.5 w-3.5" />} label="Quota exceeded">
+        <AlertStrip
+          tone="warning"
+          icon={<Gauge className="h-3.5 w-3.5" />}
+          label={a.quota_usage_limit ? "Quota exceeded" : "Rate-limit cooldown"}
+        >
           {a.quota_reset_at
             ? `resets ${fmtDate(a.quota_reset_at)}`
             : detail || "no reset time reported"}
@@ -342,8 +346,8 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
         </div>
       )}
 
-      {a.kind === "oauth" && a.provider === "anthropic" && a.weekly_allotment && (
-        <WeeklyAllotmentLine est={a.weekly_allotment} />
+      {a.kind === "oauth" && a.weekly_allotment && (
+        <WeeklyAllotmentLine est={a.weekly_allotment} history={a.weekly_allotment_history} />
       )}
       {a.kind === "oauth" && a.provider === "anthropic" && <CardUpstreamQuota auth={a} />}
       {a.kind === "oauth" && a.provider === "openai" && <CardUpstreamCodex auth={a} />}

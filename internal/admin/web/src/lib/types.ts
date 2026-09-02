@@ -73,9 +73,16 @@ export interface AuthRow extends CredStateFields {
   model_map?: Record<string, string>;
   usage?: UsageSummary;
   // Rejection-anchored weekly allotment: what the 7-day window was worth
-  // the last time this process saw it fill. Anthropic OAuth only; absent
-  // until a weekly usage-limit 429 has been observed since start-up.
+  // the last time it filled (Anthropic usage-limit 429 or ChatGPT
+  // usage_limit_reached). OAuth only; persisted with the credential, so it
+  // survives restarts; absent until a weekly rejection has been seen.
   weekly_allotment?: AllotmentEstimate;
+  // The last few settled full-window measurements, newest first, persisted
+  // across restarts. Compare consecutive entries to see an allotment shrink.
+  weekly_allotment_history?: AllotmentMeasurement[];
+  // Qualifies quota_exceeded: true when the window actually filled, false
+  // when this is the pool's own throttle pause after a generic 429/401/403.
+  quota_usage_limit?: boolean;
   codex_rate_limits?: Record<string, string>;
   codex_rate_limits_at?: string;
   // Live snapshot from chatgpt.com/backend-api/wham/usage (active probe via
@@ -209,6 +216,9 @@ export interface CodexUsage {
 
 export interface CodexUsageResponse {
   usage?: CodexUsage;
+  // Server-side estimate of what each wham/usage window is worth
+  // (cc-core/quotaestimate); see UpstreamResponse.allotment_estimates.
+  allotment_estimates?: AllotmentEstimate[];
 }
 
 // Response of POST /auths/:id/reset-codex-credit. usage is the refreshed
@@ -420,6 +430,19 @@ export interface AllotmentSpend {
   cache_read_tokens: number;
   cache_create_tokens: number;
   requests: number;
+}
+
+// AllotmentMeasurement mirrors cc-core quotaestimate.Measurement: one window
+// that ran to 100%, with the spend that filled it.
+export interface AllotmentMeasurement {
+  window: string;
+  window_hours: number;
+  window_start: string;
+  reset_at: string;
+  hit_at: string;
+  observed_hours: number;
+  spend: AllotmentSpend;
+  recorded_at: string;
 }
 
 // AllotmentEstimate mirrors cc-core quotaestimate.Estimate. The window's

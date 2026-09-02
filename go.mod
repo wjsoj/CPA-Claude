@@ -7,7 +7,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/signintech/gopdf v0.38.0
 	github.com/sirupsen/logrus v1.9.4
-	github.com/wjsoj/cc-core v0.8.98
+	github.com/wjsoj/cc-core v0.8.99
 	golang.org/x/sync v0.20.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.1

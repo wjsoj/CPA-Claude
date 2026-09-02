@@ -3,6 +3,7 @@ import { Gauge, RefreshCw, Zap } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
   AllotmentEstimate,
+  AllotmentMeasurement,
   AuthRow,
   CodexResetResponse,
   CodexUsageResponse,
@@ -217,7 +218,18 @@ function fmtTok(n: number | undefined): string {
 const ESTIMATE_WINDOW_LABEL: Record<string, string> = {
   five_hour: "5-hour",
   seven_day: "7-day",
+  // Codex names windows by role and states each one's length; show both.
+  primary: "primary",
+  secondary: "secondary",
 };
+
+function estimateWindowLabel(e: AllotmentEstimate): string {
+  const base = ESTIMATE_WINDOW_LABEL[e.window] || e.window;
+  if (e.window === "primary" || e.window === "secondary") {
+    return `${base} · ${fmtHours(e.window_hours)}`;
+  }
+  return base;
+}
 
 const BASIS_LABEL: Record<AllotmentEstimate["basis"], string> = {
   quota_hit: "measured at 429",
@@ -255,7 +267,7 @@ function renderEstimates(list: AllotmentEstimate[] | undefined) {
             return (
               <tr key={e.window} className="border-b last:border-b-0 align-top">
                 <td className="py-1.5 pr-2">
-                  {ESTIMATE_WINDOW_LABEL[e.window] || e.window}
+                  {estimateWindowLabel(e)}
                   {e.quota_hit_at && (
                     <div className="text-[10px] text-muted-foreground">
                       429 at {fmtDate(e.quota_hit_at)}
@@ -317,9 +329,17 @@ function renderEstimates(list: AllotmentEstimate[] | undefined) {
 
 // WeeklyAllotmentLine is the card-level summary of the rejection-anchored
 // weekly estimate: one number an operator can read without probing upstream.
-export function WeeklyAllotmentLine({ est }: { est: AllotmentEstimate }) {
+export function WeeklyAllotmentLine({
+  est,
+  history,
+}: {
+  est: AllotmentEstimate;
+  history?: AllotmentMeasurement[];
+}) {
   const full = est.full_window;
   if (!full) return null;
+  // Earlier windows, oldest last; the newest is the line above.
+  const earlier = (history || []).filter((m) => m.hit_at !== est.quota_hit_at).slice(0, 4);
   return (
     <div className="px-5 py-3 border-t border-border bg-muted/20">
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -337,6 +357,18 @@ export function WeeklyAllotmentLine({ est }: { est: AllotmentEstimate }) {
         429{est.quota_hit_at ? ` on ${fmtDate(est.quota_hit_at)}` : ""} — one full 7-day
         window. Resets {est.window_resets_at ? fmtDate(est.window_resets_at) : "—"}.
       </div>
+      {earlier.length > 0 && (
+        <div className="mt-1.5 space-y-0.5">
+          {earlier.map((m) => (
+            <div key={m.hit_at} className="flex justify-between gap-2 text-[10px] mono tabular text-muted-foreground">
+              <span>filled {fmtDate(m.hit_at)}</span>
+              <span>
+                ≈ {fmtUSD(m.spend.cost_usd)} · {fmtTok(m.spend.weighted_tokens)} wtok · {fmtHours(m.observed_hours)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -694,6 +726,7 @@ export function CardUpstreamCodex({ auth }: { auth: AuthRow }) {
               </tbody>
             </table>
           )}
+          {renderEstimates(st.data?.allotment_estimates)}
           {credits && (credits.has_credits || credits.unlimited || (credits.balance && credits.balance !== "0")) && (
             <div className="text-[11px] text-muted-foreground mono flex gap-4 flex-wrap">
               <span>
