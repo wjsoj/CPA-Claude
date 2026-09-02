@@ -33,6 +33,7 @@ import (
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/clienttoken"
 	"github.com/wjsoj/cc-core/pricing"
+	"github.com/wjsoj/cc-core/quotaestimate"
 	"github.com/wjsoj/cc-core/requestlog"
 	"github.com/wjsoj/cc-core/usage"
 )
@@ -76,6 +77,13 @@ type Handler struct {
 	// mon is the public uptime monitor. nil-safe: the /status/api/monitor
 	// handler returns an empty payload when unset.
 	mon *monitor.Monitor
+
+	// hitCache memoises the rejection-anchored weekly allotment estimate the
+	// credential list carries per Anthropic OAuth row. The number stops
+	// changing ten minutes after the 429 that produced it, and the list is
+	// polled; without this every poll would be one ledger query per
+	// credential for a constant.
+	hitCache quotaestimate.HitCache
 
 	// Cache for the per-auth aggregates the summary renders, keyed by
 	// window ("lifetime" and the rolling 24h). Both used to re-scan the log
@@ -486,6 +494,13 @@ type authRow struct {
 	ClientCancelReason string            `json:"client_cancel_reason,omitempty"`
 	ModelMap           map[string]string `json:"model_map,omitempty"`
 	Usage              *usageSummary     `json:"usage,omitempty"`
+	// WeeklyAllotment is what the credential's 7-day window turned out to be
+	// worth the last time it filled: the request-log spend between the
+	// window's start (reset − 168h) and the usage-limit 429, at catalogue
+	// price. Anthropic OAuth only, and only once a weekly rejection has been
+	// seen since this process started — the live probe (anthropic-usage)
+	// covers the no-rejection case. See cc-core/quotaestimate.
+	WeeklyAllotment *quotaestimate.Estimate `json:"weekly_allotment,omitempty"`
 	// CodexRateLimits holds the latest x-codex-* response headers from
 	// chatgpt.com — primary/secondary window used-percent, resets etc.
 	// Empty for non-OAuth / non-Codex credentials or until first call.
@@ -675,6 +690,7 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			ClientCancelReason: cancelReason,
 			ModelMap:           st.Auth.ModelMap,
 			Usage:              u,
+			WeeklyAllotment:    h.weeklyAllotment(st.Auth, provider, kind),
 			CodexRateLimits: func() map[string]string {
 				if live == nil {
 					return nil
@@ -1428,6 +1444,21 @@ func (h *Handler) handleAnthropicUsage(c *gin.Context) {
 	usageStatus, usageBody, usageErr := fetch("https://api.anthropic.com/api/oauth/usage")
 	profileStatus, profileBody, profileErr := fetch("https://api.anthropic.com/api/oauth/profile")
 
+	// Allotment estimates: what each reported window is worth in our own
+	// ledger's units, from the window's start (resets_at − length) to now
+	// divided by utilization — or, when this process saw the window fill,
+	// the spend up to that 429 as a measured 100%. A failed probe still
+	// yields the rejection-anchored estimate when there is one. Never an
+	// error: the probe result is returned regardless.
+	var estimates []quotaestimate.Estimate
+	if usageStatus >= 200 && usageStatus < 300 {
+		estimates = quotaestimate.ForCredential(usageBody, a.Snapshot().LastQuotaHit,
+			quotaestimate.RequestLogSpend(h.cfg.LogDir, a.ID), time.Now())
+	} else {
+		estimates = quotaestimate.ForCredential(nil, a.Snapshot().LastQuotaHit,
+			quotaestimate.RequestLogSpend(h.cfg.LogDir, a.ID), time.Now())
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"usage": gin.H{
 			"status": usageStatus,
@@ -1439,7 +1470,22 @@ func (h *Handler) handleAnthropicUsage(c *gin.Context) {
 			"body":   profileBody,
 			"error":  profileErr,
 		},
+		"allotment_estimates": estimates,
 	})
+}
+
+// weeklyAllotment returns the rejection-anchored weekly estimate for an
+// Anthropic OAuth credential list row, nil for everything else. The
+// estimate is a constant once the rejection is ten minutes old, so it is
+// served from hitCache; the live utilization-based estimate is deliberately
+// NOT computed here — it needs an upstream probe per credential, which the
+// list must never do on a poll.
+func (h *Handler) weeklyAllotment(info auth.AuthInfo, provider, kind string) *quotaestimate.Estimate {
+	if kind != "oauth" || provider != auth.ProviderAnthropic || info.LastQuotaHit.At.IsZero() {
+		return nil
+	}
+	return h.hitCache.Weekly(info.ID, info.LastQuotaHit,
+		quotaestimate.RequestLogSpend(h.cfg.LogDir, info.ID), time.Now())
 }
 
 // handleCodexUsage actively probes chatgpt.com/backend-api/wham/usage for an

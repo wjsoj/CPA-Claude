@@ -1,7 +1,7 @@
 import React from "react";
 import type { AuthRow } from "@/lib/types";
 import { Sparkline } from "./sparkline";
-import { CardUpstreamCodex, CardUpstreamQuota } from "./upstream-quota";
+import { CardUpstreamCodex, CardUpstreamQuota, WeeklyAllotmentLine } from "./upstream-quota";
 import { CardCodexBilling } from "./codex-billing";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -342,6 +342,9 @@ export function AuthCard({ a, onAction, onEdit, dragHandle }: Props) {
         </div>
       )}
 
+      {a.kind === "oauth" && a.provider === "anthropic" && a.weekly_allotment && (
+        <WeeklyAllotmentLine est={a.weekly_allotment} />
+      )}
       {a.kind === "oauth" && a.provider === "anthropic" && <CardUpstreamQuota auth={a} />}
       {a.kind === "oauth" && a.provider === "openai" && <CardUpstreamCodex auth={a} />}
       {a.kind === "oauth" && a.provider === "openai" && <CardCodexBilling auth={a} />}

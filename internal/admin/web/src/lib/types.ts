@@ -72,6 +72,10 @@ export interface AuthRow extends CredStateFields {
   client_cancel_reason?: string;
   model_map?: Record<string, string>;
   usage?: UsageSummary;
+  // Rejection-anchored weekly allotment: what the 7-day window was worth
+  // the last time this process saw it fill. Anthropic OAuth only; absent
+  // until a weekly usage-limit 429 has been observed since start-up.
+  weekly_allotment?: AllotmentEstimate;
   codex_rate_limits?: Record<string, string>;
   codex_rate_limits_at?: string;
   // Live snapshot from chatgpt.com/backend-api/wham/usage (active probe via
@@ -398,4 +402,44 @@ export interface UpstreamProfile {
 export interface UpstreamResponse {
   usage?: UpstreamUsage;
   profile?: UpstreamProfile;
+  // What each reported window is worth in our own ledger's units. Computed
+  // server-side by cc-core/quotaestimate from the request log; absent when
+  // there is nothing to say (no windows in the probe and no rejection on
+  // record).
+  allotment_estimates?: AllotmentEstimate[];
+}
+
+// AllotmentSpend mirrors cc-core quotaestimate.Spend: catalogue-price USD
+// plus tokens for one span of the ledger. weighted_tokens is the same
+// 1/1.25/0.1/5 weighting the load balancer uses, in input-equivalent tokens.
+export interface AllotmentSpend {
+  cost_usd: number;
+  weighted_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_create_tokens: number;
+  requests: number;
+}
+
+// AllotmentEstimate mirrors cc-core quotaestimate.Estimate. The window's
+// start is resets_at − length (Anthropic's windows are fixed, not rolling);
+// observed is the ledger spend from that start to now — or to the 429 under
+// basis "quota_hit", where it is a measured 100% and full_window == observed.
+export interface AllotmentEstimate {
+  window: "five_hour" | "seven_day" | string;
+  window_hours: number;
+  window_start: string;
+  window_resets_at: string;
+  utilization: number; // fraction; exactly 1 under quota_hit
+  basis: "quota_hit" | "utilization" | "observed_only";
+  confidence: "high" | "medium" | "low";
+  observed_from: string;
+  observed_to: string;
+  observed_hours: number;
+  observed: AllotmentSpend;
+  full_window?: AllotmentSpend;
+  remaining?: AllotmentSpend;
+  quota_hit_at?: string;
+  spend_error?: string;
 }

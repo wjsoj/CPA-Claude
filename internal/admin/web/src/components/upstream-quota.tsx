@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Gauge, RefreshCw, Zap } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
+  AllotmentEstimate,
   AuthRow,
   CodexResetResponse,
   CodexUsageResponse,
@@ -10,7 +11,7 @@ import type {
   UsageWindow,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
-import { cn, fmtCountdown, fmtLocalTime } from "@/lib/utils";
+import { cn, fmtCountdown, fmtDate, fmtLocalTime, fmtUSD } from "@/lib/utils";
 
 interface State {
   loading?: boolean;
@@ -188,6 +189,158 @@ function renderWindows(usage: UpstreamUsage | undefined, tick: number) {
   );
 }
 
+// ---- Allotment estimate (cc-core/quotaestimate) ----
+//
+// The upstream says how full a window is and when it reopens, never what
+// 100% is. The server works it out from our own request log: the window is
+// fixed (start = reset − length), so the spend since the start divided by the
+// reported utilization is the whole window — and when this process saw the
+// window fill, the spend up to that 429 IS the window, no scaling.
+
+function fmtHours(h: number | undefined): string {
+  if (h == null || !Number.isFinite(h)) return "—";
+  if (h < 1) return `${Math.round(h * 60)}m`;
+  if (h < 48) return `${h < 10 ? h.toFixed(1) : Math.round(h)}h`;
+  const d = Math.floor(h / 24);
+  const r = Math.round(h - d * 24);
+  return r ? `${d}d ${r}h` : `${d}d`;
+}
+
+function fmtTok(n: number | undefined): string {
+  if (n == null) return "—";
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}k`;
+  return String(n);
+}
+
+const ESTIMATE_WINDOW_LABEL: Record<string, string> = {
+  five_hour: "5-hour",
+  seven_day: "7-day",
+};
+
+const BASIS_LABEL: Record<AllotmentEstimate["basis"], string> = {
+  quota_hit: "measured at 429",
+  utilization: "scaled from %",
+  observed_only: "observed only",
+};
+
+const CONFIDENCE_CLASS: Record<AllotmentEstimate["confidence"], string> = {
+  high: "text-emerald-600 dark:text-emerald-400",
+  medium: "text-amber-600 dark:text-amber-400",
+  low: "text-muted-foreground",
+};
+
+function renderEstimates(list: AllotmentEstimate[] | undefined) {
+  if (!list || !list.length) return null;
+  return (
+    <div className="pt-2 border-t border-border/60">
+      <div className="eyebrow mb-1">Allotment estimate · catalogue price</div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="eyebrow text-muted-foreground border-b">
+            <th className="py-1.5 pr-2 text-left font-medium">Window</th>
+            <th className="py-1.5 pr-2 text-left font-medium">Basis</th>
+            <th className="py-1.5 pr-2 text-right font-medium">Observed</th>
+            <th className="py-1.5 pr-2 text-right font-medium">Full window</th>
+            <th className="py-1.5 text-right font-medium">Remaining</th>
+          </tr>
+        </thead>
+        <tbody>
+          {list.map((e) => {
+            const pct = Math.round(e.utilization * 100);
+            const full = e.full_window;
+            const rem = e.remaining;
+            const windowFull = e.basis === "quota_hit" || e.utilization >= 1;
+            return (
+              <tr key={e.window} className="border-b last:border-b-0 align-top">
+                <td className="py-1.5 pr-2">
+                  {ESTIMATE_WINDOW_LABEL[e.window] || e.window}
+                  {e.quota_hit_at && (
+                    <div className="text-[10px] text-muted-foreground">
+                      429 at {fmtDate(e.quota_hit_at)}
+                    </div>
+                  )}
+                </td>
+                <td className={cn("py-1.5 pr-2", CONFIDENCE_CLASS[e.confidence])}>
+                  {BASIS_LABEL[e.basis] || e.basis}
+                  <div className="text-[10px] opacity-80">{e.confidence} confidence</div>
+                </td>
+                <td className="py-1.5 pr-2 mono tabular text-right">
+                  {fmtUSD(e.observed.cost_usd)}
+                  <div className="text-[10px] text-muted-foreground">
+                    {fmtTok(e.observed.weighted_tokens)} wtok · {fmtHours(e.observed_hours)} · {pct}%
+                  </div>
+                  {e.spend_error && (
+                    <div className="text-[10px] text-destructive">ledger: {e.spend_error}</div>
+                  )}
+                </td>
+                <td className="py-1.5 pr-2 mono tabular text-right">
+                  {full ? (
+                    <>
+                      <span className="font-semibold">≈ {fmtUSD(full.cost_usd)}</span>
+                      <div className="text-[10px] text-muted-foreground">
+                        {fmtTok(full.weighted_tokens)} wtok · {fmtTok(full.requests)} req
+                      </div>
+                    </>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </td>
+                <td className="py-1.5 mono tabular text-right">
+                  {windowFull && full ? (
+                    <span className="text-muted-foreground">window full</span>
+                  ) : rem ? (
+                    <>
+                      ≈ {fmtUSD(rem.cost_usd)}
+                      <div className="text-[10px] text-muted-foreground">
+                        {fmtTok(rem.weighted_tokens)} wtok
+                      </div>
+                    </>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="mt-1 text-[10px] text-muted-foreground leading-snug">
+        From our own request log: spend since the window opened (reset − length) ÷ the
+        reported utilization. A usage-limit 429 makes it a direct measurement. Counts only
+        traffic through this proxy — a floor if the account is also used elsewhere.
+      </div>
+    </div>
+  );
+}
+
+// WeeklyAllotmentLine is the card-level summary of the rejection-anchored
+// weekly estimate: one number an operator can read without probing upstream.
+export function WeeklyAllotmentLine({ est }: { est: AllotmentEstimate }) {
+  const full = est.full_window;
+  if (!full) return null;
+  return (
+    <div className="px-5 py-3 border-t border-border bg-muted/20">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="eyebrow">Weekly allotment · measured</div>
+        <div className="mono tabular text-xs">
+          <span className="font-semibold">≈ {fmtUSD(full.cost_usd)}</span>
+          <span className="text-muted-foreground">
+            {" "}
+            · {fmtTok(full.weighted_tokens)} wtok · filled in {fmtHours(est.observed_hours)}
+          </span>
+        </div>
+      </div>
+      <div className="mt-1 text-[10px] text-muted-foreground leading-snug">
+        Catalogue-price spend through this proxy from the window's start to the usage-limit
+        429{est.quota_hit_at ? ` on ${fmtDate(est.quota_hit_at)}` : ""} — one full 7-day
+        window. Resets {est.window_resets_at ? fmtDate(est.window_resets_at) : "—"}.
+      </div>
+    </div>
+  );
+}
+
 // Inline panel on an OAuth credential card that fetches upstream Anthropic
 // quota/plan info for that specific credential. Request is proxied through
 // the credential's configured proxy_url (enforced server-side).
@@ -277,6 +430,7 @@ export function CardUpstreamQuota({ auth }: { auth: AuthRow }) {
           )}
           {renderProfile(profile)}
           {renderWindows(usage, tick)}
+          {renderEstimates(st.data?.allotment_estimates)}
         </div>
       )}
     </div>
