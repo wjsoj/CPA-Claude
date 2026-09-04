@@ -161,8 +161,15 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		if resp.StatusCode == http.StatusTooManyRequests && !resetAt.IsZero() && isCodexUsageLimitBody(errBody) {
 			a.MarkUsageLimitReached(resetAt)
 		}
-		s.pool.ReportUpstreamError(a, resp.StatusCode, resetAt)
 		log.Warnf("codex oauth: credential %s received %d: %s", a.ID, resp.StatusCode, truncate(errBody, 240))
+		if resp.StatusCode == http.StatusUnauthorized {
+			// A rejected bearer is handled on its own terms — strike counter,
+			// forced refresh, cooldown only when neither helps — rather than
+			// as a generic upstream error. See codex_auth_reject.go.
+			s.rejectCodexBearer(a, accessToken, errBody)
+			return true, false
+		}
+		s.pool.ReportUpstreamError(a, resp.StatusCode, resetAt)
 		return true, false
 	}
 	// Capacity errors can also come back as non-429 4xx responses; the body

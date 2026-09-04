@@ -273,7 +273,14 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 			// frame when ALPN mis-negotiates), which gorilla renders as a long
 			// \x-escaped string. Cap it so a binary reply can't dump a screenful.
 			log.Warnf("codex ws: upstream dial via %s failed (status=%d): %s", cand.ID, status, truncate([]byte(derr.Error()), 200))
-			if s.reportCodexWSDialFault(c.Request.Context(), cand, status, retryAfter, derr) {
+			if status == http.StatusUnauthorized && cand.Kind == auth.KindOAuth {
+				// Same treatment as the HTTP path (codex_auth_reject.go): the
+				// handshake body carries the backend's rejection of the bearer
+				// this dial presented.
+				seen := strings.TrimPrefix(target.Header.Get("Authorization"), "Bearer ")
+				s.rejectCodexBearer(cand, seen, []byte(derr.Error()))
+				s.pool.Unstick(provider, clientToken, slotID)
+			} else if s.reportCodexWSDialFault(c.Request.Context(), cand, status, retryAfter, derr) {
 				s.pool.Unstick(provider, clientToken, slotID)
 			}
 			s.pool.Release(provider, clientToken, slotID)
