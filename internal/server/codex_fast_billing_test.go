@@ -37,7 +37,12 @@ func TestCodexFastWalletMultiplierOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := 10 - .023*saasdb.DefaultCodexMultiplier
+	// The credential is OAuth, i.e. a ChatGPT subscription, and
+	// billCodexWSTurn derives CodexOAuth from the credential — so the
+	// requested "priority" buys no premium and the base .0092 is what reaches
+	// the wallet. This used to expect .023 (2.5x), charging the customer for
+	// an upstream cost the subscription never incurred.
+	want := 10 - .0092*saasdb.DefaultCodexMultiplier
 	if math.Abs(bal-want) > 1e-8 {
 		t.Fatalf("wallet %.8f want %.8f", bal, want)
 	}
