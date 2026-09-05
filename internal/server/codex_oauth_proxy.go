@@ -19,7 +19,9 @@ import (
 	"github.com/wjsoj/cc-core/codexerr"
 	"github.com/wjsoj/cc-core/downstream"
 	"github.com/wjsoj/cc-core/mimicry"
+	"github.com/wjsoj/cc-core/pricing"
 	"github.com/wjsoj/cc-core/requestlog"
+	"github.com/wjsoj/cc-core/servicetier"
 	ccstream "github.com/wjsoj/cc-core/stream"
 	"github.com/wjsoj/cc-core/usage"
 )
@@ -39,6 +41,14 @@ import (
 // upstream prompt cache), and the `codex-tui` User-Agent / Originator that the
 // backend fingerprints on.
 func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, body []byte, stream bool, model, clientToken, clientName, slotID string, start time.Time, attempts int) (retry, done bool) {
+	// Validate before map-based sanitizers or model rewrites can collapse
+	// duplicate keys and make the outbound tier ambiguous.
+	validatedBody, _, validationErr := servicetier.NormalizeRequest(body)
+	if validationErr != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "message": validationErr.Error()}})
+		return false, true
+	}
+	body = validatedBody
 	if path != "/v1/responses" && path != "/v1/responses/compact" {
 		// The ChatGPT backend only hosts /codex/responses{,/compact}; OAuth
 		// creds can't serve /v1/chat/completions. Ask the retry loop to try a
@@ -63,6 +73,13 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		log.Warnf("codex oauth: body sanitize failed via %s: %v", a.ID, err)
 		upstreamBody = body
 	}
+
+	normalizedBody, outboundTier, tierErr := servicetier.NormalizeRequest(upstreamBody)
+	if tierErr != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "message": tierErr.Error()}})
+		return false, true
+	}
+	upstreamBody = normalizedBody
 
 	ctx := c.Request.Context()
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upURL, bytes.NewReader(upstreamBody))
@@ -198,6 +215,10 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		return false, true
 	}
 
+	// Observe original bytes before protocol conversion or response scrubbing.
+	tierObserver := servicetier.ObserveBody(resp.Body)
+	resp.Body = tierObserver
+	var priced pricing.CostResult
 	var counts usage.Counts
 	var streamErr string
 	// Status recorded in the request log. Defaults to the upstream's, but a
@@ -376,32 +397,36 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	var costUSD float64
 	var multiplier, billed float64 = 1, 0
 	if resp.StatusCode < 400 && counts.Requests > 0 && clientToken != "" {
-		costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, counts)
+		priced = s.pricing.CostWithOptions(auth.ProviderOpenAI, billingModelFor(a, model), counts, pricing.CostOptions{ServiceTier: outboundTier, ResponseServiceTier: tierObserver.Observed(), CodexOAuth: true})
+		costUSD = priced.CostUSD
 		s.usage.RecordClient(clientToken, clientName, counts, costUSD)
 		multiplier, billed = s.saas.SettleCharge(context.WithoutCancel(c.Request.Context()),
 			clientToken, auth.ProviderOpenAI, model, costUSD,
 			apiKeyPriceOverride(a), "codex-oauth:"+a.ID)
 	}
 	s.emitLog(requestlog.Record{
-		Client:      clientName,
-		ClientToken: maskClientToken(clientToken),
-		Provider:    auth.ProviderOpenAI,
-		AuthID:      a.ID,
-		AuthLabel:   a.Label,
-		AuthKind:    "oauth",
-		Model:       model,
-		Input:       counts.InputTokens,
-		Output:      counts.OutputTokens,
-		CacheRead:   counts.CacheReadTokens,
-		CostUSD:     costUSD,
-		BilledUSD:   billed,
-		Multiplier:  multiplier,
-		Status:      logStatus,
-		DurationMs:  time.Since(start).Milliseconds(),
-		Stream:      stream,
-		Path:        path,
-		Attempts:    attempts,
-		Error:       streamErr,
+		RequestedServiceTier: outboundTier,
+		UpstreamServiceTier:  tierObserver.Observed(),
+		ServiceTier:          priced.Tier.Billing,
+		Client:               clientName,
+		ClientToken:          maskClientToken(clientToken),
+		Provider:             auth.ProviderOpenAI,
+		AuthID:               a.ID,
+		AuthLabel:            a.Label,
+		AuthKind:             "oauth",
+		Model:                model,
+		Input:                counts.InputTokens,
+		Output:               counts.OutputTokens,
+		CacheRead:            counts.CacheReadTokens,
+		CostUSD:              costUSD,
+		BilledUSD:            billed,
+		Multiplier:           multiplier,
+		Status:               logStatus,
+		DurationMs:           time.Since(start).Milliseconds(),
+		Stream:               stream,
+		Path:                 path,
+		Attempts:             attempts,
+		Error:                streamErr,
 	})
 	if resp.StatusCode < 400 {
 		a.MarkSuccess()
@@ -896,6 +921,7 @@ func isCodexUsageLimitBody(body []byte) bool {
 // trailing newline so the passthrough writes the exact bytes the upstream
 // sent (SSE is whitespace-sensitive).
 type lineReader struct {
+	err error // deferred until all bytes from the same Read are framed
 	buf []byte
 	pos int
 	src io.Reader
@@ -914,6 +940,11 @@ func (lr *lineReader) readLine() ([]byte, error) {
 			}
 			return line, nil
 		}
+		if lr.err != nil {
+			rest := lr.buf[lr.pos:]
+			lr.pos = len(lr.buf)
+			return rest, lr.err
+		}
 		// Shift remaining unread bytes to the start before the next read
 		// so we don't grow the buffer unbounded on a slow stream.
 		if lr.pos > 0 {
@@ -925,6 +956,10 @@ func (lr *lineReader) readLine() ([]byte, error) {
 		n, err := lr.src.Read(chunk)
 		if n > 0 {
 			lr.buf = append(lr.buf, chunk[:n]...)
+			// io.Reader may return final data and EOF together. Frame every
+			// buffered line before exposing that error to the SSE consumer.
+			lr.err = err
+			continue
 		}
 		if err != nil {
 			// Flush any tail bytes without a terminator on EOF.

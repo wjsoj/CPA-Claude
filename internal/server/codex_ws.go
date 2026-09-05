@@ -21,8 +21,10 @@ import (
 	"github.com/wjsoj/cc-core/codexws"
 	"github.com/wjsoj/cc-core/downstream"
 	"github.com/wjsoj/cc-core/mimicry"
+	"github.com/wjsoj/cc-core/pricing"
 	"github.com/wjsoj/cc-core/relay"
 	"github.com/wjsoj/cc-core/requestlog"
+	"github.com/wjsoj/cc-core/servicetier"
 	"github.com/wjsoj/cc-core/usage"
 )
 
@@ -58,6 +60,7 @@ const (
 
 // codexWSTurnBill is one completed WS turn queued for asynchronous settlement.
 type codexWSTurnBill struct {
+	meta servicetier.Turn
 	turn usage.Counts
 	dur  time.Duration
 }
@@ -193,11 +196,8 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 
 	// The model is read off the first frame for routing, billing and log rows.
 	//
-	// It no longer feeds an x-codex-routing-hint: that header is not sent on a
-	// WebSocket upgrade. Neither the 0.135.0 CLI capture nor the 0.147.0 Desktop
-	// capture carries it on the handshake (both send the same 18 headers), so
-	// cc-core stopped setting it there; the hint remains on the HTTP path, where
-	// the codex-rs source reading is uncontradicted.
+	// The current CLI also puts this model and the first frame's tier in
+	// its handshake routing hint. Billing still tracks EVERY turn separately.
 	model := codexWSExtractModel(firstFrame)
 	if model == "" {
 		model = "unknown"
@@ -253,6 +253,9 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 			// A plain vendor API key speaks HTTP only — nothing to dial.
 			s.pool.Release(provider, clientToken, slotID)
 			continue
+		}
+		if hint := mimicry.CodexRoutingHint(model, servicetier.Request(firstFrame)); hint != "" {
+			target.Header[mimicry.CodexRoutingHintHeader] = []string{hint}
 		}
 		conn, resp, derr := codexws.Dial(c.Request.Context(), target)
 		// On a non-101 the body carries the upstream error; on success gorilla
@@ -312,7 +315,17 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 	defer s.pool.Release(provider, clientToken, slotID)
 
 	// Relay the first frame upstream, then run the bidirectional pump.
+	firstFrame, _, err = servicetier.NormalizeRequest(firstFrame)
+	if err != nil {
+		closeCodexWS(clientConn, gorillaws.ClosePolicyViolation, "invalid service tier")
+		return
+	}
 	firstFrame = rebindCodexFrame(firstFrame, ident, a)
+	tierTracker := &servicetier.TurnTracker{}
+	if !tierTracker.Sent(firstFrame) {
+		closeCodexWS(clientConn, gorillaws.ClosePolicyViolation, "invalid turn metadata")
+		return
+	}
 	_ = up.SetWriteDeadline(time.Now().Add(codexWSWriteDeadline))
 	if err := up.WriteMessage(codexws.TextMessage, firstFrame); err != nil {
 		log.Warnf("codex ws: first upstream write via %s failed: %v", a.ID, err)
@@ -339,17 +352,17 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 	go func() {
 		defer billWG.Done()
 		for tb := range billCh {
-			s.billCodexWSTurn(c, a, model, clientToken, clientName, tb.turn, tb.dur)
+			s.billCodexWSTurn(c, a, codexBillingTurnModel(model, tb.meta), clientToken, clientName, tb.turn, tb.dur, pricing.CostOptions{ServiceTier: tb.meta.Requested, ResponseServiceTier: tb.meta.Observed})
 		}
 	}()
 	billTurn := func(turn usage.Counts, dur time.Duration) {
-		tb := codexWSTurnBill{turn: turn, dur: dur}
+		tb := codexWSTurnBill{meta: tierTracker.LastCompleted(), turn: turn, dur: dur}
 		select {
 		case billCh <- tb:
 		default:
 			// Queue full (billing lagging behind a very bursty session): settle
 			// inline rather than drop the charge. Rare; bounds memory too.
-			s.billCodexWSTurn(c, a, model, clientToken, clientName, tb.turn, tb.dur)
+			s.billCodexWSTurn(c, a, codexBillingTurnModel(model, tb.meta), clientToken, clientName, tb.turn, tb.dur, pricing.CostOptions{ServiceTier: tb.meta.Requested, ResponseServiceTier: tb.meta.Observed})
 		}
 	}
 	// An account-scoped shed (quota / rate limit — NOT capacity, see
@@ -363,7 +376,7 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 	onShed := func() {
 		unstuck.Do(func() { s.pool.Unstick(provider, clientToken, slotID) })
 	}
-	s.pumpCodexWS(c.Request.Context(), clientConn, up, a, clientGroup, ident, &counts, billTurn, onShed)
+	s.pumpCodexWS(c.Request.Context(), clientConn, up, a, clientGroup, ident, &counts, billTurn, onShed, tierTracker)
 	close(billCh)
 	billWG.Wait() // drain every queued turn before the request returns
 
@@ -392,7 +405,11 @@ func (s *Server) handleCodexResponsesWS(c *gin.Context) {
 // die mid-flight — see the caller.
 // onShed is invoked when upstream sheds a turn for capacity/quota inside the
 // otherwise-healthy socket (see the capacity handling in the relay below).
-func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up codexws.Conn, a *auth.Auth, group string, ident mimicry.CodexFrameIdentity, counts *usage.Counts, onTurn func(turn usage.Counts, dur time.Duration), onShed func()) {
+func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up codexws.Conn, a *auth.Auth, group string, ident mimicry.CodexFrameIdentity, counts *usage.Counts, onTurn func(turn usage.Counts, dur time.Duration), onShed func(), tierTrackers ...*servicetier.TurnTracker) {
+	var tierTracker *servicetier.TurnTracker
+	if len(tierTrackers) > 0 {
+		tierTracker = tierTrackers[0]
+	}
 	done := make(chan struct{})
 	var once sync.Once
 	// stop tears the session down. closeCode/closeReason describe why, so the
@@ -451,6 +468,7 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 			// what upstream actually said.
 			out := data
 			if mt == codexws.TextMessage && len(data) > 0 {
+				tierTracker.Observe(data)
 				if rid := codexResponseID(data); rid != "" {
 					s.codexRespAccount.Bind(group, rid, a.ID)
 				}
@@ -466,6 +484,7 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 				}
 
 				if codexTerminalEvent(data) {
+					tierTracker.Complete()
 					counts.Requests++
 					midTurn = false
 					if onTurn != nil {
@@ -522,7 +541,19 @@ func (s *Server) pumpCodexWS(ctx context.Context, client *gorillaws.Conn, up cod
 				// Every turn after the first goes through here too. Skipping it
 				// would leak the downstream client's identity from turn two
 				// onward, which is the same disclosure as leaking it on turn one.
+				if codexWSFrameIsResponseCreate(data) {
+					var tierErr error
+					data, _, tierErr = servicetier.NormalizeRequest(data)
+					if tierErr != nil {
+						stop(gorillaws.ClosePolicyViolation, "invalid service tier")
+						return
+					}
+				}
 				data = rebindCodexFrame(data, ident, a)
+				if !tierTracker.Sent(data) {
+					stop(gorillaws.ClosePolicyViolation, "too many pending turns")
+					return
+				}
 			}
 			_ = up.SetWriteDeadline(time.Now().Add(codexWSWriteDeadline))
 			// Echo the frame's own type, for the mirror-image reason: only text
@@ -579,7 +610,13 @@ func codexTurnDelta(cur, billed usage.Counts) usage.Counts {
 // settlement never double-counts it. One request-log row is emitted per turn,
 // so the admin panel shows each turn's real cost as it happens rather than a
 // single hour-long row at the end.
-func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToken, clientName string, turn usage.Counts, dur time.Duration) {
+func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToken, clientName string, turn usage.Counts, dur time.Duration, options ...pricing.CostOptions) {
+	billingOptions := pricing.CostOptions{}
+	if len(options) > 0 {
+		billingOptions = options[0]
+	}
+	billingOptions.CodexOAuth = a.Kind == auth.KindOAuth
+	var priced pricing.CostResult
 	// A WS session can also be served by a relay peer once the OAuth fleet is
 	// exhausted, and that credential carries its own markup — so the kind has to
 	// be read off the auth rather than assumed, both for the charge's source tag
@@ -593,7 +630,8 @@ func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToke
 	var costUSD float64
 	var multiplier, billed float64 = 1, 0
 	if turn.Requests > 0 && clientToken != "" {
-		costUSD = s.pricing.Cost(auth.ProviderOpenAI, model, turn)
+		priced = s.pricing.CostWithOptions(auth.ProviderOpenAI, billingModelFor(a, model), turn, billingOptions)
+		costUSD = priced.CostUSD
 		s.usage.RecordClient(clientToken, clientName, turn, costUSD)
 		if s.saas != nil {
 			multiplier, billed = s.saas.SettleCharge(context.WithoutCancel(c.Request.Context()),
@@ -602,23 +640,26 @@ func (s *Server) billCodexWSTurn(c *gin.Context, a *auth.Auth, model, clientToke
 		}
 	}
 	s.emitLog(requestlog.Record{
-		Client:      clientName,
-		ClientToken: maskClientToken(clientToken),
-		Provider:    auth.ProviderOpenAI,
-		AuthID:      a.ID,
-		AuthLabel:   a.Label,
-		AuthKind:    kind,
-		Model:       model,
-		Input:       turn.InputTokens,
-		Output:      turn.OutputTokens,
-		CacheRead:   turn.CacheReadTokens,
-		CostUSD:     costUSD,
-		BilledUSD:   billed,
-		Multiplier:  multiplier,
-		Status:      200,
-		DurationMs:  dur.Milliseconds(),
-		Stream:      true,
-		Path:        "/v1/responses",
+		RequestedServiceTier: billingOptions.ServiceTier,
+		UpstreamServiceTier:  billingOptions.ResponseServiceTier,
+		ServiceTier:          priced.Tier.Billing,
+		Client:               clientName,
+		ClientToken:          maskClientToken(clientToken),
+		Provider:             auth.ProviderOpenAI,
+		AuthID:               a.ID,
+		AuthLabel:            a.Label,
+		AuthKind:             kind,
+		Model:                model,
+		Input:                turn.InputTokens,
+		Output:               turn.OutputTokens,
+		CacheRead:            turn.CacheReadTokens,
+		CostUSD:              costUSD,
+		BilledUSD:            billed,
+		Multiplier:           multiplier,
+		Status:               200,
+		DurationMs:           dur.Milliseconds(),
+		Stream:               true,
+		Path:                 "/v1/responses",
 	})
 }
 
@@ -892,4 +933,18 @@ func rebindCodexFrame(frame []byte, ident mimicry.CodexFrameIdentity, a *auth.Au
 		return frame
 	}
 	return out
+}
+
+func codexBillingTurnModel(fallback string, turn servicetier.Turn) string {
+	if turn.Model != "" {
+		return turn.Model
+	}
+	return fallback
+}
+
+func codexWSFrameIsResponseCreate(frame []byte) bool {
+	var event struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(frame, &event) == nil && event.Type == "response.create"
 }

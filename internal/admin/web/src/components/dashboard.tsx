@@ -51,6 +51,7 @@ const WorkspacesPanel = lazyNamed(() => import("./workspaces-panel"), "Workspace
 // so narrowing that provider would hide real rows to solve a problem it does
 // not have.
 const SOLD_OPENAI_MODELS = new Set([
+  "openai/gpt-6-astra",
   "openai/gpt-5.6-sol",
   "openai/gpt-5.6-terra",
   "openai/gpt-5.6-luna",

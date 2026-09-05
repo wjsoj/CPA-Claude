@@ -37,7 +37,7 @@ Windows 用户如果在原生 PowerShell 遇到 shell / PTY 问题，改用 WSL2
 
 ```toml
 model_provider = "cpa"
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
@@ -120,11 +120,14 @@ codex exec --model gpt-5.3-codex "解释这个仓库的构建流程"
 `GET /v1/models` 返回当前实际可用集合。常见模型名：
 
 ```
+gpt-6-astra
 gpt-5.6-sol  gpt-5.6-terra  gpt-5.6-luna
 gpt-5.5  gpt-5.4  gpt-5.4-mini  gpt-5.2
 gpt-5.3-codex  gpt-5.3-codex-spark
 gpt-5  gpt-5-mini  gpt-5-nano  gpt-4o  gpt-4o-mini
 ```
+
+`gpt-6-astra` 是当前旗舰，需要 Codex CLI **0.153.0 及以上**；更旧的客户端不会被上游下发该模型。
 
 切换模型：改 `config.toml` 里的 `model =`，或临时 `codex --model gpt-5.4`。
 
