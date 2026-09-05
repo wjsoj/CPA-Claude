@@ -92,6 +92,13 @@ type Server struct {
 	codexRefreshGate refreshGate
 	codexRefresh     func(ctx context.Context, a *auth.Auth) error
 
+	// codexManifests caches the upstream Codex model manifest per requesting
+	// client version. Pickers refresh at client start, so a cache miss would
+	// otherwise fan several concurrent clients out into as many upstream
+	// fetches. A failed refresh serves the stale body rather than an empty
+	// picker — see auth.CodexManifestCache.
+	codexManifests *auth.CodexManifestCache
+
 	// codexRespAccount binds a Codex response id to the credential that produced
 	// it, namespaced by credential group. Backs the cross-group previous_response_id
 	// safety boundary on the WS path. Always initialized (cheap; janitor goroutine).
@@ -121,6 +128,10 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 	s := &Server{cfg: cfg, pool: pool, usage: store, pricing: cat, tokens: tokens, reqLog: reqLog,
 		logIndexed: logIndex != nil}
 	s.codexRespAccount = newCodexRespAccountStore(codexRespAccountTTL)
+	// 30 min: model catalogs move on the order of weeks, so this is already
+	// far tighter than the thing it tracks, and a shorter TTL only adds
+	// upstream fetches without adding freshness.
+	s.codexManifests = &auth.CodexManifestCache{TTL: 30 * time.Minute}
 	s.codexSessions = codexws.NewSessionRegistry(0)
 	if cfg.ClientGuard.Enabled {
 		s.guard = clientguard.New(cfg.ClientGuard.ExtraBlockedUserAgents, !cfg.ClientGuard.AllowEmptyUserAgent)
@@ -384,6 +395,18 @@ func (s *Server) buildCodexEngine(adminH *admin.Handler, primary bool) *gin.Engi
 		if s.cfg.CodexWS.Enabled {
 			v1.GET("/responses", s.handleCodexResponsesWS)
 		}
+	}
+
+	// chatgpt_base_url mode. A Codex client configured with
+	// `chatgpt_base_url = "https://gateway"` refreshes its picker from this
+	// path rather than from /v1/models, and until it existed the SPA
+	// catch-all answered it with a 200 carrying the admin panel's HTML —
+	// which a Codex client can neither parse nor complain about. It must stay
+	// registered ahead of any NoRoute handler.
+	backend := engine.Group("/backend-api/codex")
+	backend.Use(s.clientAuth())
+	{
+		backend.GET("/models", s.handleCodexModels)
 	}
 
 	if primary {
