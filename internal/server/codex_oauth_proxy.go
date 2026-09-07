@@ -281,6 +281,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 			} else {
 				streamErr = "upstream shed the turn (quota/rate)"
 			}
+			a.MarkModelShed(model, time.Now())
 		}
 		if !res.sawTerminal && !res.wroteAny {
 			// Nothing reached the client yet. If the client itself went away,
@@ -295,6 +296,14 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 				// also rotates without cooling: capacity is a property of the
 				// model and the moment, and cooling the account would take all
 				// of its other models offline too.
+				//
+				// What IS recorded is a per-(credential, model) demotion, so
+				// the scheduler prefers somewhere else for this model over the
+				// next minute or so while the account keeps its normal
+				// position for everything else. It orders candidates rather
+				// than removing them, so a window where the model is at
+				// capacity everywhere still routes instead of 503ing.
+				a.MarkModelShed(model, time.Now())
 				log.Warnf("codex oauth: %s shed the request mid-stream (attempt %d, %s): %s — retrying on another credential",
 					a.ID, attempts, time.Since(start).Round(time.Millisecond), res.shed)
 				return true, false
@@ -437,6 +446,13 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	})
 	if resp.StatusCode < 400 {
 		a.MarkSuccess()
+		if streamErr == "" {
+			// Served this model without being shed, so any capacity demotion
+			// recorded earlier is stale — capacity comes back abruptly, and a
+			// credential that has just proved it can serve the model should
+			// compete on equal terms for the next request.
+			a.NoteModelServed(model)
+		}
 	}
 	return false, true
 }
