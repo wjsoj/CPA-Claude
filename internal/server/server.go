@@ -68,6 +68,12 @@ type Server struct {
 	// codexSidecar emulates the auxiliary traffic a real Codex client emits.
 	// Always constructed; it is inert unless cfg.CodexSidecar.Enabled.
 	codexSidecar *codexsidecar.Manager
+
+	// codexWSEgress forwards HTTP-ingress Codex requests over an upstream
+	// WebSocket — the transport a current codex-tui actually uses — reusing one
+	// socket per conversation. Always constructed; inert unless
+	// cfg.CodexWS.Upstream selects a WebSocket mode. See codex_ws_egress.go.
+	codexWSEgress *codexWSEgress
 	// switchTracker detects when a conversation rotates mid-stream from
 	// one upstream credential to another. On switch we sanitize away
 	// the prior account's signed `thinking` blocks before forwarding
@@ -156,6 +162,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 		Enabled: cfg.CodexSidecar.Enabled,
 		UseUTLS: cfg.UseUTLS,
 	})
+	s.codexWSEgress = newCodexWSEgress(cfg)
 	s.switchTracker = thinkingsig.NewSwitchTracker()
 
 	// SaaS billing — token wallet + Z-Pay top-ups. Best-effort: if the
@@ -339,6 +346,7 @@ func (s *Server) Start() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.sidecar.Stop()
 	s.codexSidecar.Stop()
+	s.codexWSEgress.Close()
 	if s.monitorCancel != nil {
 		s.monitorCancel()
 	}
