@@ -163,6 +163,7 @@ func New(cfg *config.Config, pool *auth.Pool, store *usage.Store, reqLog *reques
 		UseUTLS: cfg.UseUTLS,
 	})
 	s.codexWSEgress = newCodexWSEgress(cfg)
+	s.codexWSEgress.warnUnmatchedAllowlist(pool)
 	s.switchTracker = thinkingsig.NewSwitchTracker()
 
 	// SaaS billing — token wallet + Z-Pay top-ups. Best-effort: if the
