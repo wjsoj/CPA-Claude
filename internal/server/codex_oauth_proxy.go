@@ -263,6 +263,11 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	var priced pricing.CostResult
 	var counts usage.Counts
 	var streamErr string
+	// upstreamModel is reported by the streaming relay only. The aggregating
+	// and compact paths assemble a whole body and never classify frames, so
+	// they have no terminal event to read it off; an empty value there means
+	// "not observed", not "matched".
+	var upstreamModel string
 	// Status recorded in the request log. Defaults to the upstream's, but a
 	// mid-stream client hang-up overrides it to 499 — the response was 200 on
 	// the wire, yet logging it as a success with an error attached hides it
@@ -304,6 +309,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		// tracking). Headers are committed lazily inside the relay, so a break
 		// before the first byte reaches the client is recoverable.
 		res := streamSSECodexBackend(c, resp, &counts, func() { writeResponseHeaders(c, resp) })
+		upstreamModel = res.upstreamModel
 		// A shed that landed after output started could only be demoted, never
 		// withheld. Say so: the demotion works, so the CLI backs off and
 		// recovers and nothing else records that upstream refused to serve. The
@@ -474,6 +480,8 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		Model:                model,
 		Input:                counts.InputTokens,
 		Output:               counts.OutputTokens,
+		ReasoningTokens:      counts.ReasoningTokens,
+		UpstreamModel:        upstreamModel,
 		CacheRead:            counts.CacheReadTokens,
 		CostUSD:              costUSD,
 		BilledUSD:            billed,
@@ -783,6 +791,7 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 	// comment on codexStreamResult.
 	lastPayloadType := ""
 	committedBy := ""
+	upstreamModel := ""
 	sentAny := false // whether we've handed Relay any bytes yet
 	// An SSE event is "event: X\ndata: {…}\n\n", and the verdict lives in the
 	// data line — but the event line arrives first. Releasing it immediately
@@ -840,6 +849,9 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 						lastPayloadType = codexEventType(payload)
 						events++
 						counts.Add(extractCodexBackendUsageFromJSON(payload))
+						if m := extractCodexUpstreamModel(payload); m != "" {
+							upstreamModel = m
+						}
 
 						if codexerr.Classify(payload) == codexerr.ClassRetryable {
 							if !sentAny {
@@ -991,7 +1003,7 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 		KeepalivePayload: []byte(":\n\n"),
 		Next:             next,
 	})
-	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed, demoted: demotedShed, committedBy: committedBy}
+	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed, demoted: demotedShed, committedBy: committedBy, upstreamModel: upstreamModel}
 }
 
 // shedSignal records an in-band shed observed while relaying a Codex SSE
@@ -1029,6 +1041,10 @@ type codexStreamResult struct {
 	// inferred from a timestamp column, once wrongly. The transport keeps
 	// adding frames the HTTP path never had; this names them as they appear.
 	committedBy string
+	// upstreamModel is what the terminal event said the provider actually ran.
+	// It is not always what was asked for: a provider under load can serve
+	// something lighter and say so only here.
+	upstreamModel string
 	// demoted: a shed that arrived after output had started, so it could only
 	// be demoted (or forwarded) on the way out rather than withheld.
 	demoted shedSignal
