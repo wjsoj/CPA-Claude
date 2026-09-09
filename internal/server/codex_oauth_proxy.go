@@ -382,8 +382,8 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 					a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond))
 			} else {
 				streamErr = fmt.Sprintf("stream truncated mid-flight after %d event(s)/%dB: %v", res.events, res.bytes, res.err)
-				log.Warnf("codex oauth: "+upstreamTransport+" stream truncated mid-stream via %s (attempt %d, events=%d, bytes=%d, %s): %v",
-					a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond), res.err)
+				log.Warnf("codex oauth: "+upstreamTransport+" stream truncated mid-stream via %s (attempt %d, events=%d, bytes=%d, committed by %q, %s): %v",
+					a.ID, attempts, res.events, res.bytes, res.committedBy, time.Since(start).Round(time.Millisecond), res.err)
 			}
 		}
 	default:
@@ -627,6 +627,18 @@ func codexTerminalEvent(payload []byte) bool {
 // so holding them back costs the client nothing — and it keeps the response
 // uncommitted long enough for a capacity shed to be withheld and failed over
 // instead of being forwarded as an error the user has to see.
+// codexEventType reads a Codex event payload's declared type, or "" when the
+// payload is not an object with one.
+func codexEventType(payload []byte) string {
+	var ev struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(payload, &ev) != nil {
+		return ""
+	}
+	return ev.Type
+}
+
 func codexPreambleEvent(payload []byte) bool {
 	var ev struct {
 		Type string `json:"type"`
@@ -766,6 +778,11 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 	// fires. Without this the error frame itself counts as the first output and
 	// permanently forecloses failover; see cc-core/codexerr.
 	shedding := false
+	// lastPayloadType is the type of the most recently classified data line and
+	// committedBy the one that closed the withhold window — see the field's
+	// comment on codexStreamResult.
+	lastPayloadType := ""
+	committedBy := ""
 	sentAny := false // whether we've handed Relay any bytes yet
 	// An SSE event is "event: X\ndata: {…}\n\n", and the verdict lives in the
 	// data line — but the event line arrives first. Releasing it immediately
@@ -820,6 +837,7 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 				case bytes.HasPrefix(trim, []byte("data:")):
 					payload := bytes.TrimSpace(trim[5:])
 					if len(payload) > 0 && payload[0] == '{' {
+						lastPayloadType = codexEventType(payload)
 						events++
 						counts.Add(extractCodexBackendUsageFromJSON(payload))
 
@@ -941,6 +959,9 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 			}
 
 			if len(out) > 0 {
+				if !sentAny {
+					committedBy = lastPayloadType
+				}
 				sentAny = true
 			}
 			if len(out) > 0 || rerr != nil {
@@ -962,7 +983,7 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 		KeepalivePayload: []byte(":\n\n"),
 		Next:             next,
 	})
-	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed, demoted: demotedShed}
+	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed, demoted: demotedShed, committedBy: committedBy}
 }
 
 // shedSignal records an in-band shed observed while relaying a Codex SSE
@@ -993,6 +1014,13 @@ type codexStreamResult struct {
 	bytes       int64  // bytes written downstream (diagnostics)
 	err         error  // underlying read error when the stream broke early
 	shed        string // non-empty when a pre-output capacity/quota frame was withheld
+	// committedBy is the event type of the frame that first reached the client
+	// and so closed the withhold window. It exists because "which frame
+	// committed the response" decided, twice in one morning, whether a stalled
+	// turn could be rescued or only truncated — and both times it had to be
+	// inferred from a timestamp column, once wrongly. The transport keeps
+	// adding frames the HTTP path never had; this names them as they appear.
+	committedBy string
 	// demoted: a shed that arrived after output had started, so it could only
 	// be demoted (or forwarded) on the way out rather than withheld.
 	demoted shedSignal
