@@ -419,7 +419,13 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 				})
 				return false, true
 			}
-			if errors.Is(aerr, io.EOF) || errors.Is(aerr, io.ErrUnexpectedEOF) || isTransientNetErr(aerr) {
+			// A parked turn belongs here and not in the 502 below. It is the
+			// clearest possible case for another credential — the backend
+			// accepted the turn and never scheduled it, which is a property of
+			// this account at this moment — and it reaches this branch as
+			// neither an EOF nor a net error, so the allowlist has to name it.
+			if errors.Is(aerr, io.EOF) || errors.Is(aerr, io.ErrUnexpectedEOF) ||
+				isTransientNetErr(aerr) || errors.Is(aerr, codexws.ErrStalled) {
 				log.Warnf("codex oauth: aggregation truncated via %s (attempt %d): %v — retrying on another credential", a.ID, attempts, aerr)
 				return true, false
 			}

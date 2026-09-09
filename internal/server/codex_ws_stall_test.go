@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,7 +40,7 @@ func TestStallBudgetStaysInsideTheWithholdCap(t *testing.T) {
 func TestStallBudgetDefaultsAndOptOut(t *testing.T) {
 	var unset config.CodexWSUpstreamConfig
 	unset.Normalize()
-	if got, want := unset.StallTimeoutSeconds, 90; got != want {
+	if got, want := unset.StallTimeoutSeconds, 120; got != want {
 		t.Fatalf("default stall budget = %ds, want %ds", got, want)
 	}
 
@@ -169,5 +171,49 @@ func TestParkedTurnFailsOverInsteadOfHanging(t *testing.T) {
 	}
 	if !conn.closed {
 		t.Fatal("the parked socket was kept: it still has an unscheduled turn on it, and the next turn would read this one's leftovers")
+	}
+}
+
+// TestParkedNonStreamingTurnFailsOver covers the aggregating path, which does
+// not use the relay at all — it assembles the whole SSE body before answering —
+// so the stall budget has to reach it through the read error rather than
+// through the relay's withhold latch.
+//
+// It runs on /v1/responses rather than the /v1/chat/completions the hypitoken
+// copy uses: this fork has no chat bridge on the Codex OAuth path, and a
+// chat body here is declined before the socket is ever dialled, which made the
+// ported test pass without testing anything.
+func TestParkedNonStreamingTurnFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	conn := &parkingConn{}
+	cred := wsCred("parked-nonstream")
+	s := wsEgressServer(t, "https://unused.invalid", func(context.Context, codexws.DialConfig) (codexws.Conn, *http.Response, error) {
+		return conn, &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{}}, nil
+	}, cred)
+	s.codexWSEgress.cfg.StallTimeoutSeconds = 1
+
+	body := []byte(`{"model":"gpt-5.5","stream":false,"prompt_cache_key":"conv-2","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", strings.NewReader(string(body)))
+
+	start := time.Now()
+	retry, done := s.doForwardCodexOAuth(c, cred, "/v1/responses", body, false, "gpt-5.5", "tok", "tester", "slot-2", time.Now(), 1)
+	elapsed := time.Since(start)
+
+	if !retry || done {
+		t.Fatalf("parked non-streaming turn: retry=%v done=%v, want retry=true done=false", retry, done)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("parked non-streaming turn took %s: the stall budget did not bound it", elapsed)
+	}
+	// Without this the test passes for the wrong reason: a turn that never
+	// reached the WebSocket also comes back retry=true, instantly, and would
+	// report the budget working when it was never consulted.
+	if conn.beats == 0 {
+		t.Fatal("the turn never reached the parked socket, so nothing here was a test of the stall budget")
+	}
+	if elapsed < time.Second {
+		t.Fatalf("gave up after %s, before the 1s budget could expire — something other than the stall budget ended this turn", elapsed)
 	}
 }
