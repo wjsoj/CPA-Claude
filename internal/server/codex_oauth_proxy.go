@@ -17,6 +17,7 @@ import (
 
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/codexerr"
+	"github.com/wjsoj/cc-core/codexws"
 	"github.com/wjsoj/cc-core/downstream"
 	"github.com/wjsoj/cc-core/mimicry"
 	"github.com/wjsoj/cc-core/pricing"
@@ -692,6 +693,12 @@ var codexContentFreeEvents = map[string]bool{
 // behaves exactly as it did before any of this existed.
 const codexPreOutputWithholdCap = 4 * time.Minute
 
+// codexStalledShedLabel names a turn the backend accepted, heartbeated, and
+// never scheduled. It reads as a shed in the logs and the attempt archive
+// because that is what it is — the WebSocket transport's spelling of the error
+// frame the HTTP transport sends.
+const codexStalledShedLabel = "upstream parked the turn: no output within the stall budget"
+
 // streamSSECodexBackend is the Codex backend SSE passthrough. The format
 // differs from OpenAI's API-key response: events carry JSON payloads
 // structured as `response.completed` / `response.output_item.done` etc.
@@ -759,6 +766,20 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 	next := func() (out []byte, terminal bool, err error) {
 		for {
 			line, rerr := reader.readLine()
+			// A parked turn ends as a read error, not as a frame, so it has to
+			// latch the withhold here rather than in the classifier below.
+			// Without the latch the buffered preamble is released on the way
+			// out — the "release it rather than swallow the response" rule two
+			// screens down, which is right for an EOF and exactly wrong here.
+			// Those bytes are nothing but keepalives, and flushing them commits
+			// the response and forecloses the failover this whole path exists
+			// to keep open.
+			if rerr != nil && !sentAny && !shedding && errors.Is(rerr, codexws.ErrStalled) {
+				shedding = true
+				shed = codexStalledShedLabel
+				held = nil
+				preamble = nil
+			}
 			if len(line) > 0 {
 				trim := bytes.TrimRight(line, "\r\n")
 				switch {
