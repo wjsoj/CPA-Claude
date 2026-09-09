@@ -258,6 +258,16 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	}
 
 	// Observe original bytes before protocol conversion or response scrubbing.
+	// The stall budget exists to convert a turn the backend parked into a
+	// failover, and the failover is gone at the first byte the client receives.
+	// Retire it there: past the commit it can only cut a slow turn into a
+	// truncated one, which was the single largest source of truncated Codex
+	// streams the day it shipped on the sibling deployment.
+	//
+	// Captured here rather than inside the relay because the observer below
+	// wraps the body and hides the method — the first version of this fix read
+	// the wrapper and silently did nothing.
+	disarmStall := codexStallDisarmer(resp.Body)
 	tierObserver := servicetier.ObserveBody(resp.Body)
 	resp.Body = tierObserver
 	var priced pricing.CostResult
@@ -308,7 +318,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		// Streaming client: passthrough SSE verbatim (with keepalive + terminal
 		// tracking). Headers are committed lazily inside the relay, so a break
 		// before the first byte reaches the client is recoverable.
-		res := streamSSECodexBackend(c, resp, &counts, func() { writeResponseHeaders(c, resp) })
+		res := streamSSECodexBackend(c, resp, &counts, func() { disarmStall(); writeResponseHeaders(c, resp) })
 		upstreamModel = res.upstreamModel
 		// A shed that landed after output started could only be demoted, never
 		// withheld. Say so: the demotion works, so the CLI backs off and
@@ -388,8 +398,8 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 					a.ID, attempts, res.events, res.bytes, time.Since(start).Round(time.Millisecond))
 			} else {
 				streamErr = fmt.Sprintf("stream truncated mid-flight after %d event(s)/%dB: %v", res.events, res.bytes, res.err)
-				log.Warnf("codex oauth: "+upstreamTransport+" stream truncated mid-stream via %s (attempt %d, events=%d, bytes=%d, committed by %q, %s): %v",
-					a.ID, attempts, res.events, res.bytes, res.committedBy, time.Since(start).Round(time.Millisecond), res.err)
+				log.Warnf("codex oauth: "+upstreamTransport+" stream truncated mid-stream via %s (attempt %d, events=%d, bytes=%d, committed by %q%s, %s): %v",
+					a.ID, attempts, res.events, res.bytes, res.committedBy, codexFatalCodeSuffix(res.fatalCode), time.Since(start).Round(time.Millisecond), res.err)
 			}
 		}
 	default:
@@ -647,12 +657,87 @@ func codexEventType(payload []byte) string {
 	return ev.Type
 }
 
+// codexStallDisarmer retires the WebSocket stall budget once the relay has
+// committed the response.
+//
+// The budget exists to convert a turn the backend parked into a failover, and
+// the failover is gone the moment the first byte reaches the client. Left armed
+// it can only cut a slow turn into a truncated one — the single largest source
+// of truncated Codex streams the day the budget shipped. The HTTP transport has
+// no such budget and returns a no-op.
+// codexErrorFrameCode reads the vendor error code out of an error frame, in
+// both the shapes the Codex backend uses. It exists for the log line below:
+// an error frame the classifier calls fatal is forwarded verbatim, which
+// commits the response and forecloses failover, so when the socket then dies
+// the turn reaches the client as a truncation. Sixty of those landed in one
+// seven-hour window under a single label, with nothing recorded to say which
+// code produced them or whether it should have been retryable.
+func codexErrorFrameCode(payload []byte) string {
+	var f struct {
+		Error *struct {
+			Code string `json:"code"`
+			Type string `json:"type"`
+		} `json:"error"`
+		Response *struct {
+			Error *struct {
+				Code string `json:"code"`
+				Type string `json:"type"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(payload, &f) != nil {
+		return ""
+	}
+	e := f.Error
+	if e == nil && f.Response != nil {
+		e = f.Response.Error
+	}
+	if e == nil {
+		return ""
+	}
+	if e.Code != "" {
+		return e.Code
+	}
+	return e.Type
+}
+
+// codexFatalCodeSuffix annotates the truncation log with the vendor code that
+// committed the response, when one did. Empty for every other commit so the
+// line keeps its shape.
+func codexFatalCodeSuffix(code string) string {
+	if code == "" {
+		return ""
+	}
+	return " code=" + code
+}
+
+func codexStallDisarmer(r any) func() {
+	if d, ok := r.(interface{ DisarmStall() }); ok {
+		return d.DisarmStall
+	}
+	return func() {}
+}
+
 func codexPreambleEvent(payload []byte) bool {
 	var ev struct {
 		Type string `json:"type"`
 	}
 	if json.Unmarshal(payload, &ev) != nil {
 		return false
+	}
+	// A frame that declares no type at all cannot be model output: every event
+	// a client renders names itself. Over the WebSocket such a frame renders as
+	// a bare `data:` line — codexws.appendSSEEvent omits the event line when
+	// the type is empty — and emitting it committed the response before a
+	// single delta had arrived.
+	//
+	// That is what `committed by ""` names in the truncation log, and it was
+	// the most common way the withhold window closed: 141 of one afternoon's
+	// 326 truncated streams on the sibling deployment were a turn committed by
+	// an untyped frame, parked by the backend, and then cut at the stall budget
+	// with no failover left.
+	if ev.Type == "" {
+		return true
 	}
 	return codexContentFreeEvents[ev.Type]
 }
@@ -773,6 +858,9 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 	withholdStart := time.Now()
 	events := 0
 	shed := ""
+	// fatalCode names the vendor code of an error frame the classifier called
+	// fatal and forwarded, when that frame is what commits the response.
+	fatalCode := ""
 	// demotedShed is the post-output half: a shed that arrived too late to
 	// withhold, so it could only be demoted (capacity) or forwarded (quota/rate).
 	var demotedShed shedSignal
@@ -894,6 +982,15 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 						// ClassFatal frames are forwarded verbatim: retrying
 						// them elsewhere would fail identically, and the client
 						// needs the real reason.
+						//
+						// Name the code when one of them is what commits the
+						// response, so a fatal that is really a transient
+						// account fault — the pattern behind the 1006 closures
+						// that follow these frames — can be told apart from a
+						// genuine rejection instead of being counted as one.
+						if !sentAny && codexerr.Classify(payload) == codexerr.ClassFatal {
+							fatalCode = codexErrorFrameCode(payload)
+						}
 
 						if codexTerminalEvent(payload) && !shedding {
 							terminal = true
@@ -1003,7 +1100,7 @@ func streamSSECodexBackend(c *gin.Context, resp *http.Response, counts *usage.Co
 		KeepalivePayload: []byte(":\n\n"),
 		Next:             next,
 	})
-	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed, demoted: demotedShed, committedBy: committedBy, upstreamModel: upstreamModel}
+	return codexStreamResult{sawTerminal: r.SawTerminal, wroteAny: r.WroteAny, events: events, bytes: r.Bytes, err: r.Err, shed: shed, demoted: demotedShed, committedBy: committedBy, fatalCode: fatalCode, upstreamModel: upstreamModel}
 }
 
 // shedSignal records an in-band shed observed while relaying a Codex SSE
@@ -1041,6 +1138,11 @@ type codexStreamResult struct {
 	// inferred from a timestamp column, once wrongly. The transport keeps
 	// adding frames the HTTP path never had; this names them as they appear.
 	committedBy string
+	// fatalCode is the vendor error code of an error frame the classifier
+	// called fatal and therefore forwarded — which is what commits the
+	// response. Recorded so a code that is really a transient account fault can
+	// be told apart from a genuine rejection without another day of guessing.
+	fatalCode string
 	// upstreamModel is what the terminal event said the provider actually ran.
 	// It is not always what was asked for: a provider under load can serve
 	// something lighter and say so only here.
