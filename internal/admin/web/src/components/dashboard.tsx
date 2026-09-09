@@ -170,7 +170,13 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
   const refresh = useCallback(async () => {
     try {
-      const d = await api<Summary>("/admin/api/summary");
+      // Credentials never renders `clients` (99 rows, ~70% of the payload)
+      // — skip fetching it while that tab is up and its background poll
+      // stops paying for data nobody reads. Every other tab still asks for
+      // it (Tokens renders the rows; the header's group datalist reads
+      // client groups too).
+      const qs = tab === "credentials" ? "?clients=0" : "";
+      const d = await api<Summary>(`/admin/api/summary${qs}`);
       setData(d);
       setErr("");
       setLastTick(Date.now());
@@ -182,7 +188,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
       }
       setErr(x.message);
     }
-  }, [onLogout]);
+  }, [onLogout, tab]);
 
   const manualRefresh = useCallback(async () => {
     setRefreshing(true);

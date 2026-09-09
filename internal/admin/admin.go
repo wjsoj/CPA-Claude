@@ -753,93 +753,104 @@ func (h *Handler) handleSummary(c *gin.Context) {
 			}(),
 		})
 	}
-	// Clients (per-access-token spending).
-	clientSnap := h.usage.SnapshotClients()
-	currentWeek := h.usage.CurrentWeekKey()
-	// Wallets and pricing groups, fetched once instead of twice per client
-	// row. Both are small — one wallet per token, a handful of groups — and
-	// the per-row lookups were the bulk of this handler's database work.
-	// Best-effort: a failure here leaves the fields zero exactly as a missing
-	// wallet row already did.
-	var walletByToken map[string]*saasdb.Wallet
-	groupName := map[int64]string{}
-	if h.wallets != nil {
-		if m, err := h.wallets.AllWallets(c.Request.Context()); err == nil {
-			walletByToken = m
-		} else {
-			log.Warnf("summary: wallet prefetch failed: %v", err)
-		}
-		if gs, err := h.wallets.ListGroups(c.Request.Context()); err == nil {
-			for _, g := range gs {
-				groupName[g.ID] = g.Name
-			}
-		} else {
-			// Logged because this one failure blanks the pricing group on
-			// every row at once, where the per-row lookup it replaced would
-			// only have blanked the row that hit the error.
-			log.Warnf("pricing-group prefetch failed: %v", err)
-		}
-	}
+	// Clients (per-access-token spending). This is the expensive third of
+	// the payload — measured at 149KB of a 212KB response for a 99-token,
+	// 15-credential pool — and the Credentials view never reads it (it only
+	// renders `auths`). ?clients=0 skips building it, and the wallet/group
+	// prefetch that exists only to feed it, for callers that don't need it;
+	// default stays "included" so existing callers (the public status page,
+	// any script hitting this route bare) see no change.
 	clientRows := make([]clientRow, 0)
-	seen := make(map[string]bool)
-	addRow := func(token, label, group string, rpm int, fromConfig, managed bool) {
-		seen[token] = true
-		pc, hasData := clientSnap[token]
-		weekly := 0.0
-		var weeks []usage.WeekEntry
-		var total usage.ClientCost
-		var last *time.Time
-		if hasData {
-			weeks = pc.WeeklyOrdered(8)
-			if w, ok := pc.Weekly[currentWeek]; ok {
-				weekly = w.CostUSD
+	// current_week is reported unconditionally -- it's a cheap format of
+	// "now", not part of the clients prefetch, and other response fields may
+	// depend on it regardless of whether client rows were built.
+	currentWeek := h.usage.CurrentWeekKey()
+	if c.Query("clients") != "0" {
+		clientSnap := h.usage.SnapshotClients()
+		// Wallets and pricing groups, fetched once instead of twice per client
+		// row. Both are small — one wallet per token, a handful of groups — and
+		// the per-row lookups were the bulk of this handler's database work.
+		// Best-effort: a failure here leaves the fields zero exactly as a missing
+		// wallet row already did.
+		var walletByToken map[string]*saasdb.Wallet
+		groupName := map[int64]string{}
+		if h.wallets != nil {
+			if m, err := h.wallets.AllWallets(c.Request.Context()); err == nil {
+				walletByToken = m
+			} else {
+				log.Warnf("summary: wallet prefetch failed: %v", err)
 			}
-			total = pc.Total
-			if !pc.LastUsed.IsZero() {
-				lu := pc.LastUsed
-				last = &lu
+			if gs, err := h.wallets.ListGroups(c.Request.Context()); err == nil {
+				for _, g := range gs {
+					groupName[g.ID] = g.Name
+				}
+			} else {
+				// Logged because this one failure blanks the pricing group on
+				// every row at once, where the per-row lookup it replaced would
+				// only have blanked the row that hit the error.
+				log.Warnf("pricing-group prefetch failed: %v", err)
 			}
 		}
-		row := clientRow{
-			Token:      maskToken(token),
-			Label:      label,
-			WeeklyUSD:  weekly,
-			FromConfig: fromConfig,
-			Managed:    managed,
-			Group:      group,
-			RPM:        rpm,
-			Total:      total,
-			Weekly:     weeks,
-			LastUsed:   last,
+		seen := make(map[string]bool)
+		addRow := func(token, label, group string, rpm int, fromConfig, managed bool) {
+			seen[token] = true
+			pc, hasData := clientSnap[token]
+			weekly := 0.0
+			var weeks []usage.WeekEntry
+			var total usage.ClientCost
+			var last *time.Time
+			if hasData {
+				weeks = pc.WeeklyOrdered(8)
+				if w, ok := pc.Weekly[currentWeek]; ok {
+					weekly = w.CostUSD
+				}
+				total = pc.Total
+				if !pc.LastUsed.IsZero() {
+					lu := pc.LastUsed
+					last = &lu
+				}
+			}
+			row := clientRow{
+				Token:      maskToken(token),
+				Label:      label,
+				WeeklyUSD:  weekly,
+				FromConfig: fromConfig,
+				Managed:    managed,
+				Group:      group,
+				RPM:        rpm,
+				Total:      total,
+				Weekly:     weeks,
+				LastUsed:   last,
+			}
+			// Provider allow-list (claude-only / openai-only). Best-effort:
+			// open-mode IP-keyed rows have no token entry and stay unrestricted.
+			if entry, ok := h.tokens.Lookup(token); ok {
+				row.Providers = entry.Providers
+			}
+			// SaaS wallet view (balance + pricing group), read from the maps
+			// prefetched above. Best-effort — a missing wallet row just leaves
+			// the fields zero.
+			if w, ok := walletByToken[token]; ok {
+				row.BalanceUSD = w.BalanceUSD
+				row.GroupID = w.GroupID
+				row.Blocked = w.BalanceUSD <= 0
+				row.PricingGroup = groupName[w.GroupID]
+			}
+			if managed || fromConfig {
+				row.FullToken = token
+			}
+			clientRows = append(clientRows, row)
 		}
-		// Provider allow-list (claude-only / openai-only). Best-effort:
-		// open-mode IP-keyed rows have no token entry and stay unrestricted.
-		if entry, ok := h.tokens.Lookup(token); ok {
-			row.Providers = entry.Providers
+		// Rows for every configured or runtime-added access token.
+		for _, t := range h.tokens.List() {
+			addRow(t.Token, t.Name, t.Group, t.RPM, false, true)
 		}
-		// SaaS wallet view (balance + pricing group), read from the maps
-		// prefetched above. Best-effort — a missing wallet row just leaves
-		// the fields zero.
-		if w, ok := walletByToken[token]; ok {
-			row.BalanceUSD = w.BalanceUSD
-			row.GroupID = w.GroupID
-			row.Blocked = w.BalanceUSD <= 0
-			row.PricingGroup = groupName[w.GroupID]
-		}
-		if managed || fromConfig {
-			row.FullToken = token
-		}
-		clientRows = append(clientRows, row)
-	}
-	// Rows for every configured or runtime-added access token.
-	for _, t := range h.tokens.List() {
-		addRow(t.Token, t.Name, t.Group, t.RPM, false, true)
-	}
-	// Rows for every client we've actually seen that isn't already listed
-	// (e.g. open-mode requests keyed by IP).
-	for tok, pc := range clientSnap {
-		if !seen[tok] {
-			addRow(tok, pc.Label, "", 0, false, false)
+		// Rows for every client we've actually seen that isn't already listed
+		// (e.g. open-mode requests keyed by IP).
+		for tok, pc := range clientSnap {
+			if !seen[tok] {
+				addRow(tok, pc.Label, "", 0, false, false)
+			}
 		}
 	}
 
