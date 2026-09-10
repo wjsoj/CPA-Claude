@@ -372,6 +372,10 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 	// One per credential, so a pool that keeps handing out dead sockets costs a
 	// bounded number of extra rounds rather than spinning here.
 	staleRetried := make(map[string]bool)
+	// Same-credential retries already spent on a capacity refusal, per
+	// credential. Bounded so a credential that is genuinely out of room still
+	// yields to the rest of the pool.
+	shedRetried := make(map[string]int)
 
 	// surfaceDeferred replays a withheld upstream error to the client once no
 	// healthy credential remains — preferable to a synthetic 503 because the
@@ -483,6 +487,21 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 				if retry && !staleRetried[a.ID] {
 					staleRetried[a.ID] = true
 					delete(tried, a.ID)
+				}
+			}
+			// Upstream refused the turn for capacity. Ask the same credential
+			// again rather than rotating: it is the only one holding this
+			// conversation's prompt cache, so its retry is the cheap one to
+			// schedule, and rotating would also hand the slot's sticky binding
+			// to a cache-cold account for every turn that follows.
+			if c.GetBool(codexCapacityShedKey) {
+				c.Set(codexCapacityShedKey, false)
+				if retry && shedRetried[a.ID] < codexSameCredShedRetries {
+					shedRetried[a.ID]++
+					delete(tried, a.ID)
+					if !sleepCtx(c.Request.Context(), codexShedRetryBackoff()) {
+						return
+					}
 				}
 			}
 		default:
