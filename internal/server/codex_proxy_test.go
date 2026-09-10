@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -85,5 +86,47 @@ func TestCodexAPIKeyRejectionPausesImmediately(t *testing.T) {
 	}
 	if a.IsHardFailed() {
 		t.Fatal("even a rejection must stay self-healing for an API key")
+	}
+}
+
+// A 503 from a relay says its upstream is busy, not that the relay is broken.
+// Treating it as a fault is how the only route to a whole fleet gets switched
+// off at exactly the moment it is needed: during an upstream capacity storm the
+// sibling proxy answered 503 honestly, fifteen in a row tripped the breaker,
+// and `self` — the API key pointing at that proxy — went unhealthy. Users saw
+// "tried all N available credentials" from a pool whose main channel this code
+// had just removed, and it re-tripped within forty minutes of a hand clear.
+func TestRelayCapacity503DoesNotRetireTheChannel(t *testing.T) {
+	s := &Server{}
+	a := &auth.Auth{ID: "apikey-self.json", Kind: auth.KindAPIKey, Provider: auth.ProviderOpenAI}
+
+	for i := 0; i < 20; i++ {
+		s.reportCodexAPIKeyFault(a, http.StatusServiceUnavailable, time.Time{})
+	}
+
+	if !a.HardFailureAt.IsZero() {
+		t.Fatalf("a busy relay was hard-failed after 20 capacity refusals: %q", a.HardFailureReason)
+	}
+	if a.ConsecutiveFailures > 0 {
+		t.Fatalf("capacity refusals fed the breaker counter (%d): they must not", a.ConsecutiveFailures)
+	}
+	if !a.QuotaResetAt.IsZero() {
+		t.Fatal("a busy relay was reported to operators as out of quota")
+	}
+}
+
+// The classes that really are about the credential must keep their old
+// behaviour, or this change would make a dead key immortal.
+func TestCredentialFaultsStillRetireTheChannel(t *testing.T) {
+	s := &Server{}
+	// An API key is never retired outright (the operator disables it), so the
+	// consequence to pin is the quarantine breaker: one strike is enough for a
+	// credential fault, where twenty capacity refusals must be none.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden} {
+		a := &auth.Auth{ID: "k", Kind: auth.KindAPIKey, Provider: auth.ProviderOpenAI}
+		s.reportCodexAPIKeyFault(a, status, time.Time{})
+		if a.ConsecutiveFailures == 0 {
+			t.Errorf("upstream %d left the breaker untouched — a revoked key would stay in rotation", status)
+		}
 	}
 }

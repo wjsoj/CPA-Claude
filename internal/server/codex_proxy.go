@@ -597,6 +597,11 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	return false, true
 }
 
+// codexRelayBusyCooldown is how long a relay rests after telling us its
+// upstream is busy. Short on purpose: the relay is healthy, and the pool must
+// come back to it as soon as its upstream might have room again.
+const codexRelayBusyCooldown = 20 * time.Second
+
 // reportCodexAPIKeyFault records an upstream failure on a Codex API-key relay
 // so the pool stops selecting it while it is broken.
 //
@@ -623,6 +628,26 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 func (s *Server) reportCodexAPIKeyFault(a *auth.Auth, status int, resetAt time.Time) {
 	if status == http.StatusTooManyRequests {
 		s.pool.ReportUpstreamError(a, status, resetAt)
+		return
+	}
+	if status == http.StatusServiceUnavailable {
+		// A 503 from a relay says its upstream is busy. It does NOT say the
+		// relay is broken, and treating it as a fault is how the only route to
+		// a whole fleet gets switched off at exactly the moment it is needed:
+		// during an upstream capacity storm the sibling proxy answers 503
+		// honestly, fifteen of those in a row tripped the breaker here, and
+		// `self` — the API key pointing at that proxy — went unhealthy. Users
+		// then saw "tried all N available credentials" from a pool whose main
+		// channel this code had just removed. It re-tripped within forty
+		// minutes of being cleared by hand.
+		//
+		// Treat it as what it is: come back shortly. An explicit retry time
+		// adds no breaker strike (only silent refusals feed the breaker), an
+		// API key never auto-retires, and the pool's last-resort round still
+		// selects a cooling key when nothing else is left — so the route can
+		// slow down but can never disappear.
+		a.MarkRateLimitedRetryAfter(fmt.Sprintf("upstream %d (relay at capacity)", status),
+			time.Now().Add(codexRelayBusyCooldown))
 		return
 	}
 	if classifyUpstreamStatus(status) == faultCredential {
