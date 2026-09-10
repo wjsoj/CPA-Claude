@@ -114,6 +114,34 @@
     border-color: var(--color-border);
   }
 
+  /* Pointer cursor on controls: Tailwind v4's preflight no longer sets one.
+
+     v3's preflight carried `button, [role="button"] { cursor: pointer }`; v4
+     dropped it and follows the UA default, which is `default`. Nothing
+     downstream puts it back — checked in this tree: preflight.css (4.2.4)
+     mentions cursor once, in a comment about Safari's number spinners, and
+     `src/styles/` contains the word zero times, including
+     `components/ui/button.tsx`.
+
+     So every control here is affected — 24 `<button>` and 127 `<Button>` — not
+     one component that forgot a class. The handful of `cursor-pointer`
+     utilities already in `src/` sit on `<tr>`, `<summary>` and `<div>`, which
+     need the hint for a different reason and are unaffected either way.
+
+     Disabled controls are excluded: `:disabled` covers form elements and
+     `[aria-disabled="true"]` covers the rest, since a control that cannot be
+     pressed should not offer to be.
+
+     In `@layer base`, so `cursor-default` / `cursor-wait` utilities still win —
+     the utilities layer is ordered after base regardless of specificity.
+
+     hypihub's console carries the identical rule for the identical reason;
+     the two trees compile separately and cannot share it. */
+  button:not(:disabled, [aria-disabled="true"]),
+  [role="button"]:not(:disabled, [aria-disabled="true"]) {
+    cursor: pointer;
+  }
+
   html {
     color-scheme: light;
     -webkit-font-smoothing: antialiased;
