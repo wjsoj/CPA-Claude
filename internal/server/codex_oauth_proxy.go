@@ -273,7 +273,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	// Captured here rather than inside the relay because the observer below
 	// wraps the body and hides the method — the first version of this fix read
 	// the wrapper and silently did nothing.
-	disarmStall := codexStallDisarmer(resp.Body)
+	relaxStall := codexStallRelaxer(resp.Body, s.cfg.CodexWS.Upstream.CommittedStallTimeout())
 	tierObserver := servicetier.ObserveBody(resp.Body)
 	resp.Body = tierObserver
 	var priced pricing.CostResult
@@ -324,7 +324,7 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		// Streaming client: passthrough SSE verbatim (with keepalive + terminal
 		// tracking). Headers are committed lazily inside the relay, so a break
 		// before the first byte reaches the client is recoverable.
-		res := streamSSECodexBackend(c, resp, &counts, func() { disarmStall(); writeResponseHeaders(c, resp) })
+		res := streamSSECodexBackend(c, resp, &counts, func() { relaxStall(); writeResponseHeaders(c, resp) })
 		upstreamModel = res.upstreamModel
 		// A shed that landed after output started could only be demoted, never
 		// withheld. Say so: the demotion works, so the CLI backs off and
@@ -699,14 +699,20 @@ func codexEventType(payload []byte) string {
 	return ev.Type
 }
 
-// codexStallDisarmer retires the WebSocket stall budget once the relay has
-// committed the response.
+// codexStallRelaxer widens the WebSocket stall budget once the relay has
+// committed the response. The HTTP transport has no such budget and returns a
+// no-op.
 //
-// The budget exists to convert a turn the backend parked into a failover, and
-// the failover is gone the moment the first byte reaches the client. Left armed
-// it can only cut a slow turn into a truncated one — the single largest source
-// of truncated Codex streams the day the budget shipped. The HTTP transport has
-// no such budget and returns a no-op.
+// Not retires — widens. The budget converts a turn the backend parked into a
+// failover, and the failover is gone the moment the first byte reaches the
+// client, so leaving the ORIGINAL budget armed can only cut a slow turn into a
+// truncated one.
+//
+// Retiring it outright was the wrong lesson. ReadTimeout bounds the gap between
+// frames, not between content-bearing ones, and a parked turn is not silent —
+// the backend heartbeats `keepalive` about every 30s, which resets that
+// deadline forever. hypitoken production ran a committed-then-parked turn for
+// 669 seconds, first byte at 4.2s and nothing after it.
 // codexErrorFrameCode reads the vendor error code out of an error frame, in
 // both the shapes the Codex backend uses. It exists for the log line below:
 // an error frame the classifier calls fatal is forwarded verbatim, which
@@ -753,9 +759,9 @@ func codexFatalCodeSuffix(code string) string {
 	return " code=" + code
 }
 
-func codexStallDisarmer(r any) func() {
-	if d, ok := r.(interface{ DisarmStall() }); ok {
-		return d.DisarmStall
+func codexStallRelaxer(r any, d time.Duration) func() {
+	if v, ok := r.(interface{ RelaxStall(time.Duration) }); ok {
+		return func() { v.RelaxStall(d) }
 	}
 	return func() {}
 }
