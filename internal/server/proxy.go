@@ -368,6 +368,10 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 	// serves, so the loop never offers it to a subscription credential.
 	apiKeyOnly := c.GetBool(codexAPIKeyOnlyModelKey)
 	preparationFallbackPending := false
+	// Credentials already given a second chance after a stale pooled socket.
+	// One per credential, so a pool that keeps handing out dead sockets costs a
+	// bounded number of extra rounds rather than spinning here.
+	staleRetried := make(map[string]bool)
 
 	// surfaceDeferred replays a withheld upstream error to the client once no
 	// healthy credential remains — preferable to a synthetic 503 because the
@@ -469,6 +473,18 @@ func (s *Server) forwardWithFailover(c *gin.Context, provider, path, model, clie
 		switch auth.NormalizeProvider(a.Provider) {
 		case auth.ProviderOpenAI:
 			retry, done = s.doForwardCodex(c, a, path, body, stream, model, clientToken, clientName, slotID, start, attempts)
+			// The turn died on a WebSocket the backend had closed while it sat
+			// in the pool. That is a fact about one socket, not about the
+			// account: excluding the credential here would spend a failover
+			// round and move the conversation to an account whose prompt cache
+			// is cold, both for nothing. Put it back in the candidate set once.
+			if c.GetBool(codexStaleSocketRetryKey) {
+				c.Set(codexStaleSocketRetryKey, false)
+				if retry && !staleRetried[a.ID] {
+					staleRetried[a.ID] = true
+					delete(tried, a.ID)
+				}
+			}
 		default:
 			// attempt > 0 ⇒ transparent retry; doForward skips the blocking
 			// bootstrap-wait so the credential switch stays fast.
