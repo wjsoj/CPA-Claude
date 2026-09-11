@@ -116,6 +116,17 @@ export interface CodexSubscriptionView {
   fetched_at?: string;
 }
 
+export interface CodexPaymentMethod {
+  id?: string;
+  /** "card", or another instrument type, in which case the card fields are absent. */
+  type?: string;
+  brand?: string;
+  last4?: string;
+  exp_month?: number;
+  exp_year?: number;
+  default?: boolean;
+}
+
 export interface CodexSubscriptionInfo {
   portal?: {
     id?: string;
@@ -151,6 +162,11 @@ export interface CodexSubscriptionInfo {
     has_previously_paid_subscription?: boolean;
     is_deactivated?: boolean;
   };
+  /** From /backend-api/payments/payment_methods. Brand + last four + expiry
+   * only — Stripe never returns a full number. Worth showing because a fleet
+   * usually shares a handful of cards, so one expiring card takes several
+   * accounts down together and nothing else in this view groups them. */
+  payment_methods?: CodexPaymentMethod[];
   last_active_subscription?: {
     subscription_id?: string;
     // Where the subscription was bought. An ios/android purchase renews

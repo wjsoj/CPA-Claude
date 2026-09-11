@@ -76,6 +76,11 @@ export function CardCodexBilling({ auth }: { auth: AuthRow }) {
   // what an operator should do about a billing problem, not just what it says.
   const offPortal =
     last?.purchase_origin_platform && last.purchase_origin_platform !== "chatgpt_web";
+  const cards = s?.info?.payment_methods ?? [];
+  // A card is valid through the END of its expiry month; treating the 1st as
+  // the cutoff would flag every card as dead for the month it is still good in.
+  const cardExpired = (m: { exp_month?: number; exp_year?: number }) =>
+    !!m.exp_year && !!m.exp_month && new Date() >= new Date(m.exp_year, m.exp_month, 1);
 
   return (
     <div className="px-5 py-3 border-t border-border bg-muted/20">
@@ -184,6 +189,40 @@ export function CardCodexBilling({ auth }: { auth: AuthRow }) {
                 {s.purchased_at ? fmtDay(s.purchased_at) : "—"}
                 <span className="text-muted-foreground"> → </span>
                 {s.expires_at ? fmtDay(s.expires_at) : "—"}
+              </Row>
+              <Row label="Card">
+                {cards.length === 0 ? (
+                  <span className="text-muted-foreground">none</span>
+                ) : (
+                  <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {cards.map((m, i) => (
+                      <span key={m.id ?? i} className="tabular-nums">
+                        {m.last4 ? (
+                          <>
+                            <span className="uppercase text-muted-foreground">
+                              {m.brand || m.type || "card"}
+                            </span>{" "}
+                            ····{m.last4}
+                            {m.exp_month && m.exp_year && (
+                              <span
+                                className={
+                                  cardExpired(m)
+                                    ? "ml-1 text-[color:var(--destructive)]"
+                                    : "ml-1 text-muted-foreground"
+                                }
+                              >
+                                {String(m.exp_month).padStart(2, "0")}/{String(m.exp_year).slice(-2)}
+                                {cardExpired(m) ? " · expired" : ""}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">{m.type || "—"}</span>
+                        )}
+                      </span>
+                    ))}
+                  </span>
+                )}
               </Row>
               <Row label="Renews">
                 {portal
