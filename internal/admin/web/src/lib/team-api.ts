@@ -153,6 +153,8 @@ export interface TeamStatementPreview {
   to: string;
   timezone: string;
   cny_per_usd: number;
+  /** The declaration text the PDF will carry, trimmed server-side. */
+  purpose: string;
   requests: number;
   billed_cny: number;
   /** Debited but with no matching log line; printed as its own line. */
@@ -231,10 +233,16 @@ export const teamUsage = (token: string, from?: string, to?: string) => {
   return teamFetch<GroupUsage>(token, `/api/team/usage${qs ? `?${qs}` : ""}`);
 };
 
-export const teamStatementPreview = (
-  token: string,
-  body: { from?: string; to?: string; detail?: "summary" | "full" },
-) =>
+/** Request shape shared by the preview and the PDF, so the two cannot drift. */
+export interface TeamStatementRequest {
+  from?: string;
+  to?: string;
+  detail?: "summary" | "full";
+  /** What the spend was for; printed on page one above the seal band. */
+  purpose?: string;
+}
+
+export const teamStatementPreview = (token: string, body: TeamStatementRequest) =>
   teamFetch<TeamStatementPreview>(token, "/api/team/statement", {
     method: "POST",
     body: JSON.stringify(body),
@@ -243,7 +251,7 @@ export const teamStatementPreview = (
 /** Blob download of the group statement PDF (mirrors downloadStatementPDF). */
 export async function teamDownloadStatementPDF(
   token: string,
-  body: { from?: string; to?: string; detail?: "summary" | "full" },
+  body: TeamStatementRequest,
 ): Promise<Blob> {
   const res = await fetch("/api/team/statement.pdf", {
     method: "POST",

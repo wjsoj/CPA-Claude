@@ -167,7 +167,57 @@ func (h *Handler) balance(c *gin.Context) {
 		resp["claude_multiplier"] = h.effective("anthropic", g.ClaudeMultiplier)
 		resp["codex_multiplier"] = h.effective("openai", g.CodexMultiplier)
 	}
+	if ws := h.membership(c, tok); ws != nil {
+		resp["workspace"] = ws
+	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// membership describes the caller's workspace seat, or nil when the token
+// belongs to no group. It rides on /balance because a member's spendable
+// amount is not their wallet balance: the pool pays first, up to their own
+// day/month share, and only the remainder reaches the wallet. A balance
+// endpoint that omits it answers the wrong question for every member of a
+// funded group.
+//
+// It is also what tells the status SPA whether to offer the group console —
+// `role` is the same admin flag /api/team/* authenticates on.
+//
+// Deliberately excluded: anything about the OTHER members. The pool balance is
+// group property and every member can already infer it from pool_avail_usd
+// when they have no cap, but who else is in the group, and what they spent,
+// stays behind the admin-only console.
+func (h *Handler) membership(c *gin.Context, tok string) gin.H {
+	ctx := c.Request.Context()
+	m, err := h.DB.MemberFor(ctx, tok)
+	if err != nil || m == nil {
+		return nil
+	}
+	day, month := h.DB.MemberPeriodPoolSpend(ctx, tok)
+	out := gin.H{
+		"id":   m.WorkspaceID,
+		"role": m.Role,
+		// Caps are hard limits on POOL spend only; 0 means "no cap of their
+		// own", not "no spending". used_* is the pool spend they meter.
+		"daily_usd_cap":   m.DailyUSDCap,
+		"monthly_usd_cap": m.MonthlyUSDCap,
+		"used_day_usd":    day,
+		"used_month_usd":  month,
+		// What this member may still draw from the pool right now — the pool
+		// balance capped by whatever share they have left.
+		"pool_avail_usd": h.DB.MemberPoolAvail(ctx, tok),
+		// The day/month boundaries above are cut on Beijing time, not the
+		// viewer's zone; the card says so rather than letting an evening
+		// request look like it landed on the wrong day.
+		"period_timezone": "Asia/Shanghai",
+		"joined_at":       m.CreatedAt.Unix(),
+	}
+	if ws, err := h.DB.GetWorkspace(ctx, m.WorkspaceID); err == nil && ws != nil {
+		out["name"] = ws.Name
+		out["disabled"] = ws.Disabled
+		out["pool_balance_usd"] = ws.BalanceUSD
+	}
+	return out
 }
 
 // effective applies the EffectiveMultiplier hook when one is installed.

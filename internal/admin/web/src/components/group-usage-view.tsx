@@ -63,11 +63,18 @@ export function GroupUsageView({
   loadRequests,
   defaultDays = 30,
   className,
+  hideTitle,
 }: {
   load: (from: string, to: string) => Promise<GroupUsage>;
   loadRequests?: GroupRequestLoader;
   defaultDays?: number;
   className?: string;
+  /**
+   * Drop the internal title row. The group console already names this section
+   * in the page's own idiom above it; printing "组用量统计" twice, two lines
+   * apart, reads as two different things that happen to share a name.
+   */
+  hideTitle?: boolean;
 }) {
   const initial = useRef(trailingDays(defaultDays)).current;
   const [from, setFrom] = useState(initial.from);
@@ -121,12 +128,14 @@ export function GroupUsageView({
 
   return (
     <section className={cn("space-y-3 rounded-lg border border-border/60 bg-card/40 p-4", className)}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <BarChart3 className="h-4 w-4 text-primary" />
-          <span className="font-semibold">组用量统计</span>
-          <span className="text-xs text-muted-foreground">按请求日志计（含个人钱包支付部分）</span>
-        </div>
+      <div className={cn("flex flex-wrap items-center gap-2", hideTitle ? "justify-end" : "justify-between")}>
+        {!hideTitle && (
+          <div className="flex items-center gap-2">
+            <BarChart3 className="h-4 w-4 text-primary" />
+            <span className="font-semibold">组用量统计</span>
+            <span className="text-xs text-muted-foreground">按请求日志计（含个人钱包支付部分）</span>
+          </div>
+        )}
         <Button
           size="sm"
           variant="outline"

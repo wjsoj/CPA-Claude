@@ -49,9 +49,20 @@ type teamStatementBody struct {
 	// can only ever show a few thousand of them — the per-member and per-model
 	// rollups are what a reimbursement package actually needs.
 	Detail string `json:"detail,omitempty"`
+	// Purpose is what the admin says the spend was for — the research topic or
+	// project the API served. It is reproduced verbatim on page one, above the
+	// signature and seal band, and is the one thing on the document the system
+	// cannot derive. Optional: an empty value prints the same declaration with a
+	// blank to fill in by hand.
+	Purpose string `json:"purpose,omitempty"`
 	// TargetCNY exists only to be refused; see the package note above.
 	TargetCNY float64 `json:"target_cny,omitempty"`
 }
+
+// maxPurposeRunes bounds the declaration so it cannot push the seal band off
+// page one. Measured in runes, not bytes: the text is Chinese, and a byte cap
+// would cut a character in half.
+const maxPurposeRunes = 120
 
 // statementRoutes is called from Routes, so the endpoints inherit authMW.
 func (t *TeamHandler) statementRoutes(g *gin.RouterGroup) {
@@ -108,6 +119,12 @@ func (t *TeamHandler) buildGroupStatement(c *gin.Context, withLines bool) (*stat
 	if body.TargetCNY != 0 {
 		c.AbortWithStatusJSON(http.StatusBadRequest,
 			gin.H{"error": "团队对账单不支持按目标金额生成"})
+		return nil, false
+	}
+	purpose := strings.TrimSpace(body.Purpose)
+	if len([]rune(purpose)) > maxPurposeRunes {
+		c.AbortWithStatusJSON(http.StatusBadRequest,
+			gin.H{"error": fmt.Sprintf("用途说明过长（最多 %d 字）", maxPurposeRunes)})
 		return nil, false
 	}
 	detail := strings.TrimSpace(body.Detail)
@@ -181,6 +198,7 @@ func (t *TeamHandler) buildGroupStatement(c *gin.Context, withLines bool) (*stat
 		Partial:       gu.Partial,
 		Notes:         gu.Notes,
 		Itemised:      wantLines,
+		Purpose:       purpose,
 	}
 
 	members := make([]statement.MemberRow, 0, len(gu.ByMember))
@@ -365,8 +383,10 @@ const (
 // complete and quietly misattribute the range.
 func groupDetailLines(dir string, gu *GroupUsage, loc *time.Location, rate float64) ([]statement.Line, bool, error) {
 	counts := make(map[string]int64, len(gu.ByMember))
+	labels := make(map[string]string, len(gu.ByMember))
 	for _, m := range gu.ByMember {
 		counts[m.Masked] = m.Agg.Count
+		labels[m.Masked] = m.Label
 	}
 	active, _ := activeMasks(gu.ByMember)
 	if len(active) == 0 {
@@ -415,7 +435,7 @@ func groupDetailLines(dir string, gu *GroupUsage, loc *time.Location, rate float
 					// charge in CostUSD alone and would print as free.
 					BilledCNY: r.BilledOrCost() * rate,
 					Status:    r.Status,
-					Member:    mask,
+					Member:    mask, MemberLabel: labels[mask],
 				})
 			}
 			trimNewest(&merged)
@@ -543,6 +563,9 @@ func teamStatementJSON(g *statement.GroupStatement) gin.H {
 		"to":          g.ToDay,
 		"timezone":    g.TZName,
 		"cny_per_usd": g.CNYPerUSD,
+		// Echoed so the dialog can show what the PDF will actually carry —
+		// trimmed here, so a caller sending whitespace sees that it was dropped.
+		"purpose": g.Purpose,
 
 		"requests":       g.Requests,
 		"billed_cny":     g.BilledCNY,

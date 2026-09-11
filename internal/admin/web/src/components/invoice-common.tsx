@@ -2,7 +2,7 @@
 //
 //   * personal — wallet-panel.tsx `InvoiceSection`, quota comes from the
 //     token's own paid orders.
-//   * team     — team-panel.tsx `TeamInvoiceSection`, one invoice for the whole
+//   * team     — group-sections.tsx `TeamInvoiceSection`, one invoice for the whole
 //     workspace, quota is the sum of the members' remaining quotas and the
 //     amount is split across them in join order.
 //
@@ -17,7 +17,12 @@ import { suggestInvoiceTitles, type InvoiceTitle } from "@/lib/status-api";
 import { cn } from "@/lib/utils";
 
 export function fmtCNY(v: number): string {
-  return `¥${v.toFixed(2)}`;
+  // Grouped: a four-figure invoice total (¥12345.67) is read wrong often
+  // enough that the separators are worth the two extra characters.
+  return `¥${(v || 0).toLocaleString("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 export const emptyInvoiceTitle = (): InvoiceTitle => ({

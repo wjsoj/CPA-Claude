@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Users,
   Wallet,
   X,
   XCircle,
@@ -21,11 +22,16 @@ import { StatementDialog } from "./statement-dialog";
 import { StatusDashboardPanel } from "./status-dashboard-panel";
 import { StatusMonitorPanel } from "./status-monitor-panel";
 import { WalletPanel } from "./wallet-panel";
-import { TeamPanel } from "./team-panel";
+import { useMembership } from "@/lib/use-membership";
 // Lazy: the docs tab pulls in react-markdown and the whole bundled doc set,
 // which most visitors (here for the dashboard) never open.
 const StatusDocsPanel = lazy(() =>
   import("./status-docs-panel").then((m) => ({ default: m.StatusDocsPanel })),
+);
+// Same reason: the group console (members, invoicing, the usage drill-down)
+// only ever renders for a group admin, and most visitors here are not one.
+const GroupConsole = lazy(() =>
+  import("./group-console").then((m) => ({ default: m.GroupConsole })),
 );
 import {
   loadStatusDashboard,
@@ -71,7 +77,9 @@ function mask(tok: string): string {
 }
 
 
-type StatusTab = "dashboard" | "wallet" | "lookup" | "docs";
+type StatusTab = "dashboard" | "wallet" | "group" | "lookup" | "docs";
+
+const STATUS_TABS: StatusTab[] = ["dashboard", "wallet", "group", "lookup", "docs"];
 
 export function StatusPage() {
   const [ov, setOv] = useState<StatusOverview | null>(null);
@@ -83,16 +91,23 @@ export function StatusPage() {
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<StatusTab>(() => {
     const stored = localStorage.getItem("cpa.status.tab");
-    if (
-      stored === "lookup" ||
-      stored === "wallet" ||
-      stored === "dashboard" ||
-      stored === "docs"
-    ) {
-      return stored;
-    }
-    return "dashboard";
+    return STATUS_TABS.includes(stored as StatusTab) ? (stored as StatusTab) : "dashboard";
   });
+  // The signed-in token's seat in a group, which decides whether the group
+  // console is on offer at all. Resolved from /api/wallet/balance — the same
+  // role flag /api/team/* authenticates on, so the tab can never appear for
+  // someone the API would refuse.
+  const { token: activeToken, workspace, resolved: membershipResolved } = useMembership();
+  const isGroupAdmin = workspace?.role === "admin";
+  // A remembered `group` tab has to survive the moment before the lookup
+  // settles, or every reload of the console would flash the dashboard first.
+  // Once it HAS settled and says no, fall back rather than render a console
+  // the server will 403.
+  useEffect(() => {
+    if (tab === "group" && membershipResolved && !isGroupAdmin) {
+      setTab("dashboard");
+    }
+  }, [tab, membershipResolved, isGroupAdmin]);
   const [refreshTick, setRefreshTick] = useState(0);
   useEffect(() => {
     localStorage.setItem("cpa.status.tab", tab);
@@ -274,6 +289,12 @@ export function StatusPage() {
             {([
               { key: "dashboard" as const, label: "Dashboard", hint: "CHARTS · AGGREGATE", icon: BarChart3 },
               { key: "wallet" as const, label: "Wallet", hint: "BALANCE · TOPUP · ORDERS", icon: Wallet },
+              // Group console — admins only. Everyone else (members included)
+              // gets their seat on the wallet card instead; there is nothing on
+              // this tab a non-admin is allowed to see.
+              ...(isGroupAdmin
+                ? [{ key: "group" as const, label: "团队", hint: "MEMBERS · USAGE · INVOICE", icon: Users }]
+                : []),
               { key: "lookup" as const, label: "Usage lookup", hint: "TOKEN · LEDGER", icon: Search },
               { key: "docs" as const, label: "文档", hint: "SETUP · CLI", icon: BookOpen },
             ]).map(({ key, label, hint, icon: Icon }) => {
@@ -285,20 +306,24 @@ export function StatusPage() {
                   aria-selected={active}
                   onClick={() => setTab(key)}
                   className={cn(
-                    "group relative px-3.5 md:px-5 py-3 -mb-px transition-colors flex items-baseline gap-2.5 shrink-0 whitespace-nowrap",
+                    "group relative px-3 md:px-4 lg:px-5 py-3 -mb-px transition-colors flex items-baseline gap-2 shrink-0 whitespace-nowrap",
                     active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
                   )}
                 >
                   <Icon className="h-4 w-4 self-center" />
                   <span
                     className={cn(
-                      "font-display text-base md:text-xl lg:text-2xl tracking-tight",
+                      // A fifth tab (the group console) arrives for admins, and
+                      // at the old sizes that clipped the last one off a 1440px
+                      // screen. The hints are the first thing to go — they are
+                      // decoration, the labels are not.
+                      "font-display text-base md:text-lg lg:text-xl xl:text-2xl tracking-tight",
                       active && "font-medium",
                     )}
                   >
                     {label}
                   </span>
-                  <span className="eyebrow hidden lg:inline opacity-60">{hint}</span>
+                  <span className="eyebrow hidden 2xl:inline opacity-60">{hint}</span>
                   <span
                     className={cn(
                       "absolute inset-x-0 bottom-0 h-[2px] bg-primary transition-transform origin-left",
@@ -365,6 +390,20 @@ export function StatusPage() {
         {tab === "wallet" && (
           <div className="stagger pt-2 md:pt-4">
             <WalletPanel />
+          </div>
+        )}
+
+        {tab === "group" && isGroupAdmin && (
+          <div className="stagger pt-2 md:pt-4">
+            <Suspense
+              fallback={
+                <div className="py-16 text-center text-sm text-muted-foreground">
+                  载入团队控制台…
+                </div>
+              }
+            >
+              <GroupConsole token={activeToken} />
+            </Suspense>
           </div>
         )}
 
@@ -784,16 +823,18 @@ function TokenCard({ r, fullToken }: { r: StatusTokenResult; fullToken: string }
         </div>
       )}
 
-      {/* Group-admin console — only when this token administers a workspace. */}
+      {/* The group console used to be embedded here behind a disclosure
+          triangle. It is its own tab now — a lookup result is a read-only
+          record of one token, and an administrative surface stacked inside one
+          was both hard to find and hard to read. */}
       {r.is_team_admin && (
-        <details className="rounded-md border border-primary/30 bg-primary/5">
-          <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-primary">
-            团队管理（组共享额度）
-          </summary>
-          <div className="border-t border-primary/20 p-3">
-            <TeamPanel token={fullToken} />
-          </div>
-        </details>
+        <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
+          <span className="font-medium text-primary">该令牌是「{r.workspace || "组"}」的管理员</span>
+          <span className="text-muted-foreground">
+            {" "}
+            · 成员、份额、组用量、团队发票与对账单都在顶部的「团队」标签页（用本令牌登录 Wallet 后出现）。
+          </span>
+        </div>
       )}
 
       {/* Detailed request ledger with pagination */}

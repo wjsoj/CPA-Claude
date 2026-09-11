@@ -78,6 +78,11 @@ type Line struct {
 	// attribute, which for a shared reimbursement attachment is the one thing
 	// the listing is for.
 	Member string
+	// MemberLabel is that member's display name, when the token has one. The
+	// appendix prints it in place of the mask: pages of one-line-per-request
+	// evidence are read to find out who ran what, and a reader should not have
+	// to page back to the roster to turn "sk-dev…90a1" into a person.
+	MemberLabel string
 }
 
 // ModelRow is the per-model rollup printed above the itemised lines.

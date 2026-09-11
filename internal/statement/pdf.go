@@ -97,6 +97,11 @@ type renderer struct {
 	y          float64
 	page       int
 	totalPages int
+	// limit is the lowest y content may reach on the CURRENT page, so a page
+	// that has reserved a band for something drawn at a fixed position (the
+	// group statement's seal area) can stop its flowing content above it.
+	// newPage resets it to bottomLimit — a reservation belongs to one page.
+	limit float64
 	// foot is the identity line repeated at the bottom of every page: the
 	// token on a per-token statement, the team on a group one. Set once at
 	// construction so pagination never has to know which kind it is drawing.
@@ -153,6 +158,43 @@ func (r *renderer) fit(s string, w float64) string {
 	return string(runes)
 }
 
+// wrap breaks s into lines that each measure under w, splitting between runes.
+//
+// Not a word wrapper: the text it lays out is Chinese, where a line may break
+// between any two characters and there are no spaces to break on. ASCII runs
+// inside it (a token, a model name) can be split mid-word as a result — the
+// alternative is a paragraph that overruns the page, and fit()'s ellipsis would
+// silently drop the end of a declaration the reader is being asked to sign.
+func (r *renderer) wrap(s string, w float64) []string {
+	if s == "" {
+		return nil
+	}
+	var (
+		out  []string
+		line []rune
+	)
+	for _, ch := range s {
+		if ch == '\n' {
+			out = append(out, string(line))
+			line = line[:0]
+			continue
+		}
+		// The tentative rune lands one past len(line), so every read of line
+		// below — all of them string(line), which stops at its own length —
+		// is unaffected by the aliasing gocritic is warning about. Keeping the
+		// alias on purpose: a full-slice expression would force a fresh
+		// allocation on every character and make wrapping quadratic.
+		cand := append(line, ch) //nolint:gocritic // appendAssign: the alias is deliberate, see above.
+		if len(cand) > 1 && r.width(string(cand)) > w {
+			out = append(out, string(line))
+			line = []rune{ch}
+			continue
+		}
+		line = cand
+	}
+	return append(out, string(line))
+}
+
 func (r *renderer) rule(y float64, gray uint8, width float64) {
 	r.pdf.SetLineWidth(width)
 	r.pdf.SetStrokeColor(gray, gray, gray)
@@ -166,6 +208,17 @@ func (r *renderer) newPage() {
 	r.pdf.AddPage()
 	r.page++
 	r.y = margin
+	r.limit = bottomLimit
+}
+
+// bottom is the y every pagination check compares against — the page's own
+// reserved limit when it has one, the page bottom otherwise. Zero means the
+// renderer has not opened a page yet, which no drawing path can reach.
+func (r *renderer) bottom() float64 {
+	if r.limit > 0 {
+		return r.limit
+	}
+	return bottomLimit
 }
 
 // --- tables -------------------------------------------------------------
@@ -198,7 +251,7 @@ func (r *renderer) drawCells(cols []col, vals []string) {
 // row draws one body row, breaking to a fresh page (and repeating the header)
 // when it would cross the bottom margin.
 func (r *renderer) row(cols []col, vals []string) {
-	if r.y+rowH > bottomLimit {
+	if r.y+rowH > r.bottom() {
 		r.newPage()
 		r.tableHead(cols)
 	}
@@ -475,7 +528,7 @@ func (r *renderer) detailTable() {
 // it, and a document that hides it inside "合计" is claiming an itemisation it
 // does not have.
 func (r *renderer) totalsRow(cols []col, lines []totalLine) {
-	if r.y+rowH*float64(len(lines))+10 > bottomLimit {
+	if r.y+rowH*float64(len(lines))+10 > r.bottom() {
 		r.newPage()
 	}
 	r.rule(r.y+1, 150, 0.5)
@@ -529,7 +582,7 @@ func closingLines(label string, billedCNY, unitemisedCNY, chargedCNY float64) []
 }
 
 func (r *renderer) sectionTitle(t string) {
-	if r.y+34 > bottomLimit {
+	if r.y+34 > r.bottom() {
 		r.newPage()
 	}
 	r.setFont(headSize + 1)
@@ -542,7 +595,7 @@ func (r *renderer) sectionTitle(t string) {
 // not. Someone filing it for reimbursement should not learn that it isn't an
 // invoice from their finance department.
 func (r *renderer) footerNote() {
-	if r.y+56 > bottomLimit {
+	if r.y+56 > r.bottom() {
 		r.newPage()
 	}
 	r.y += 6

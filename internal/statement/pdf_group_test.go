@@ -253,7 +253,10 @@ func (g *GroupStatement) renderer() *renderer { return &renderer{g: g} }
 
 // A summary export carries a five-figure request count in its headline and no
 // listing beneath it. Saying "no billed requests" there contradicts the same
-// page, so the two empty states have to read differently.
+// page, so the two empty states have to read differently — the summary one says
+// the listing was omitted (in the notes, which is where it lives now that a
+// summary export renders no appendix section at all), and only a genuinely
+// empty itemised range says nothing was billed.
 func TestSummaryExportDoesNotClaimTheRangeIsEmpty(t *testing.T) {
 	g := &GroupStatement{
 		WorkspaceName: "行知实验室", FromDay: "2026-08-01", ToDay: "2026-08-15",
@@ -261,12 +264,137 @@ func TestSummaryExportDoesNotClaimTheRangeIsEmpty(t *testing.T) {
 		Requests: 82420, BilledCNY: 968.89,
 	}
 	g.Rollup()
-	drawn := strings.Join(drawnByGroup(t, g, (*renderer).groupDetailTable), "\n")
+	drawn := strings.Join(drawnByGroup(t, g, (*renderer).groupFooterNote), "\n")
 	if strings.Contains(drawn, "没有计费请求") {
 		t.Errorf("a summary export claimed the range was empty while reporting %d requests; drew:\n%s",
 			g.Requests, drawn)
 	}
 	if !strings.Contains(drawn, "汇总版") {
 		t.Errorf("a summary export must say the listing was omitted; drew:\n%s", drawn)
+	}
+
+	// The itemised counterpart: detail WAS asked for and the range really is
+	// empty, which is the one case that may say so.
+	g.Itemised = true
+	empty := strings.Join(drawnByGroup(t, g, (*renderer).groupDetailTable), "\n")
+	if !strings.Contains(empty, "没有计费请求") {
+		t.Errorf("an itemised export over an empty range must say so; drew:\n%s", empty)
+	}
+	notes := strings.Join(drawnByGroup(t, g, (*renderer).groupFooterNote), "\n")
+	if strings.Contains(notes, "汇总版") {
+		t.Errorf("an itemised export must not describe itself as summary-only; drew:\n%s", notes)
+	}
+}
+
+// The declaration and the seal band are the part of this document a person
+// signs, so what it says has to reach the paper verbatim.
+func TestGroupPurposeAndSealReachThePage(t *testing.T) {
+	g := sampleGroup()
+	g.Purpose = "面向多模态大模型的推理加速方法研究"
+	got := strings.Join(drawnByGroup(t, g, func(r *renderer) {
+		r.reserveGroupSeal()
+		r.purposeBlock()
+	}), "\n")
+
+	for _, want := range []string{
+		g.Purpose, // the admin's own words, not a paraphrase
+		"行知实验室",   // whose usage it is
+		"加盖单位公章",  // the reserved area is labelled, not just an empty box
+		"经办人",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("page one is missing %q\n--- drawn ---\n%s", want, got)
+		}
+	}
+}
+
+// With no purpose given the sentence stays and carries a blank instead. Dropping
+// the clause would turn "nobody filled this in" into a claim that the spend had
+// no stated purpose.
+func TestGroupPurposeBlankIsAFormNotAnOmission(t *testing.T) {
+	g := sampleGroup()
+	got := strings.Join(drawnByGroup(t, g, func(r *renderer) { r.purposeBlock() }), "")
+	if !strings.Contains(got, "用途说明") {
+		t.Fatalf("the declaration must print even with no purpose set: %q", got)
+	}
+	if !strings.Contains(got, "____") {
+		t.Errorf("an empty purpose must leave a blank to fill in, got %q", got)
+	}
+}
+
+// The seal band is reserved at a FIXED position on page one: it is the page a
+// reader treats as the document, and a roster long enough to paginate must push
+// its own rows overleaf rather than push the seal down.
+func TestGroupSealReservationPinsPageOne(t *testing.T) {
+	g := sampleGroup()
+	pdf := &gopdf.GoPdf{}
+	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: pageW, H: pageH}})
+	if err := pdf.AddTTFFontData(fontFamily, fontSC); err != nil {
+		t.Fatalf("load font: %v", err)
+	}
+	r := &renderer{pdf: pdf, g: g}
+	r.newPage()
+	if r.bottom() != bottomLimit {
+		t.Fatalf("a fresh page starts unreserved, got limit %v", r.bottom())
+	}
+	r.reserveGroupSeal()
+	reserved := r.bottom()
+	if reserved >= bottomLimit-sealBandH {
+		t.Errorf("seal band did not lower the content limit: %v", reserved)
+	}
+	// Overflowing onto page two must release the reservation, or every
+	// subsequent page would waste the same band.
+	r.newPage()
+	if r.bottom() != bottomLimit {
+		t.Errorf("the reservation must not survive a page break, got %v", r.bottom())
+	}
+}
+
+// Every rune this document draws has to exist in the embedded subset font.
+// gopdf SKIPS a missing glyph silently (cache_content_text.go: ErrCharNotFound
+// → continue), so a character the GB2312 subset lacks does not fail the render —
+// it drops out of the sentence, on the page someone is about to stamp.
+func TestGroupDocumentRunesAreInTheEmbeddedFont(t *testing.T) {
+	g := sampleGroup()
+	g.Purpose = "面向多模态大模型的推理加速方法研究"
+	g.UnitemisedCNY = 12
+	g.ChargedCNY = 312
+	g.Itemised = true
+	g.Lines = []Line{{
+		TS: time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC), Model: "claude-opus-4-7",
+		BilledCNY: 1.5, Member: "sk-aaa…aaaa", MemberLabel: "刘畅",
+	}}
+
+	pdf := &gopdf.GoPdf{}
+	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: pageW, H: pageH}})
+	if err := pdf.AddTTFFontData(fontFamily, fontSC); err != nil {
+		t.Fatalf("load font: %v", err)
+	}
+	var got []string
+	r := &renderer{pdf: pdf, g: g, drawn: &got}
+	r.newPage()
+	r.header("团队用量消费对账单", g.GeneratedAt)
+	r.reserveGroupSeal()
+	r.identityBlock(r.groupIdentityRows())
+	r.purposeBlock()
+	r.summaryBlock(r.groupSummaryItems())
+	r.memberTable()
+	r.modelTable(g.ByModel)
+	r.groupFooterNote()
+	r.groupDetailTable()
+
+	r.setFont(bodySize)
+	seen := map[rune]bool{}
+	for _, s := range got {
+		for _, ch := range s {
+			if ch == ' ' || ch == '\n' || seen[ch] {
+				continue
+			}
+			seen[ch] = true
+			if w, err := pdf.MeasureTextWidth(string(ch)); err != nil || w == 0 {
+				t.Errorf("rune %q (U+%04X) is not in the embedded font — it would "+
+					"silently vanish from the page (width=%v err=%v)", ch, ch, w, err)
+			}
+		}
 	}
 }

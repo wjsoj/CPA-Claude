@@ -49,6 +49,7 @@ import {
   type InvoiceSummary,
   type Invoice,
   type InvoiceTitle,
+  type WalletWorkspace,
 } from "@/lib/status-api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -286,6 +287,8 @@ export function WalletPanel() {
         </div>
       </div>
 
+      {bal?.workspace && <GroupSeatCard ws={bal.workspace} />}
+
       <UpstreamFallbackCard token={activeToken} />
 
       {/* Orders + Transactions, two columns on desktop */}
@@ -310,6 +313,120 @@ export function WalletPanel() {
           refresh();
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * The caller's seat in a group, on their own wallet.
+ *
+ * A member of a funded group cannot read their spending power off their wallet
+ * balance: the pool pays first, up to their own day/month share, and only the
+ * remainder reaches the wallet. This card is the other half of that number —
+ * without it, someone whose group covers everything sees a balance that never
+ * moves and concludes the billing is broken.
+ *
+ * Caps meter POOL spend only. A group that never funded a pool reads 0 here
+ * forever and nothing is wrong, so the copy says so rather than letting a row
+ * of zeroes imply a fault.
+ */
+function GroupSeatCard({ ws }: { ws: WalletWorkspace }) {
+  const funded = (ws.pool_balance_usd ?? 0) > 0;
+  const tz = ws.period_timezone || "Asia/Shanghai";
+  // A bare $0.00 here is the one number on this card that looks like a fault.
+  // It usually isn't — it is a cap doing its job, or a group that simply never
+  // funded a pool — so say which, in the order the server applies them.
+  const zeroReason = ws.pool_avail_usd > 0 ? "" : ws.disabled
+    ? "本组已停用，组池不再为任何人付费"
+    : !funded
+      ? "组池没有余额，你的消费全部扣个人余额"
+      : ws.daily_usd_cap > 0 && ws.used_day_usd >= ws.daily_usd_cap
+        ? `今日份额已用完，${tz} 次日 0 点重置；在那之前扣个人余额`
+        : ws.monthly_usd_cap > 0 && ws.used_month_usd >= ws.monthly_usd_cap
+          ? `本月份额已用完，${tz} 下月 1 日重置；在那之前扣个人余额`
+          : "暂时无法从组池支付，消费扣个人余额";
+  return (
+    <div className="rounded-lg border border-border-strong bg-card/60 p-4 md:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <Users className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <div className="font-display text-base tracking-tight">
+              {ws.name || `组 #${ws.id}`}
+              {ws.role === "admin" && (
+                <Badge className="ml-2 align-middle text-[10px]">组管理员</Badge>
+              )}
+              {ws.disabled && (
+                <Badge variant="destructive" className="ml-2 align-middle text-[10px]">
+                  已停用
+                </Badge>
+              )}
+            </div>
+            <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+              你的请求<span className="text-foreground/80">优先扣组共享池</span>，
+              超出份额或池耗尽后自动改扣上面的个人余额——请求不会因此失败。
+              {ws.role === "admin" && "　管理成员、组用量与团队发票请到顶部的「团队」标签页。"}
+            </p>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="eyebrow opacity-70">组池当前可为你支付</div>
+          <div
+            className={cn(
+              "mt-1 font-display text-3xl tabular tracking-tight",
+              ws.pool_avail_usd > 0 ? "text-primary" : "text-muted-foreground",
+            )}
+          >
+            {fmtUSD(ws.pool_avail_usd)}
+          </div>
+          {zeroReason && (
+            <div className="mt-1 max-w-[16rem] text-[11px] leading-relaxed text-muted-foreground">
+              {zeroReason}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <SeatCap label="今日份额" cap={ws.daily_usd_cap} used={ws.used_day_usd} />
+        <SeatCap label="本月份额" cap={ws.monthly_usd_cap} used={ws.used_month_usd} />
+        <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+          <div className="eyebrow opacity-70">组池余额</div>
+          <div className="mt-1 font-mono text-sm tabular">
+            {funded ? fmtUSD(ws.pool_balance_usd ?? 0) : "未充值"}
+          </div>
+          <div className="mt-1 text-[10px] text-muted-foreground">
+            {funded ? "全组共用" : "本组消费直接扣各自个人余额"}
+          </div>
+        </div>
+      </div>
+      <p className="mt-2 text-[10px] text-muted-foreground">
+        份额按 {tz} 划分日 / 月，且只约束「从组池里花」的部分；填 0（不限）时仅受池总额约束。
+      </p>
+    </div>
+  );
+}
+
+function SeatCap({ label, cap, used }: { label: string; cap: number; used: number }) {
+  const ratio = cap > 0 ? Math.min(1, used / cap) : 0;
+  const hot = cap > 0 && ratio >= 0.9;
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+      <div className="eyebrow opacity-70">{label}</div>
+      <div className="mt-1 font-mono text-sm tabular">
+        {fmtUSD(used)}
+        <span className="text-muted-foreground"> / {cap > 0 ? fmtUSD(cap) : "不限"}</span>
+      </div>
+      {cap > 0 ? (
+        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-border">
+          <div
+            className={cn("h-full rounded-full", hot ? "bg-[color:var(--warning)]" : "bg-primary")}
+            style={{ width: `${ratio * 100}%` }}
+          />
+        </div>
+      ) : (
+        <div className="mt-1 text-[10px] text-muted-foreground">未设上限</div>
+      )}
     </div>
   );
 }

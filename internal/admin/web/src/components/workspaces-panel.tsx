@@ -342,7 +342,7 @@ function WorkspaceRow({ ws, onChange }: { ws: Workspace; onChange: () => void })
                 </TableBody>
               </Table>
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                成员的份额（日 / 月上限）由组管理员在公开状态页的「团队管理」面板设置。
+                成员的份额（日 / 月上限）由组管理员在公开状态页的「团队」标签页设置。
                 「池已用」只含组池支付的部分（未给池充值的团队恒为 0）；「总消费」来自请求日志，含回落到个人余额的部分。
               </p>
 

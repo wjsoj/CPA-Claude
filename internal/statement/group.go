@@ -87,6 +87,17 @@ type GroupStatement struct {
 
 	GeneratedAt time.Time
 
+	// Purpose is what the group admin declared the spend was for — the research
+	// topic or project this API usage served. It is the one field on the
+	// document the system cannot derive: a reimbursement reviewer has to be
+	// told what the money bought, and only the admin knows.
+	//
+	// Empty is a supported state, not a missing value: the page then prints the
+	// same declaration with a ruled blank, so a group that would rather write it
+	// in by hand (or have their department fill it in) still gets a form they
+	// can sign and seal.
+	Purpose string
+
 	// CNYPerUSD is the single rate every yuan figure converts at. Never zero —
 	// a zero would render the entire document as ¥0.00, which is wrong in the
 	// direction a reader is least likely to question.

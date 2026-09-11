@@ -86,7 +86,20 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // The operator console and the public status page are two separate apps
+      // behind one entry (see main.tsx), and the status page has API surface of
+      // its own — /status/api/* plus the SaaS routes at /api/*. Proxying only
+      // the console's prefix meant `bun run dev` could not develop the status
+      // page at all: every call 404'd against Vite itself.
       "/mgmt-console/api": {
+        target: "http://localhost:8317",
+        changeOrigin: false,
+      },
+      "/status/api": {
+        target: "http://localhost:8317",
+        changeOrigin: false,
+      },
+      "/api": {
         target: "http://localhost:8317",
         changeOrigin: false,
       },

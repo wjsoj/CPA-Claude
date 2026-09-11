@@ -362,6 +362,38 @@ export interface WalletBalance {
   group_name?: string;
   claude_multiplier?: number;
   codex_multiplier?: number;
+  /** Present only when this token holds a seat in a workspace. */
+  workspace?: WalletWorkspace;
+}
+
+/**
+ * The caller's seat in a group, as /api/wallet/balance reports it.
+ *
+ * A member's spendable amount is NOT their wallet balance: the group pool pays
+ * first, bounded by their own day/month share, and only the remainder reaches
+ * the wallet. `pool_avail_usd` is that first part — what they may still draw
+ * from the pool right now.
+ *
+ * Caps meter POOL spend only. `used_*` is therefore pool spend too, and a group
+ * that never funded a pool reads 0 forever without anything being wrong.
+ *
+ * `role === "admin"` is the same flag /api/team/* authenticates on, so it is
+ * what decides whether the group console is offered.
+ */
+export interface WalletWorkspace {
+  id: number;
+  name?: string;
+  role: "admin" | "member" | string;
+  disabled?: boolean;
+  pool_balance_usd?: number;
+  pool_avail_usd: number;
+  daily_usd_cap: number;
+  monthly_usd_cap: number;
+  used_day_usd: number;
+  used_month_usd: number;
+  /** Zone the day/month boundaries above are cut on (Beijing, not the viewer's). */
+  period_timezone?: string;
+  joined_at?: number;
 }
 
 export interface WalletTx {
@@ -430,6 +462,32 @@ export function saveActiveToken(tok: string): void {
   } else {
     localStorage.setItem(ACTIVE_TOKEN_KEY, tok);
   }
+  // The active token is no longer read by the wallet panel alone: the page
+  // shell decides from it whether to offer the group console. A plain
+  // localStorage write is invisible to React, so signing in on the wallet tab
+  // would leave the tab bar a reload behind. `storage` fires only in OTHER
+  // tabs, hence an explicit same-document event.
+  try {
+    window.dispatchEvent(new CustomEvent(ACTIVE_TOKEN_EVENT, { detail: tok }));
+  } catch {
+    /* non-DOM host (tests) — nothing is listening there anyway */
+  }
+}
+
+export const ACTIVE_TOKEN_EVENT = "cpa:active-token";
+
+/** Subscribe to active-token changes; returns the unsubscribe function. */
+export function onActiveTokenChange(fn: (tok: string) => void): () => void {
+  const local = (e: Event) => fn((e as CustomEvent<string>).detail || "");
+  const cross = (e: StorageEvent) => {
+    if (e.key === ACTIVE_TOKEN_KEY) fn(e.newValue || "");
+  };
+  window.addEventListener(ACTIVE_TOKEN_EVENT, local);
+  window.addEventListener("storage", cross);
+  return () => {
+    window.removeEventListener(ACTIVE_TOKEN_EVENT, local);
+    window.removeEventListener("storage", cross);
+  };
 }
 
 function authedJSON<T>(path: string, token: string, opts: RequestInit = {}): Promise<T> {

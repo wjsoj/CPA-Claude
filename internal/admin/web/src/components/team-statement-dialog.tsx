@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { DateRangeRow } from "./date-range-row";
 import { rangeProblem, trailingDays } from "@/lib/date-range";
 import { ApiError } from "@/lib/api";
@@ -23,18 +24,25 @@ import { cn } from "@/lib/utils";
 // Export dialog for the group statement — one merged record of what the whole
 // workspace consumed over a range, to staple to a team invoice.
 //
-// It is the team-scale sibling of StatementDialog, with two deliberate
+// It is the team-scale sibling of StatementDialog, with three deliberate
 // differences. There is no target-amount mode: at group scope that would mean
 // assembling a figure out of other people's consumption, and the honesty
 // argument that carries the per-token feature does not survive the translation
-// (the server refuses target_cny outright). And detail is opt-in: a month of
-// team traffic is far more requests than any document can itemise, while the
-// per-member and per-model rollups are what a reimbursement package needs.
+// (the server refuses target_cny outright). It asks for a purpose — the one
+// thing on the document the system cannot derive, printed on page one above the
+// seal band. And the itemised appendix is on by default, because the document is
+// filed as a research expense and the itemisation is the evidence behind it;
+// "仅汇总" stays available for a range too large to be worth printing.
 
 const fmtCNY = (v: number) =>
   `¥${(v || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtInt = (v: number) => (v || 0).toLocaleString("zh-CN");
 const fmtPct = (v: number) => `${((v || 0) * 100).toFixed(1)}%`;
+
+const PURPOSE_KEY = "cpa.team.statement.purpose";
+// Mirrors the server's maxPurposeRunes: the declaration sits above a seal band
+// pinned to page one, and an unbounded paragraph would push it off.
+const PURPOSE_MAX = 120;
 
 export function TeamStatementDialog({
   open,
@@ -50,7 +58,16 @@ export function TeamStatementDialog({
   const initial = useRef(trailingDays(30)).current;
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
-  const [detail, setDetail] = useState<"summary" | "full">("summary");
+  // Detail defaults ON: the document exists to be filed as a research expense,
+  // and the reviewer asking "what was this ¥4,000 spent on" is answered by the
+  // itemised appendix, not by the rollups alone.
+  const [detail, setDetail] = useState<"summary" | "full">("full");
+  // What the API usage was for. Remembered per browser because a group exports
+  // the same declaration month after month, and retyping the project name is
+  // where a typo gets onto a stamped page.
+  const [purpose, setPurpose] = useState(
+    () => localStorage.getItem(PURPOSE_KEY) || "",
+  );
   const [preview, setPreview] = useState<TeamStatementPreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -64,6 +81,9 @@ export function TeamStatementDialog({
       const mine = ++seq.current;
       setLoading(true);
       try {
+        // The purpose is deliberately not a dependency of this fetch: it does
+        // not change a single figure, and refetching the whole range on every
+        // keystroke of a project name would scan the log archive for nothing.
         const p = await teamStatementPreview(token, { from: f, to: t, detail: d });
         if (seq.current !== mine) return;
         setPreview(p);
@@ -96,7 +116,9 @@ export function TeamStatementDialog({
   const download = async () => {
     setDownloading(true);
     try {
-      const blob = await teamDownloadStatementPDF(token, { from, to, detail });
+      const p = purpose.trim();
+      const blob = await teamDownloadStatementPDF(token, { from, to, detail, purpose: p });
+      if (p) localStorage.setItem(PURPOSE_KEY, p);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -126,6 +148,25 @@ export function TeamStatementDialog({
         </DialogHeader>
 
         <div className="space-y-4">
+          <div>
+            <label className="text-[11px] opacity-60" htmlFor="team-stmt-purpose">
+              用途说明（课题 / 项目名称）
+            </label>
+            <Input
+              id="team-stmt-purpose"
+              value={purpose}
+              maxLength={PURPOSE_MAX}
+              onChange={(e) => setPurpose(e.target.value.slice(0, PURPOSE_MAX))}
+              placeholder="例如：面向多模态大模型的推理加速方法研究"
+              className="mt-1"
+            />
+            <p className="mt-1 text-[11px] leading-relaxed opacity-55">
+              会原样印在第一页的用途声明里：「本对账单所列 API 调用由「{workspaceName}」用于完成“
+              {purpose.trim() || "……"}”课题（项目）的研究工作」。留空则印一条横线，由你手写填写。
+              第一页另留有签字与<span className="opacity-80">加盖公章</span>的位置。
+            </p>
+          </div>
+
           <DateRangeRow
             from={from}
             to={to}
@@ -158,8 +199,8 @@ export function TeamStatementDialog({
             </Button>
             <span className="text-[11px] opacity-55">
               {detail === "summary"
-                ? "只印按成员 / 按模型的汇总表"
-                : `另附最近 ${fmtInt(preview?.detail_lines || 0)} 条请求明细`}
+                ? "只印第一页概览（按成员 / 按模型汇总）"
+                : `第一页概览，其后附最近 ${fmtInt(preview?.detail_lines || 0)} 条逐笔请求明细`}
             </span>
           </div>
 
