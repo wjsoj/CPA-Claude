@@ -194,7 +194,7 @@ func (e *codexWSEgress) reportPoolStats() {
 // The exclusions are all cases where the WebSocket is known not to be an
 // equivalent of the HTTP call, rather than cases where it merely might fail —
 // a might-fail case is what the fallback is for.
-func (e *codexWSEgress) eligible(a *auth.Auth, path string, snapBaseURL string) bool {
+func (e *codexWSEgress) eligible(a *auth.Auth, path string, stream bool, snapBaseURL string) bool {
 	if e == nil || e.pool == nil || !e.cfg.WSEgressEnabled() {
 		return false
 	}
@@ -207,6 +207,32 @@ func (e *codexWSEgress) eligible(a *auth.Auth, path string, snapBaseURL string) 
 	if path == "/v1/responses/compact" {
 		// Compaction is a request/response JSON call on its own backend route.
 		// There is no WebSocket equivalent to forward it over.
+		return false
+	}
+	if !stream {
+		// A non-streaming caller is served by aggregating the whole turn before
+		// answering, and over this transport that turn does not arrive.
+		//
+		// hypitoken measured it over three hours on /v1/responses, with the same
+		// clients, the same models and the same credentials:
+		//
+		//	streaming      2682 turns   95.9% produced output   1.1 credentials
+		//	non-streaming   244 turns    1.6% produced output   5.4 credentials
+		//
+		// Per client it is the same story rather than an average of two
+		// populations — one caller ran 98.9% streaming against 0.0%
+		// non-streaming in the same window. What comes back is
+		// `close 1000 (normal)` about nine seconds in, no terminal event, on
+		// every credential the loop tries. Excluding it took that deployment's
+		// non-streaming output rate from 10.1% to 94.7%.
+		//
+		// This deployment currently sends no non-streaming traffic over its own
+		// OAuth credentials — the reports came through its api-key route into
+		// hypitoken — so this closes a hole rather than fixing a live fault.
+		// Same shape as /v1/chat/completions below, same answer: keep the
+		// transport that works. Note the body sent upstream is IDENTICAL either
+		// way, since SanitizeCodexRequestBody forces stream=true regardless, so
+		// whatever the backend keys on is not the request.
 		return false
 	}
 	if path == "/v1/chat/completions" {
