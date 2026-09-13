@@ -35,20 +35,68 @@ func statementCfg(dir string) *config.Config {
 	}
 }
 
-// writeLog lays down a requests-YYYY-MM-DD.jsonl the query path will pick up.
+// logDay returns midnight of today+offset in the request log's display zone —
+// the anchor every fixture in this file hangs its rows off.
+//
+// Fixtures used to anchor on time.Now() and place rows a few hours BEFORE it.
+// A row written at now-2h buckets to the PREVIOUS display day for the first
+// two hours of each day, while the file it lands in and the day label the test
+// queries both still say today — so a day-range query answered zero rows and
+// the suite was red between 00:00 and 02:00 UTC, green the other 22 hours.
+// That is how it reached main: CI runs build+vet, never go test.
+//
+// Anchoring at midnight and offsetting FORWARD keeps every row inside the day
+// it is meant to represent whatever time the suite runs. writeLog asserts it.
+func logDay(offset int) time.Time {
+	loc := requestlog.BucketLocation()
+	y, m, d := time.Now().In(loc).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, loc).AddDate(0, 0, offset)
+}
+
+// writeLog lays down requests-YYYY-MM-DD.jsonl files the query path will pick
+// up, filing each row under ITS OWN UTC day exactly as the production writer
+// does — on-disk names are UTC even when day buckets are not (see cc-core
+// requestlog/query.go: "file names and retention stay in UTC").
+//
+// Deriving the name from one `day` argument instead was the second half of the
+// flake: with a display zone east of UTC, midnight of a display day is the
+// previous UTC day, so a correctly-bucketed row got filed under a name the
+// query's coarse dayInRange prefilter never opens. The row then reads as zero
+// with nothing to show it exists. `day` now only names the file for an empty
+// batch, which is how a caller asks for a file with no rows in it.
 func writeLog(t *testing.T, dir string, day time.Time, recs []requestlog.Record) {
 	t.Helper()
-	name := filepath.Join(dir, "requests-"+day.UTC().Format("2006-01-02")+".jsonl")
-	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		t.Fatalf("open log: %v", err)
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	for _, r := range recs {
-		if err := enc.Encode(r); err != nil {
-			t.Fatalf("encode: %v", err)
+	write := func(fileDay string, rows []requestlog.Record) {
+		name := filepath.Join(dir, "requests-"+fileDay+".jsonl")
+		f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			t.Fatalf("open log: %v", err)
 		}
+		defer f.Close()
+		enc := json.NewEncoder(f)
+		for _, r := range rows {
+			if err := enc.Encode(r); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+		}
+	}
+	if len(recs) == 0 {
+		write(day.UTC().Format("2006-01-02"), nil)
+		return
+	}
+	// Grouped in encounter order so a batch spanning a UTC midnight keeps the
+	// byte order the writer would have produced within each file.
+	order := []string{}
+	byDay := map[string][]requestlog.Record{}
+	for _, r := range recs {
+		d := r.TS.UTC().Format("2006-01-02")
+		if _, seen := byDay[d]; !seen {
+			order = append(order, d)
+		}
+		byDay[d] = append(byDay[d], r)
+	}
+	for _, d := range order {
+		write(d, byDay[d])
 	}
 }
 
@@ -60,8 +108,7 @@ func statementFixture(t *testing.T) (*gin.Engine, string) {
 
 	dir := t.TempDir()
 	masked := maskToken(testToken)
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	today := logDay(0)
 
 	// One request per day for three consecutive days, $1 each, and one $100
 	// row for a different token that must never appear in our totals.
@@ -69,13 +116,13 @@ func statementFixture(t *testing.T) (*gin.Engine, string) {
 		day := today.AddDate(0, 0, -i)
 		writeLog(t, dir, day, []requestlog.Record{
 			{
-				TS: day.Add(-2 * time.Hour), ClientToken: masked,
+				TS: day.Add(9 * time.Hour), ClientToken: masked,
 				Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 				Input: 1000, Output: 200, CacheRead: 50, CacheCreate: 10,
 				CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 			},
 			{
-				TS: day.Add(-2 * time.Hour), ClientToken: "sk-oth…9999",
+				TS: day.Add(9 * time.Hour), ClientToken: "sk-oth…9999",
 				Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 				CostUSD: 2000, BilledUSD: 100, Status: 200,
 			},
@@ -114,7 +161,7 @@ func postJSON(t *testing.T, r *gin.Engine, path string, body any) *httptest.Resp
 }
 
 func dayLabel(offset int) string {
-	return time.Now().In(requestlog.BucketLocation()).AddDate(0, 0, offset).Format("2006-01-02")
+	return logDay(offset).Format("2006-01-02")
 }
 
 // The preview must total only the caller's own rows, and the range must exclude
@@ -161,10 +208,9 @@ func TestStatementPreviewTotalsOnlyOwnRows(t *testing.T) {
 // Reading the raw field would report it as free.
 func TestStatementCountsLegacyRows(t *testing.T) {
 	r, dir := statementFixture(t)
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	today := logDay(0)
 	writeLog(t, dir, today, []requestlog.Record{{
-		TS: today.Add(-time.Hour), ClientToken: maskToken(testToken),
+		TS: today.Add(10 * time.Hour), ClientToken: maskToken(testToken),
 		Provider: "openai", Model: "gpt-5.6-sol", AuthID: "a2", AuthKind: "apikey",
 		CostUSD: 7, Status: 200, // pre-v0.8.61: the charge sits in CostUSD
 	}})
@@ -238,12 +284,11 @@ func TestStatementPDFDownload(t *testing.T) {
 func TestStatementSurfacesLedgerGap(t *testing.T) {
 	dir := t.TempDir()
 	masked := maskToken(testToken)
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	today := logDay(0)
 
 	// One surviving log row: $1 at the fixture rate of ¥7 → ¥7.
 	writeLog(t, dir, today, []requestlog.Record{{
-		TS: today.Add(-2 * time.Hour), ClientToken: masked,
+		TS: today.Add(9 * time.Hour), ClientToken: masked,
 		Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 	}})
@@ -265,7 +310,7 @@ func TestStatementSurfacesLedgerGap(t *testing.T) {
 	// behind them — exactly the data-loss case.
 	if _, err := sdb.ExecContext(ctx,
 		`INSERT INTO wallet_tx (token, kind, amount_usd, ref, note, created_at) VALUES (?, 'charge', ?, '', '', ?)`,
-		testToken, -3.0, today.Add(-90*time.Minute).Unix()); err != nil {
+		testToken, -3.0, today.Add(8*time.Hour).Unix()); err != nil {
 		t.Fatalf("seed charge: %v", err)
 	}
 
@@ -308,10 +353,9 @@ func TestStatementSurfacesLedgerGap(t *testing.T) {
 // undermine the times it matters.
 func TestStatementReportsNoGapWhenLedgerAgrees(t *testing.T) {
 	dir := t.TempDir()
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	today := logDay(0)
 	writeLog(t, dir, today, []requestlog.Record{{
-		TS: today.Add(-2 * time.Hour), ClientToken: maskToken(testToken),
+		TS: today.Add(9 * time.Hour), ClientToken: maskToken(testToken),
 		Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 	}})
@@ -330,7 +374,7 @@ func TestStatementReportsNoGapWhenLedgerAgrees(t *testing.T) {
 	}
 	if _, err := sdb.ExecContext(ctx,
 		`INSERT INTO wallet_tx (token, kind, amount_usd, ref, note, created_at) VALUES (?, 'charge', ?, '', '', ?)`,
-		testToken, -1.0, today.Add(-90*time.Minute).Unix()); err != nil {
+		testToken, -1.0, today.Add(8*time.Hour).Unix()); err != nil {
 		t.Fatalf("seed charge: %v", err)
 	}
 
@@ -361,14 +405,13 @@ func TestStatementReportsNoGapWhenLedgerAgrees(t *testing.T) {
 func TestStatementByTargetLocatesWindow(t *testing.T) {
 	dir := t.TempDir()
 	masked := maskToken(testToken)
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	today := logDay(0)
 
 	// Three $1 (¥7) rows on three consecutive days.
 	for i := range 3 {
 		day := today.AddDate(0, 0, -i)
 		writeLog(t, dir, day, []requestlog.Record{{
-			TS: day.Add(-2 * time.Hour), ClientToken: masked,
+			TS: day.Add(9 * time.Hour), ClientToken: masked,
 			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 			CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 		}})
@@ -428,10 +471,9 @@ func TestStatementByTargetLocatesWindow(t *testing.T) {
 func TestStatementByTargetRejectsUnreachableSpend(t *testing.T) {
 	dir := t.TempDir()
 	masked := maskToken(testToken)
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	today := logDay(0)
 	writeLog(t, dir, today, []requestlog.Record{{
-		TS: today.Add(-time.Hour), ClientToken: masked,
+		TS: today.Add(10 * time.Hour), ClientToken: masked,
 		Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 		CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 	}})
@@ -518,10 +560,9 @@ func TestStatementRejectsAbsurdRange(t *testing.T) {
 func TestStatementRateNeverCollapsesToZero(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	dir := t.TempDir()
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	today := logDay(0)
 	writeLog(t, dir, today, []requestlog.Record{{
-		TS: today.Add(-time.Hour), ClientToken: maskToken(testToken),
+		TS: today.Add(10 * time.Hour), ClientToken: maskToken(testToken),
 		Provider: "openai", Model: "gpt-5.6-sol", AuthID: "a2", AuthKind: "apikey",
 		CostUSD: 40, BilledUSD: 2, Status: 200,
 	}})
@@ -565,10 +606,9 @@ func TestStatementRateNeverCollapsesToZero(t *testing.T) {
 // every row: two rows of the same dollar amount can never print differently.
 func TestStatementUsesConfiguredRateForEveryRow(t *testing.T) {
 	r, dir := statementFixture(t) // fallback_cny_per_usd = 7
-	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	today := logDay(0)
 	writeLog(t, dir, today, []requestlog.Record{{
-		TS: today.Add(-time.Hour), ClientToken: maskToken(testToken),
+		TS: today.Add(10 * time.Hour), ClientToken: maskToken(testToken),
 		Provider: "openai", Model: "gpt-5.6-sol", AuthID: "a2", AuthKind: "apikey",
 		CostUSD: 60, BilledUSD: 3, Status: 200,
 	}})
@@ -1011,10 +1051,9 @@ func TestSubCentLedgerGapIsNotReported(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			loc := requestlog.BucketLocation()
-			today := time.Now().In(loc)
+			today := logDay(0)
 			writeLog(t, dir, today, []requestlog.Record{{
-				TS: today.Add(-2 * time.Hour), ClientToken: maskToken(testToken),
+				TS: today.Add(9 * time.Hour), ClientToken: maskToken(testToken),
 				Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 				CostUSD: 20, BilledUSD: 1, Multiplier: 0.05, Status: 200,
 			}})
@@ -1033,7 +1072,7 @@ func TestSubCentLedgerGapIsNotReported(t *testing.T) {
 			}
 			if _, err := sdb.ExecContext(ctx,
 				`INSERT INTO wallet_tx (token, kind, amount_usd, ref, note, created_at) VALUES (?, 'charge', ?, '', '', ?)`,
-				testToken, -tc.chargeUSD, today.Add(-90*time.Minute).Unix()); err != nil {
+				testToken, -tc.chargeUSD, today.Add(8*time.Hour).Unix()); err != nil {
 				t.Fatalf("seed charge: %v", err)
 			}
 
@@ -1062,5 +1101,47 @@ func TestSubCentLedgerGapIsNotReported(t *testing.T) {
 					p.ChargedCNY, p.BilledCNY)
 			}
 		})
+	}
+}
+
+// TestFixtureRowsLandOnTheDayTheyClaim pins the two rules that make every
+// date-scoped assertion in this file mean anything, because getting either
+// wrong returns zero rows rather than an error.
+//
+// Both were broken at once. Rows were anchored at time.Now() minus a few
+// hours, which buckets to the previous display day for the first hours of each
+// day; and writeLog named the file from a single `day` argument in UTC, which
+// is the wrong date for a display zone east of UTC. The suite was red for two
+// hours a day in UTC and permanently red under Asia/Shanghai — and CI, which
+// runs build+vet and never go test, could not see either.
+func TestFixtureRowsLandOnTheDayTheyClaim(t *testing.T) {
+	loc := requestlog.BucketLocation()
+
+	// 1. logDay's instants sit on the day dayLabel names, in the display zone.
+	for _, off := range []int{0, -1, -2, -30} {
+		day := logDay(off)
+		if got := day.In(loc).Format("2006-01-02"); got != dayLabel(off) {
+			t.Errorf("logDay(%d) buckets to %s, dayLabel says %s", off, got, dayLabel(off))
+		}
+		// Fixtures offset FORWARD from the anchor; a whole working day of that
+		// has to stay on the same label.
+		if got := day.Add(12 * time.Hour).In(loc).Format("2006-01-02"); got != dayLabel(off) {
+			t.Errorf("logDay(%d)+12h left the day: %s vs %s", off, got, dayLabel(off))
+		}
+	}
+
+	// 2. writeLog files each row under its own UTC day — the production
+	// convention, and the only name the query's file prefilter will open.
+	dir := t.TempDir()
+	anchor := logDay(0)
+	writeLog(t, dir, anchor, []requestlog.Record{
+		{TS: anchor, ClientToken: maskToken(testToken), Status: 200},
+		{TS: anchor.Add(23 * time.Hour), ClientToken: maskToken(testToken), Status: 200},
+	})
+	for _, r := range []time.Time{anchor, anchor.Add(23 * time.Hour)} {
+		name := filepath.Join(dir, "requests-"+r.UTC().Format("2006-01-02")+".jsonl")
+		if _, err := os.Stat(name); err != nil {
+			t.Errorf("row at %s is not in %s: %v", r.UTC(), filepath.Base(name), err)
+		}
 	}
 }

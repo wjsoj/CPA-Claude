@@ -44,16 +44,31 @@ func wsUsageFixture(t *testing.T) (*gin.Engine, *gin.Engine, int64, string) {
 
 	dir := t.TempDir()
 	loc := requestlog.BucketLocation()
-	today := time.Now().In(loc)
+	// Both rows sit at the START of today in the log's display zone, not at
+	// time.Now() minus a few hours. Two callers read this fixture with
+	// incompatible windows — one asks for today alone, one asks for the
+	// month — and only an instant inside today satisfies both:
+	//
+	//   - now.Add(-2*time.Hour) buckets to YESTERDAY for the first two hours
+	//     of each display day, so the single-day query answered zero and the
+	//     suite went red for two hours a day (and green the other 22, which
+	//     is how it landed).
+	//   - anchoring on yesterday instead fixes that one and breaks the other
+	//     on the 1st of every month, when yesterday is last month.
+	//
+	// Midnight is the one instant that is always inside today, always inside
+	// this month, and always already elapsed.
+	yy, mm, dd := time.Now().In(loc).Date()
+	today := time.Date(yy, mm, dd, 0, 0, 0, 0, loc)
 	writeLog(t, dir, today, []requestlog.Record{
 		{
-			TS: today.Add(-2 * time.Hour), ClientToken: tokenmask.Mask(wsMemberToken),
+			TS: today, ClientToken: tokenmask.Mask(wsMemberToken),
 			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 			Input: 1000, Output: 200, CostUSD: 60, BilledUSD: 3, Status: 200,
 		},
 		{
 			// Another team on the same relay: never part of our totals.
-			TS: today.Add(-2 * time.Hour), ClientToken: tokenmask.Mask(wsOtherToken),
+			TS: today, ClientToken: tokenmask.Mask(wsOtherToken),
 			Provider: "anthropic", Model: "claude-opus-4-7", AuthID: "a1", AuthKind: "oauth",
 			CostUSD: 2000, BilledUSD: 100, Status: 200,
 		},
