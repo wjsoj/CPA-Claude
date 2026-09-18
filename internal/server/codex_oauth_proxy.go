@@ -18,6 +18,7 @@ import (
 
 	"github.com/wjsoj/cc-core/auth"
 	"github.com/wjsoj/cc-core/codexerr"
+	"github.com/wjsoj/cc-core/codeximage"
 	"github.com/wjsoj/cc-core/codexws"
 	"github.com/wjsoj/cc-core/downstream"
 	"github.com/wjsoj/cc-core/mimicry"
@@ -459,7 +460,38 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 	default:
 		// Non-streaming client: aggregate SSE into a single response object
 		// (mirrors CLIProxyAPI's CodexExecutor.Execute aggregation).
-		payload, aggShed, aerr := aggregateCodexResponseStream(resp.Body, &counts)
+		// Image generation keeps a non-streaming turn silent for a minute or
+		// more — past the common 60s client idle timeout. Once upstream starts
+		// generating, commit a 200 and heartbeat whitespace until the body is
+		// ready; a turn that never generates keeps its invisible failover.
+		ka := ccstream.NewJSONKeepalive(ctx, c.Writer)
+		upstreamHeader := resp.Header
+		payload, aggShed, aerr := aggregateCodexResponseStream(resp.Body, &counts, func() {
+			ka.Start(func() {
+				downstream.CopyResponseHeaders(c.Writer.Header(), upstreamHeader, time.Now())
+			})
+		})
+		if ka.Committed() && (aggShed != "" || aerr != nil) {
+			// Too late to fail over: the status is out. Say so in the body.
+			_ = resp.Body.Close()
+			status, reason := http.StatusBadGateway, "image generation interrupted"
+			if isClientDisconnect(ctx, aerr) {
+				status, reason = 499, "client canceled during image generation"
+				a.MarkClientCancel(reason)
+			} else if aggShed != "" {
+				reason = "upstream shed the turn during image generation"
+			}
+			ka.Fail("service_response_error", "The model service stopped before the image was finished. Please try again.")
+			log.Warnf("codex oauth: %s non-streaming image turn failed after commit (%s): %v %s", a.ID, time.Since(start).Round(time.Millisecond), aerr, aggShed)
+			s.emitLog(requestlog.Record{
+				Client: clientName, ClientToken: maskClientToken(clientToken), Provider: auth.ProviderOpenAI,
+				AuthID: a.ID, AuthLabel: a.Label, AuthKind: "oauth", Model: model,
+				Stream: stream, Path: path, Status: status, Attempts: attempts,
+				DurationMs: time.Since(start).Milliseconds(),
+				Error:      reason,
+			})
+			return false, true
+		}
 		if aggShed != "" {
 			// Upstream refused the turn for capacity/quota. Nothing was written,
 			// so this is a clean failover — and naming it separately keeps the
@@ -513,10 +545,9 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 		// Same allowlist as the non-streaming branch above. Content-Type is
 		// overwritten right after: this branch aggregates an SSE stream into a
 		// single JSON body, so the upstream's text/event-stream would be a lie.
-		downstream.CopyResponseHeaders(c.Writer.Header(), resp.Header, time.Now())
-		c.Writer.Header().Set("Content-Type", "application/json")
-		c.Writer.WriteHeader(http.StatusOK)
-		_, _ = c.Writer.Write(payload)
+		ka.Deliver(payload, func() {
+			downstream.CopyResponseHeaders(c.Writer.Header(), upstreamHeader, time.Now())
+		})
 	}
 	_ = resp.Body.Close()
 
@@ -578,7 +609,11 @@ func (s *Server) doForwardCodexOAuth(c *gin.Context, a *auth.Auth, path string, 
 // the response.output field if it arrived empty. Output shape matches
 // OpenAI's /v1/responses non-streaming reply: the bare `response` object
 // (id, object, output, usage, …) — not the SSE event envelope.
-func aggregateCodexResponseStream(r io.Reader, counts *usage.Counts) (out []byte, shed string, err error) {
+//
+// onGenerating, when given, runs once on the first image_generation_call
+// event — the caller's cue that this turn will be silent for a minute or more.
+func aggregateCodexResponseStream(r io.Reader, counts *usage.Counts, onGenerating ...func()) (out []byte, shed string, err error) {
+	generating := false
 	reader := newLineReader(r)
 	var byIndex []codexOutputSlot
 	var fallback []json.RawMessage
@@ -610,6 +645,14 @@ func aggregateCodexResponseStream(r io.Reader, counts *usage.Counts) (out []byte
 						Response    json.RawMessage `json:"response"`
 					}
 					if err := json.Unmarshal(payload, &ev); err == nil {
+						if !generating && codeximage.StartsGeneration(ev.Type, ev.Item) {
+							generating = true
+							for _, f := range onGenerating {
+								if f != nil {
+									f()
+								}
+							}
+						}
 						switch ev.Type {
 						case "response.output_item.done":
 							if len(ev.Item) > 0 {
@@ -1315,10 +1358,13 @@ func extractCodexBackendUsageFromJSON(body []byte) usage.Counts {
 	if u == nil {
 		u = wrap.Usage
 	}
-	if u == nil {
-		return usage.Counts{}
+	var c usage.Counts
+	if u != nil {
+		c = u.toCounts()
 	}
-	return u.toCounts()
+	// tool_usage.image_gen sits beside usage and bills at the image card;
+	// reading only usage gave every generated image away.
+	return usage.WithResponsesImageGen(c, body)
 }
 
 // isCodexCapacityError detects the upstream's "model is at capacity"
