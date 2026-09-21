@@ -220,32 +220,7 @@ func (s *Server) forward(c *gin.Context, provider, path string) {
 		}
 	}
 
-	// Fail fast when the route can't be served by any available credential.
-	// OAuth Codex credentials only speak /v1/responses — they can't serve
-	// /v1/chat/completions, and without this check the forward loop would
-	// cycle every OAuth cred (each returning retry=true), then surface a
-	// misleading 503 "all upstream credentials exhausted". If no API-key
-	// credential of this provider can serve the requested model, tell the
-	// client directly what's wrong.
-	//
-	// The token's own fallback opt-out lands here too: with it off, no API key
-	// is reachable however healthy the fleet is, so the request is just as
-	// unservable — and saying so up front beats cycling every OAuth credential
-	// to arrive at a 503 that never mentions the switch.
-	if auth.NormalizeProvider(provider) == auth.ProviderOpenAI && path == "/v1/chat/completions" &&
-		(!s.pool.HasAPIKeyFor(provider, clientGroup, model) || !s.allowAPIKeyFallback(c.Request.Context(), provider, clientToken)) {
-		msg := fmt.Sprintf("model %q is only available via /v1/responses on this server (no OpenAI-compatible API-key credential is configured for it); retry with the /v1/responses endpoint", model)
-		if !s.allowAPIKeyFallback(c.Request.Context(), provider, clientToken) && s.pool.HasAPIKeyFor(provider, clientGroup, model) {
-			msg = fmt.Sprintf("model %q is only reachable over /v1/chat/completions through upstream API keys that charge above your current rate, and this API key has opted out of those; either enable the upstream fallback in your wallet settings or use the /v1/responses endpoint", model)
-		}
-		c.AbortWithStatusJSON(400, gin.H{"error": msg})
-		s.emitLog(requestlog.Record{
-			Client: clientName, ClientToken: maskClientToken(clientToken), Provider: provider, Model: model,
-			Stream: peek.Stream, Path: path, Status: 400,
-			DurationMs: time.Since(start).Milliseconds(), Error: "route unsupported for available credentials",
-		})
-		return
-	}
+	// Codex OAuth serves Chat Completions through the shared Responses bridge.
 
 	// Rate limit (RPM) per client token. Sliding 60s window; scoped
 	// per-provider to match the inflight budget so Claude and Codex don't

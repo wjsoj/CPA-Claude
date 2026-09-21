@@ -49,11 +49,13 @@ across providers; credentials are strictly separated per upstream.
   counts per credential survive restarts in `state.json`.
 - **API-key fallback** — when every OAuth credential is saturated, quota-
   exceeded, or dead, requests fall through to the unlimited API-key pool.
-- **Codex passthrough** — OpenAI-format `/v1/chat/completions` and
+- **Codex API compatibility** — OpenAI-format `/v1/chat/completions` and
   `/v1/responses` on the Codex endpoint. API-key credentials forward to
   `api.openai.com`; OAuth (ChatGPT Plus/Pro/Team) credentials forward to
   `chatgpt.com/backend-api/codex/responses` with the session/account
-  headers the Codex CLI sends. `/v1/models` synthesizes the plan-tier
+  headers the Codex CLI sends. The shared cc-core adapter bridges Chat
+  Completions to Responses for OAuth, including streaming tool calls.
+  `/v1/models` synthesizes the plan-tier
   catalog per subscription.
 - **Per-client weekly budgets** — each access token can have a `weekly_usd`
   cap that applies across **both** providers. Spend is tracked by ISO
