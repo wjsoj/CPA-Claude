@@ -401,6 +401,7 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 			Provider: auth.ProviderOpenAI, AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
 			Model: model, Stream: stream, Path: path, Status: 502,
 			DurationMs: time.Since(start).Milliseconds(), Attempts: attempts, Error: err.Error(),
+			AttemptOnly: true,
 		})
 		return true, false
 	}
@@ -417,16 +418,18 @@ func (s *Server) doForwardCodex(c *gin.Context, a *auth.Auth, path string, body 
 	// two providers agree about which statuses are the client's own fault and
 	// must not be retried or counted against a credential.
 	if classifyUpstreamStatus(resp.StatusCode).retryable() {
+		ccstream.Decompress(resp)
 		errBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		log.Warnf("codex proxy(apikey): %s returned %d — rotating to next credential. body=%s", a.ID, resp.StatusCode, truncate(errBody, 500))
-		s.reportCodexAPIKeyFault(a, resp.StatusCode, parseRetryAfter(resp.Header))
+		s.reportCodexAPIKeyFault(a, resp.StatusCode, parseRetryAfter(resp.Header), errBody)
 		s.emitLog(requestlog.Record{
 			Client: clientName, ClientToken: maskClientToken(clientToken),
 			Provider: auth.ProviderOpenAI, AuthID: a.ID, AuthLabel: a.Label, AuthKind: "apikey",
 			Model: model, Stream: stream, Path: path, Status: resp.StatusCode,
 			DurationMs: time.Since(start).Milliseconds(), Attempts: attempts,
-			Error: fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate(errBody, 200)),
+			Error:       fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate(errBody, 200)),
+			AttemptOnly: true,
 		})
 		return true, false
 	}
@@ -629,8 +632,16 @@ const codexRelayBusyCooldown = 20 * time.Second
 //	5xx/transport/ → MarkFailure: pauses after a few in a row, then backs off
 //	contract        exponentially and probes itself back in
 //
+// ExplicitFailuresOnly relays skip ambiguous failures before this mapping.
 // None of these retire the channel; every pause expires on its own.
-func (s *Server) reportCodexAPIKeyFault(a *auth.Auth, status int, resetAt time.Time) {
+func (s *Server) reportCodexAPIKeyFault(a *auth.Auth, status int, resetAt time.Time, body ...[]byte) {
+	var payload []byte
+	if len(body) > 0 {
+		payload = body[0]
+	}
+	if !a.ShouldPauseForAPIKeyError(status, payload) {
+		return
+	}
 	if status == http.StatusTooManyRequests {
 		s.pool.ReportUpstreamError(a, status, resetAt)
 		return
