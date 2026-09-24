@@ -109,12 +109,15 @@ claude -p "检查代码风格问题"
 claude-haiku-4-5-20251001   claude-haiku-4-5
 claude-sonnet-4-6           claude-sonnet-5
 claude-opus-4-6  claude-opus-4-7  claude-opus-4-8  claude-opus-5
+claude-opus-5-5
 claude-fable-5
 ```
 
-切换方式：启动时 `claude --model claude-opus-5`，或会话中输入斜杠命令 `/model claude-sonnet-5`。
+Opus 5.5（`claude-opus-5-5`）标准价，单位为美元/百万 token：输入 $4、输出 $20、缓存读取 $0.20、5 分钟缓存写入 $5、1 小时缓存写入 $8。完整 1M 上下文同价，再按分组倍率结算。[官方 API 定价](https://platform.claude.com/docs/en/about-claude/pricing)。
 
-模型名可带后缀，会被正确识别并计费，例如 `claude-opus-5[1m]`（长上下文）。
+切换方式：启动时 `claude --model claude-opus-5-5`，或会话中输入斜杠命令 `/model claude-sonnet-5`。
+
+模型名可带后缀，会被正确识别并计费，例如 `claude-opus-5-5[1m]`（长上下文）。
 
 ## 七、直接调 API
 
